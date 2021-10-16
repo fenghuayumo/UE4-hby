@@ -1,0 +1,166 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	RayTracingVisualizeCommon.ush: common header used in multiple raytracing visualization shaders
+=============================================================================*/
+
+#pragma once
+
+// Make sure we recompile ray tracing shaders if the main shader version changes
+#include "/Engine/Public/ShaderVersion.ush"
+
+int ColorMap;
+uint Encoding;
+float Range;
+float RangeMin;
+
+// ColorMap coefficients for 6th order polynomials
+//  0 - custom
+//  1 - Jet
+//  2 - Turbo
+//  3 - Viridis
+//  4 - Plasma
+//  5 - Magma
+//  6 - Inferno
+//  7 - grayscale
+static const float3 ColorMap_c0[] =
+{
+	float3(-1.209469e-01, -4.056746e-03, -3.094675e-01),
+	float3(5.71853259e-03, 1.12621769e-02, 2.12100573e-01),
+	float3(-5.579363e-03, -4.137525e-03, -1.216424e-01),
+	float3(4.481880e-02, 4.068448e-03, 7.730414e-02),
+	float3(5.558519e-03, -2.327388e-03, 2.509520e-01),
+	float3(6.557318e-04, 3.312990e-05, 2.438783e-03),
+	float3(1.286979e-02, -5.336056e-03, 6.869656e-03),
+	float3(0.0,0.0,0.0)
+};
+static const float3 ColorMap_c1[] =
+{
+	float3(5.401837e+00, 1.795689e+00, 1.434830e+01),
+	float3(-8.80303969e-01, 5.68211580e-01, 5.99919782e+00),
+	float3(1.557269e+00, 1.030624e+00, 1.071648e+01),
+	float3(7.510120e-01, -2.255137e-01, 1.391017e+00),
+	float3(6.679421e-02, 1.290838e-01, 8.031468e-01),
+	float3(-1.775168e-01, 6.385900e-02, -5.069721e-01),
+	float3(-7.420171e-01, 3.134422e-01, -7.245281e-01),
+	float3(1.0,1.0,1.0)
+};
+static const float3 ColorMap_c2[] =
+{
+	float3(-5.011051e+01, -4.488215e+01, -5.000071e+01),
+	float3(1.74565572e+01, -2.58230594e+01, 1.24849921e+01),
+	float3(-5.912589e+00, -8.004129e+00, -1.945907e+01),
+	float3(-8.337055e+00, 4.203812e+00, -3.731913e+00),
+	float3(4.062327e+00, -1.331517e+00, 4.729676e+00),
+	float3(3.496375e+00, -1.307794e+00, 1.298881e+01),
+	float3(9.238520e+00, -4.004418e+00, 1.741805e+01),
+	float3(0.0,0.0,0.0)
+};
+static const float3 ColorMap_c3[] =
+{
+	float3(1.588426e+02, 3.019145e+02, 2.578334e+00),
+	float3(-1.10976555e+02, 2.06240399e+02, -1.64012953e+02),
+	float3(-3.073665e+01, 1.060547e+02, -9.989593e+01),
+	float3(3.417716e+01, -1.307976e+01, 5.228248e+00),
+	float3(-4.438994e+00, 4.434298e+00, -3.870560e+01),
+	float3(-1.723567e+01, 9.292146e+00, -4.427601e+01),
+	float3(-3.726176e+01, 2.030816e+01, -7.757465e+01),
+	float3(0.0,0.0,0.0)
+};
+static const float3 ColorMap_c4[] =
+{
+	float3(-1.881534e+02, -6.903112e+02, 1.872940e+02),
+	float3(2.82570073e+02, -4.85745110e+02, 3.67096235e+02),
+	float3(1.709895e+02, -3.028369e+02, 3.488456e+02),
+	float3(-6.769169e+01, 2.475470e+01, -2.557868e+00),
+	float3(1.818906e+00, -5.313244e+00, 8.039553e+01),
+	float3(6.061986e+01, -2.601883e+01, 5.870699e+01),
+	float3(9.329325e+01, -4.700606e+01, 1.456759e+02),
+	float3(0.0,0.0,0.0)
+};
+static const float3 ColorMap_c5[] =
+{
+	float3(7.526137e+01, 6.472247e+02, -2.604677e+02),
+	float3(-2.90397700e+02, 4.53231768e+02, -3.24208165e+02),
+	float3(-2.333419e+02, 3.164157e+02, -3.781070e+02),
+	float3(6.248435e+01, -2.159267e+01, -3.758402e+00),
+	float3(1.807888e-01, 3.869199e+00, -6.955358e+01),
+	float3(-7.807415e+01, 3.157204e+01, -3.383056e+01),
+	float3(-1.041660e+02, 5.073707e+01, -1.281834e+02),
+	float3(0.0,0.0,0.0)
+};
+static const float3 ColorMap_c6[] =
+{
+	float3(7.670457e-12, -2.157416e+02, 1.078708e+02),
+	float3(1.02434311e+02, -1.48469580e+02, 1.02434311e+02),
+	float3(9.772708e+01, -1.126874e+02, 1.381348e+02),
+	float3(-2.043446e+01, 6.736205e+00, 3.374172e+00),
+	float3(-8.329828e-01, -8.361952e-01, 2.210479e+01),
+	float3(3.237084e+01, -1.263177e+01, 7.446733e+00),
+	float3(4.056660e+01, -1.933482e+01, 4.376961e+01),
+	float3(0.0,0.0,0.0)
+};
+
+float3 ApplyColorRamp(float T)
+{
+	T = clamp(T, 0.0, 1.0);
+	float3 Result = T;
+
+	int Mode = ColorMap;
+
+#if 1
+	Mode = clamp(Mode, 0, 7);
+	const float3 c0 = ColorMap_c0[Mode];
+	const float3 c1 = ColorMap_c1[Mode];
+	const float3 c2 = ColorMap_c2[Mode];
+	const float3 c3 = ColorMap_c3[Mode];
+	const float3 c4 = ColorMap_c4[Mode];
+	const float3 c5 = ColorMap_c5[Mode];
+	const float3 c6 = ColorMap_c6[Mode];
+
+	Result = c0 + T * (c1 + T * (c2 + T * (c3 + T * (c4 + T * (c5 + T * c6)))));
+#else
+	if (Mode == 0)
+	{
+		const float3 colors[] =
+		{
+			{0,0,0},
+			{0,0,1},
+			{0,1,0},
+			{1,1,0},
+			{1,0,0},
+			{1,0,1}
+		};
+
+		T *= 5.0;
+
+		int I0 = floor(T);
+		int I1 = min(I0 + 1, 5);
+		T = T - I0;
+
+		T = smoothstep(0.0, 1.0, T);
+
+		Result = lerp(colors[I0], colors[I1], T);
+	}
+#endif
+
+	Result = saturate(Result);
+
+	return Result;
+}
+
+float Remap(float x)
+{
+	float T = (x - RangeMin) / (Range - RangeMin);
+
+	if (Encoding == 1)
+	{
+		T = log2(1.0 + T);;
+	}
+	else if (Encoding == 2)
+	{
+		T = exp2(T) - 1.0f;
+	}
+
+	return T;
+}

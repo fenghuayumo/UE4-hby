@@ -1,0 +1,112 @@
+#include "../Common.ush"
+#include "RayTracingCommon.ush"
+#include "RayTracingDirectionalLight.ush"
+#include "RayTracingRectLight.ush"
+#include "RayTracingSphereLight.ush"
+#include "RayTracingSpotLight.ush"
+#include "RayTracingPointLight.ush"
+
+RaytracingAccelerationStructure TLAS;
+RWTexture3D<float> RWVoxelShadowInfo;
+float3 LightDirection;
+float4x4 UnjitteredClipToTranslatedWorld;    
+float3 FrameJitterOffset; 
+float ZDispatchSize;
+
+float ComputeDepthFromZSlice(float ZSlice)
+{
+	float SliceDepth = (exp2(ZSlice / VolumetricFog.GridZParams.z) - VolumetricFog.GridZParams.y) / VolumetricFog.GridZParams.x;
+	return SliceDepth;
+}
+
+float3 ComputeCellWorldPosition(uint3 GridCoordinate, float3 CellOffset, out float SceneDepth)
+{
+	float2 VolumeUV = (GridCoordinate.xy + CellOffset.xy) / VolumetricFog.GridSize.xy;
+	float2 VolumeNDC = (VolumeUV * 2 - 1) * float2(1, -1);
+
+	SceneDepth = ComputeDepthFromZSlice(GridCoordinate.z + CellOffset.z);
+
+	float TileDeviceZ = ConvertToDeviceZ(SceneDepth);
+	float4 CenterPosition = mul(float4(VolumeNDC, TileDeviceZ, 1), UnjitteredClipToTranslatedWorld);
+	return CenterPosition.xyz / CenterPosition.w - View.PreViewTranslation;
+}
+
+float3 ComputeCellWorldPosition(uint3 GridCoordinate, float3 CellOffset)
+{
+	float Unused;
+	return ComputeCellWorldPosition(GridCoordinate, CellOffset, Unused);
+}
+
+uint3 ComputeVoxelIndex(uint3 Coords2D, uint ZSize)
+{
+	uint3 result = Coords2D;
+	result.z = result.y % ZSize;
+	result.y = result.y / ZSize;
+	return result;
+}
+
+RAY_TRACING_ENTRY_RAYGEN(VoxelShadowRGS)
+{
+	uint3 VoxelIndex = ComputeVoxelIndex(DispatchRaysIndex(), ZDispatchSize);
+	uint RayFlags = 0;
+	const uint RaytracingMask = RAY_TRACING_MASK_SHADOW | RAY_TRACING_MASK_THIN_SHADOW;
+	uint2 UnusedPixelCoord = float2(0, 0);
+
+	float3 WorldPosition = ComputeCellWorldPosition(VoxelIndex, FrameJitterOffset);
+	RayDesc Ray;
+	Ray.Origin = WorldPosition;
+    Ray.Direction = LightDirection;
+	Ray.TMin = 0.0;
+	Ray.TMax = 1.0e27;
+
+#if !ENABLE_TWO_SIDED_GEOMETRY
+	RayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+#endif
+
+	FMinimalPayload MinimalPayload = TraceVisibilityRay(
+		TLAS,
+		RayFlags,
+		RaytracingMask,
+		UnusedPixelCoord,
+		Ray);
+
+	RWVoxelShadowInfo[VoxelIndex] = MinimalPayload.IsMiss() ? 1.0 : 0.0;
+}
+
+RWTexture3D<float> RWVoxelShadowInjectionInfo;
+float3 LightPosition;
+uint   bPointLight;
+uint   bSpotLight;
+
+RAY_TRACING_ENTRY_RAYGEN(VoxelShadowInjectionRGS)
+{
+	uint3 VoxelIndex = ComputeVoxelIndex(DispatchRaysIndex(), ZDispatchSize);
+	uint RayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+	const uint RaytracingMask = RAY_TRACING_MASK_SHADOW | RAY_TRACING_MASK_THIN_SHADOW;
+	uint2 UnusedPixelCoord = float2(0, 0);
+
+	float3 WorldPosition = ComputeCellWorldPosition(VoxelIndex, FrameJitterOffset);
+	float3 LightVector = LightPosition - WorldPosition;
+	bool bDirectional = !bPointLight && !bSpotLight;
+
+	RayDesc Ray;
+	Ray.Origin = WorldPosition;
+    Ray.Direction = bDirectional ? LightDirection : normalize(LightVector);
+	Ray.TMin = 0.0;
+	Ray.TMax = bDirectional ? 1.0e27 : length(LightVector);
+
+#if !ENABLE_TWO_SIDED_GEOMETRY
+	RayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+#endif
+
+	FMinimalPayload MinimalPayload = TraceVisibilityRay(
+		TLAS,
+		RayFlags,
+		RaytracingMask,
+		UnusedPixelCoord,
+		Ray);
+
+	float ShadowFactor = MinimalPayload.IsMiss() ? 1.0 : 0.0;
+
+	RWVoxelShadowInjectionInfo[VoxelIndex] = ShadowFactor;
+}

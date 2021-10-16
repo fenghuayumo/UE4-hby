@@ -1,0 +1,142 @@
+
+
+#include "../Common.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../SceneTextureParameters.ush"
+#include "../MiniFontCommon.ush"
+
+#include "RayTracingVisualizeCommon.ush"
+
+RWTexture2D<float4> ColorOutput;
+Texture2D<uint> RayTiming;
+
+// Borrowed from PostProcessCommon.ush
+// for rectangles with border
+// @return >=0, 0 if inside
+float ComputeDistanceToRect(int2 Pos, int2 LeftTop, int2 Extent, bool bRoundBorders = true)
+{
+	int2 RightBottom = LeftTop + Extent - 1;
+
+	// use int for more precision
+	int2 Rel = max(int2(0, 0), Pos - RightBottom) + max(int2(0, 0), LeftTop - Pos);
+
+	if (bRoundBorders)
+	{
+		// euclidian distance (round corners)
+		return length((float2)Rel);
+	}
+	else
+	{
+		// manhatten distance (90 degree corners)
+		return max(Rel.x, Rel.y);
+	}
+}
+
+float3 GetUIColor()
+{
+	float3 Color = float3(0.1, 0.8, 0.1);
+	
+	// if some map looks bad with this color, override it to something else
+
+	return Color;
+}
+
+// for printf debugging in the shader, has to be positive (other abs is taken)
+// outputs a float number in the form: xxx.yk
+// @param LeftTop - in pixels
+void PrintFloatK(int2 PixelPos, inout float3 OutColor, float3 FontColor, int2 LeftTop, float Number)
+{
+	Number = abs(Number) / 1000.0f + 0.05; 
+	int2 Cursor = LeftTop;
+
+	// before period
+	FLATTEN
+	if (Number >= 100)
+	{
+		PrintCharacter(PixelPos, OutColor, FontColor, Cursor, ExtractDigitFromFloat(Number, 100));
+	}
+	FLATTEN
+	if (Number >= 10)
+	{
+		PrintCharacter(PixelPos, OutColor, FontColor, Cursor, ExtractDigitFromFloat(Number, 10));
+	}
+	PrintCharacter(PixelPos, OutColor, FontColor, Cursor, ExtractDigitFromFloat(Number, 1));
+	// period
+	PrintCharacter(PixelPos, OutColor, FontColor, Cursor, _DOT_);
+	// after period
+	PrintCharacter(PixelPos, OutColor, FontColor, Cursor, ExtractDigitFromFloat(Number, 0.1));
+	// k
+	PrintCharacter(PixelPos, OutColor, FontColor, Cursor, _K_);
+}
+
+
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void VisualizeTiming(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint2 PixelCoord = DispatchThreadId.xy + View.ViewRectMin;
+
+	if (any(DispatchThreadId.xy >= View.ViewSizeAndInvSize.xy))
+	{
+		return;
+	}
+
+	float2 InvBufferSize = View.ViewSizeAndInvSize.zw;
+	float2 BufferUV = (float2(DispatchThreadId.xy) + 0.5) * InvBufferSize;
+
+	float CumulativeTime = RayTiming.Load(int3(PixelCoord, 0));
+
+	float T = Remap(CumulativeTime);
+	
+
+	float3 Color = ApplyColorRamp(T);
+
+	const float2 ScalePos = float2(0.1, 0.90);
+	const float2 ScaleSize = float2(0.8, 0.05);
+	const float2 ScalePad = float2(0.02, 0.0);
+	const int2 PixTopLeft = int2((ScalePos - ScalePad)*View.ViewSizeAndInvSize.xy) + View.ViewRectMin;
+	const int2 PixExtent = int2((ScaleSize + 2.0 * ScalePad)*View.ViewSizeAndInvSize.xy);
+
+	float3 LabelColor = GetUIColor();
+
+	float RectDistance = ComputeDistanceToRect(PixelCoord, PixTopLeft, PixExtent);
+
+	if (RectDistance < 3.0)
+	{
+		Color = LabelColor;
+	}
+
+	if (RectDistance <= 0.0)
+	{
+
+		if (all(BufferUV > ScalePos - ScalePad) && all(BufferUV < ScalePos + ScaleSize + ScalePad))
+		{
+			Color = ApplyColorRamp((BufferUV.x - ScalePos.x) / ScaleSize.x);
+
+			// mark a bottom region as black to place the scale labels 
+			if (BufferUV.y > ScalePos.y + ScaleSize.y - View.BufferSizeAndInvSize.w * 12)
+			{
+				Color = float3(0, 0, 0);
+			}
+		}
+
+		for (int i = 0; i < 5; i++)
+		{
+			float Value = lerp(RangeMin, Range, i / 4.0f);
+
+			float T = Remap(Value);
+
+			// Place the values at their mapped location and the bottom of the scale (in the black region)
+			float2 LabelUVCoord = float2(lerp(ScalePos.x, ScalePos.x + ScaleSize.x, T), ScalePos.y + ScaleSize.y);
+			float2 LabelPixCoord = LabelUVCoord * View.ViewSizeAndInvSize.xy + View.ViewRectMin;
+
+			// compute a digit count, so we can center the values (printed in thousands)
+			float DigitCount = max(floor(log10(max(Value, 1.0))) + 1.0, 4.0);
+
+			PrintFloatK(PixelCoord, Color, LabelColor, int2(LabelPixCoord) + int2(-8.0 * DigitCount * 0.5, -10), Value);
+		}
+	}
+
+	ColorOutput[PixelCoord] = float4(Color,1);
+
+}

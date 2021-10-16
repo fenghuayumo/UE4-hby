@@ -1,0 +1,200 @@
+
+
+#include "../Common.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../SceneTextureParameters.ush"
+#include "../MiniFontCommon.ush"
+#include "RayTracingCommon.ush"
+#include "RayTracingHitGroupCommon.ush"
+#include "RayTracingVisualizeCommon.ush"
+
+uint Mode;
+
+RaytracingAccelerationStructure TLAS;
+RWTexture2D<float4> ColorOutput;
+
+struct FBVHAttributes
+{
+	// Placeholder
+	uint2 Data;
+};
+
+// inherit from minimal payload, to reserve the HitT member that the default miss shader uses 
+struct FVisBVHPayload : FMinimalPayload
+{
+	float NestingLevel;
+};
+
+[shader("intersection")]
+void VisualizeBVHIS()
+{
+	FBVHAttributes Attributes = (FBVHAttributes) 0 ;
+	// if we're in the node we've hit, since we're counting nodes
+	ReportHit( RayTMin(), 0, Attributes);
+}
+
+[shader("anyhit")]
+void VisualizeBVHAHS(inout FVisBVHPayload Payload, in FBVHAttributes Attributes)
+{
+	// requires that AHS be set to not duplicate hits
+	Payload.NestingLevel += 1.0;
+
+	
+	IgnoreHit(); // need all the hits along the ray
+}
+
+[shader("closesthit")]
+void VisualizeBVHCHS(inout FVisBVHPayload Payload, in FBVHAttributes Attributes)
+{
+	//No-op, all work occurs in the AHS
+}
+
+// Borrowed from PostProcessCommon.ush
+// for rectangles with border
+// @return >=0, 0 if inside
+float ComputeDistanceToRect(int2 Pos, int2 LeftTop, int2 Extent, bool bRoundBorders = true)
+{
+	int2 RightBottom = LeftTop + Extent - 1;
+
+	// use int for more precision
+	int2 Rel = max(int2(0, 0), Pos - RightBottom) + max(int2(0, 0), LeftTop - Pos);
+
+	if (bRoundBorders)
+	{
+		// euclidian distance (round corners)
+		return length((float2)Rel);
+	}
+	else
+	{
+		// manhatten distance (90 degree corners)
+		return max(Rel.x, Rel.y);
+	}
+}
+
+float3 GetUIColor()
+{
+	float3 Color = float3(0.1, 0.8, 0.1);
+	
+	// if some map looks bad with this color, override it to something else
+
+	return Color;
+}
+
+
+[shader("raygeneration")]
+void VisualizeBVHRGS()
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy + View.ViewRectMin;
+
+	// Get G-Buffer surface data
+	float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
+	float2 BufferUV = (float2(PixelCoord) + 0.5) * InvBufferSize;
+	float DeviceZ = SampleDeviceZFromSceneTextures(BufferUV);
+
+	float3 WorldPosition = ReconstructWorldPositionFromDeviceZ(PixelCoord, DeviceZ);
+
+	// Mask out depth values that are infinitely far away
+	bool IsFiniteDepth = DeviceZ > 0.0;
+
+
+	RayDesc Ray = (RayDesc)0;
+
+	if (Mode == 0)
+	{
+		// count nesting level of AABBs for points in the framebuffer
+		// creates ray at point, with tiny length into the surface
+		float3 Direction = -normalize(WorldPosition - View.WorldCameraOrigin);
+		Ray.Origin = WorldPosition - Direction * 0.01;
+		Ray.Direction = -normalize(WorldPosition - View.WorldCameraOrigin);
+		Ray.TMin = 0.000;
+		Ray.TMax = 0.02f;
+	}
+	else if (Mode == 1)
+	{
+		// count AABBs traversed from the view to the point in the scene
+		Ray.Origin = View.WorldCameraOrigin;
+		float3 Direction = WorldPosition - View.WorldCameraOrigin;
+		Ray.Direction = normalize(Direction);
+		Ray.TMin = 0.0f;
+		Ray.TMax = length(Direction);
+	}
+
+	FVisBVHPayload Payload = (FVisBVHPayload)0;
+
+	TraceRay(
+		TLAS,      // AccelerationStructure
+		0,
+		0xff,     
+		0, // RayContributionToHitGroupIndex
+		1,   // MultiplierForGeometryContributionToShaderIndex
+		0,         // MissShaderIndex
+		Ray,       // RayDesc
+		Payload    // Payload
+	);
+
+
+	float T = Remap(Payload.NestingLevel);
+	
+
+	float3 Color = ApplyColorRamp(T);
+
+	// Display simple scale
+	float2 InvViewSize = View.ViewSizeAndInvSize.zw;
+	float2 ViewUV = (float2(DispatchRaysIndex().xy) + 0.5) * InvViewSize;
+
+	const float2 ScalePos = float2(0.1, 0.90);
+	const float2 ScaleSize = float2(0.8, 0.05);
+	const float2 ScalePad = float2(0.01, 0.0);
+	const int2 PixTopLeft = int2((ScalePos - ScalePad)*View.ViewSizeAndInvSize.xy + View.ViewRectMin);
+	const int2 PixExtent = int2((ScaleSize + 2.0 * ScalePad)*View.ViewSizeAndInvSize.xy);
+
+	float3 LabelColor = GetUIColor();
+
+	float RectDistance = ComputeDistanceToRect(PixelCoord, PixTopLeft, PixExtent);
+
+	if (RectDistance < 3.0)
+	{
+		Color = LabelColor;
+	}
+
+	if (RectDistance <= 0.0)
+	{
+
+		if (all(ViewUV > ScalePos - ScalePad) && all(ViewUV < ScalePos + ScaleSize + ScalePad))
+		{
+			Color = ApplyColorRamp((ViewUV.x - ScalePos.x) / ScaleSize.x);
+
+			// mark a bottom region as black to place the scale labels 
+			if (ViewUV.y > ScalePos.y + ScaleSize.y - View.BufferSizeAndInvSize.w * 12)
+			{
+				Color = float3(0, 0, 0);
+			}
+		}
+
+		for (int i = 0; i < 5; i++)
+		{
+			float Value = lerp(RangeMin, Range, i / 4.0f);
+
+			float T = Remap(Value);
+
+			// Place the values at their mapped location and the bottom of the scale (in the black region)
+			float2 LabelUVCoord = float2(lerp(ScalePos.x, ScalePos.x + ScaleSize.x, T), ScalePos.y + ScaleSize.y);
+			float2 LabelPixCoord = LabelUVCoord * View.ViewSizeAndInvSize.xy + View.ViewRectMin;
+
+			// compute a digit count, so we can center the values
+			float DigitCount = floor(log10(max(Value, 1.0))) + 3.0;
+
+			PrintSmallFloat(PixelCoord, Color, LabelColor, int2(LabelPixCoord) + int2(-8.0 * DigitCount * 0.5, -10), Value);
+		}
+	}
+
+	ColorOutput[PixelCoord] = float4(Color,1);
+
+}
+
+RAY_TRACING_ENTRY_MISS(VisualizeBVHMS,
+	FVisBVHPayload, Payload)
+{
+	Payload.SetMiss();
+}
+

@@ -1,0 +1,939 @@
+/*
+* Copyright (c) 2021 NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA Corporation and its licensors retain all intellectual property and proprietary
+* rights in and to this software, related documentation and any modifications thereto.
+* Any use, reproduction, disclosure or distribution of this software and related
+* documentation without an express license agreement from NVIDIA Corporation is strictly
+* prohibited.
+*
+* TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED *AS IS*
+* AND NVIDIA AND ITS SUPPLIERS DISCLAIM ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
+* INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+* PARTICULAR PURPOSE.  IN NO EVENT SHALL NVIDIA OR ITS SUPPLIERS BE LIABLE FOR ANY
+* SPECIAL, INCIDENTAL, INDIRECT, OR CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT
+* LIMITATION, DAMAGES FOR LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF
+* BUSINESS INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR
+* INABILITY TO USE THIS SOFTWARE, EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF
+* SUCH DAMAGES.
+*/
+
+#pragma once
+
+//Packed light sampling is similar, but not quite identical to  packed ray traced light data
+
+#include "../DeferredLightingCommon.ush"
+#include "../LightShaderParameters.ush"
+
+#include "../RayTracing/RayTracingDirectionalLight.ush"
+#include "../RayTracing/RayTracingRectLight.ush"
+#include "../RayTracing/RayTracingSphereLight.ush"
+#include "../RayTracing/RayTracingSpotLight.ush"
+#include "../RayTracing/RayTracingPointLight.ush"
+
+// Following code is forked from RayTracingLightingCommon
+
+// Light types: should match SceneTypes.h until there is a common header
+#define LIGHT_TYPE_DIRECTIONAL		0 
+#define LIGHT_TYPE_POINT			1 
+#define LIGHT_TYPE_SPOT				2 
+#define LIGHT_TYPE_RECT				3 
+#define LIGHT_TYPE_MAX				4 
+
+#ifndef USE_COMPRESSED_LIGHT_DATA
+#define USE_COMPRESSED_LIGHT_DATA	0
+#endif
+
+// This define enables the 4.27 path tracing derived light sampling solution
+#define USE_SAMPLED_LIGHTING	1
+
+//What version of the engine the RTXDI code is supporting
+#ifndef RTXDI_INTEGRATION_VERSION 
+#define RTXDI_INTEGRATION_VERSION 4260
+#endif
+
+// The following functions are new to the shader library in 4.27
+// Sampled lighting works with the 4.27 style path traced lighting, so utilizes them
+#if RTXDI_INTEGRATION_VERSION < 4270
+/*
+ * code from 4.27 MonteCarlo.ush
+*/
+float UniformConeSolidAngle(float SinThetaMax2)
+{
+	float OneMinusCosThetaMax = SinThetaMax2 < 0.01 ? SinThetaMax2 * (0.5 + 0.125 * SinThetaMax2) : 1 - sqrt(1 - SinThetaMax2);
+	return 2 * PI * OneMinusCosThetaMax;
+}
+
+// Same as the function above, but uses SinThetaMax^2 as the parameter
+// so that the solid angle can be computed more accurately for very small angles
+// The caller is expected to ensure that SinThetaMax2 is <= 1
+float4 UniformSampleConeRobust(float2 E, float SinThetaMax2)
+{
+	float Phi = 2 * PI * E.x;
+	// The expression 1-sqrt(1-x) is susceptible to catastrophic cancelation.
+	// Instead, use a series expansion about 0 which is accurate within 10^-7
+	// and much more numerically stable.
+	float OneMinusCosThetaMax = SinThetaMax2 < 0.01 ? SinThetaMax2 * (0.5 + 0.125 * SinThetaMax2) : 1 - sqrt(1 - SinThetaMax2);
+
+	float CosTheta = 1 - OneMinusCosThetaMax * E.y;
+	float SinTheta = sqrt(1 - CosTheta * CosTheta);
+
+	float3 L;
+	L.x = SinTheta * cos(Phi);
+	L.y = SinTheta * sin(Phi);
+	L.z = CosTheta;
+	float PDF = 1.0 / (2 * PI * OneMinusCosThetaMax);
+
+	return float4(L, PDF);
+}
+
+/*
+ * Code from 4.27 CapsuleLightSampling
+*/
+float SqrtOneMinusX(float x)
+{
+	return x < 0.01 ? 1 - x * (0.5 + x * 0.125) : sqrt(1 - x);
+}
+
+// The footprint of a capsule can be bounded by either a rectangle or a cone
+// This class holds both and will do sampling from whichever has the smallest solidangle
+struct FCapsuleSphericalBounds
+{
+	FSphericalRect SphericalRect;
+	float3 ConeAxis;
+	float ConeSinThetaMax2;
+	float ConeSolidAngle;
+};
+
+
+// return the smallest of the two possible bounding shapes
+float GetCapsuleBoundsSolidAngle(FCapsuleSphericalBounds Bounds)
+{
+	return min(Bounds.SphericalRect.SolidAngle, Bounds.ConeSolidAngle);
+}
+
+// return world space direction within the cone and solidangle
+float4 SampleCapsuleBounds(FCapsuleSphericalBounds Bounds, float2 E)
+{
+	if (Bounds.ConeSolidAngle < Bounds.SphericalRect.SolidAngle)
+	{
+		return float4(TangentToWorld(UniformSampleConeRobust(E, Bounds.ConeSinThetaMax2).xyz, Bounds.ConeAxis), Bounds.ConeSolidAngle);
+	}
+	else
+	{
+		return float4(normalize(UniformSampleSphericalRect(E, Bounds.SphericalRect)), Bounds.SphericalRect.SolidAngle);
+	}
+}
+
+// Given a bounding rectangle of a capsule, compute a bounding cone
+FCapsuleSphericalBounds CapsuleGetSphericalBounds(float3 Origin, float3 Axis, float Radius, float Length)
+{
+	float h = dot(Axis, Origin);
+	float3 ClosestPointOnAxis = Origin - Axis * h;
+
+	float DistanceToAxisSqr = dot(ClosestPointOnAxis, ClosestPointOnAxis);
+	float RadiusSqr = Pow2(Radius);
+
+	if (DistanceToAxisSqr <= RadiusSqr)
+	{
+		// we are inside the infinite cylinder - only one of the caps can be visible
+		float3 CapCenter = Origin - Axis * Length * 0.5 * sign(h);
+		float LightDistanceSquared = dot(CapCenter, CapCenter);
+		float SinThetaMax2 = saturate(RadiusSqr / LightDistanceSquared);
+
+		FCapsuleSphericalBounds Result;
+		Result.SphericalRect = (FSphericalRect)0;
+		Result.SphericalRect.SolidAngle = POSITIVE_INFINITY; // make sure we don't pick this
+		Result.ConeAxis = normalize(CapCenter);
+		Result.ConeSinThetaMax2 = SinThetaMax2;
+		Result.ConeSolidAngle = UniformConeSolidAngle(SinThetaMax2);
+		return Result;
+	}
+
+	// we are outside the infinite cylinder, build a bounding rectangle
+	FRect Rect;
+	Rect.Origin = Origin;
+	Rect.Axis[1] = Axis;
+	Rect.Axis[2] = normalize(-ClosestPointOnAxis);
+	Rect.Axis[0] = cross(Rect.Axis[1], Rect.Axis[2]);
+
+	float SinCylinderAngle = Radius * rsqrt(DistanceToAxisSqr);
+	// width * cos(angle) = 2r 
+	float RectRadius = Radius * rsqrt(1 - Pow2(SinCylinderAngle));
+
+	float Extension[2];
+	for (int i = 0; i < 2; i++)
+	{
+		float hi = Length * (i > 0 ? 0.5 : -0.5);
+		float3 PointPos = Origin + Axis * hi;
+
+		float InverseDist = rsqrt(dot(PointPos, PointPos));
+
+		float SinSphereAngle = saturate(Radius * InverseDist);
+		float CosSphereAngle = SqrtOneMinusX(Pow2(SinSphereAngle));
+
+		float CosAxisAngle = -dot(Axis, PointPos) * InverseDist;
+		CosAxisAngle = sign(CosAxisAngle * hi) * saturate(abs(CosAxisAngle));
+		float SinAxisAngle = SqrtOneMinusX(Pow2(CosAxisAngle));
+
+		float CosExtension = SinAxisAngle * CosSphereAngle + CosAxisAngle * SinSphereAngle;
+		Extension[i] = Radius / CosExtension;
+	}
+
+	float Translate = 0.5 * (Extension[1] - Extension[0]);
+	float Extend = 0.5 * (Extension[0] + Extension[1]);
+
+	Rect.Origin += Translate * Rect.Axis[1];
+	Rect.Extent = float2(RectRadius, 0.5 * Length + Extend);
+
+	// get a bounding cone from the bounding rectangle
+	float3 R0 = Rect.Origin - Rect.Axis[1] * Rect.Extent.y;
+	float3 R1 = Rect.Origin + Rect.Axis[1] * Rect.Extent.y;
+	float InvDistR0 = rsqrt(dot(R0, R0));
+	float InvDistR1 = rsqrt(dot(R1, R1));
+
+	FCapsuleSphericalBounds Result;
+	Result.SphericalRect = BuildSphericalRect(Rect);
+	Result.ConeAxis = normalize(lerp(R0, R1, saturate(InvDistR1 / (InvDistR0 + InvDistR1))));
+	Result.ConeSinThetaMax2 = saturate(0.5 - 0.5 * dot(R0, R1) * InvDistR0 * InvDistR1); // sin(x/2)^2 = (1-cos(x))/2
+	Result.ConeSolidAngle = UniformConeSolidAngle(Result.ConeSinThetaMax2);
+	return Result;
+}
+
+// simpler intersection test for rays that are likely to intersect
+// returned intersection distance is approximate
+float CapsuleTest(float3 Rd, float3 Center, float3 Axis, float Radius2, float Length)
+{
+	// Shortest distance
+	float B = dot(Rd, Axis);
+	float t = clamp(dot(Center, B * Rd - Axis) / (1 - B * B), -0.5 * Length, 0.5 * Length);
+	float3 ToSphere = Center + t * Axis;
+	float3 C = cross(Rd, ToSphere);
+	return dot(C, C) <= Radius2 ? length(ToSphere) : -1.0;
+}
+
+bool IsRectVisible(FRect Rect)
+{
+	// No-visible rect light due to barn door occlusion
+	return Rect.Extent.x != 0 && Rect.Extent.y != 0;
+}
+#endif
+
+//Must match definition in RayTracingLighting.h and decoding in GetRayTracingLightData
+struct FPackedSampledLightingData
+{
+	uint Type;
+	int LightProfileIndex;
+	uint RectLightTextureIndex;
+	uint FlagsLightFunctionAndMask;
+	float3 LightPosition;
+	float InvRadius;
+	float3 Direction;
+	float FalloffExponent;
+	float3 LightColor;
+	float SpecularScale;
+	float3 Tangent;
+	float SourceRadius;
+	float2 SpotAngles;
+	float SourceLength;
+	float SoftSourceRadius;
+	float2 DistanceFadeMAD;
+	float RectLightBarnCosAngle;
+	float RectLightBarnLength;
+	//Alteratation to support consistent  light IDs
+	//float4 Dummy;
+	uint LightID;
+	uint3 Pad;
+}; // 128 bytes total
+
+struct FSampledLightData
+{
+	FDeferredLightData LightData;
+	uint LightProfilePageIndex;
+	uint LightProfileLineIndex;
+	int RectLightTextureIndex;
+	uint LightType;
+	uint LightFunctionIndex;
+	uint LightID;
+};
+
+// Decode RTLightingData from a StructuredBuffer<uint4>
+// #dxr_todo: This function is required because it's currently not possible to declare a
+// structured buffer with a custom type in a uniform buffer.
+// #dxr_todo: Potentially could use a byte address buffer with templated load syntax instead.
+#if !USE_COMPRESSED_LIGHT_DATA
+FPackedSampledLightingData GetSampledLightData(int LightIndex)
+{
+	StructuredBuffer<uint4> LightDataBuffer = SampledLightData.LightDataBuffer;
+
+	FPackedSampledLightingData Data;
+	uint4 Element;
+
+	LightIndex *= 8; // sizeof(FPackedSampledLightingData)/sizeof(uint4)
+
+	Element = LightDataBuffer[LightIndex++];
+
+	Data.Type = Element.x;
+	Data.LightProfileIndex = Element.y;
+	Data.RectLightTextureIndex = Element.z;
+	Data.FlagsLightFunctionAndMask = Element.w;
+
+	Element = LightDataBuffer[LightIndex++];
+
+	Data.LightPosition = asfloat(Element.xyz);
+	Data.InvRadius = asfloat(Element.w);
+
+	Element = LightDataBuffer[LightIndex++];
+
+	Data.Direction = asfloat(Element.xyz);
+	Data.FalloffExponent = asfloat(Element.w);
+
+	Element = LightDataBuffer[LightIndex++];
+
+	Data.LightColor = asfloat(Element.xyz);
+	Data.SpecularScale = asfloat(Element.w);
+
+	Element = LightDataBuffer[LightIndex++];
+
+	Data.Tangent = asfloat(Element.xyz);
+	Data.SourceRadius = asfloat(Element.w);
+
+	Element = LightDataBuffer[LightIndex++];
+
+	Data.SpotAngles = asfloat(Element.xy);
+	Data.SourceLength = asfloat(Element.z);
+	Data.SoftSourceRadius = asfloat(Element.w);
+
+	Element = LightDataBuffer[LightIndex++];
+
+	Data.DistanceFadeMAD = asfloat(Element.xy);
+	Data.RectLightBarnCosAngle = asfloat(Element.z);
+	Data.RectLightBarnLength = asfloat(Element.w);
+
+	Element = LightDataBuffer[LightIndex++];
+	Data.LightID = Element.x;
+	Data.Pad = Element.yzw;
+
+	return Data;
+}
+#else
+FPackedSampledLightingData GetSampledLightData(int LightIndex)
+{
+	StructuredBuffer<uint4> PackedLightDataBuffer = SampledLightData.PackedLightDataBuffer;
+
+	FPackedSampledLightingData Data;
+	uint4 Element;
+
+	LightIndex *= 5; // sizeof(FPackedSampledLightingData)/sizeof(uint4)
+
+	Element = PackedLightDataBuffer[LightIndex++];
+
+	Data.Type = Element.x >> 24;
+	Data.LightProfileIndex = Element.y;
+	Data.RectLightTextureIndex = (Element.x >> 16) & 0xff;
+	Data.FlagsLightFunctionAndMask = Element.z & 0xffff;
+	Data.LightID = Element.z >> 16;
+	Data.InvRadius = asfloat(Element.w);
+	Data.SoftSourceRadius = f16tof32(Element.x & 0xffff);
+
+	Element = PackedLightDataBuffer[LightIndex++];
+
+	Data.LightPosition = asfloat(Element.xyz);
+	Data.SourceRadius = f16tof32(Element.w >> 16);
+	Data.SourceLength = f16tof32(Element.w & 0xffff);
+
+	Element = PackedLightDataBuffer[LightIndex++];
+
+	Data.Direction = f16tof32(Element.xyz >> 16);
+	Data.Tangent = f16tof32(Element.xyz & 0xffff);
+	Data.SpecularScale = f16tof32(Element.w & 0xffff);
+	Data.FalloffExponent = f16tof32(Element.w >> 16);
+
+	Element = PackedLightDataBuffer[LightIndex++];
+
+	Data.LightColor = asfloat(Element.xyz);
+	Data.RectLightBarnCosAngle = f16tof32(Element.w >> 16);
+	Data.RectLightBarnLength = f16tof32(Element.w & 0xffff);
+
+	Element = PackedLightDataBuffer[LightIndex++];
+
+	Data.SpotAngles = asfloat(Element.xy);
+	Data.DistanceFadeMAD = asfloat(Element.zw);
+	
+	// no room in present packing
+	Data.Pad = 0;
+
+	return Data;
+}
+#endif
+
+uint GetSampledLightChannelMask(int LightIndex)
+{
+	StructuredBuffer<uint4> LightDataBuffer = SampledLightData.LightDataBuffer;
+
+	uint4 Element;
+
+	LightIndex *= 8; // sizeof(FPackedSampledLightingData)/sizeof(uint4)
+
+	Element = LightDataBuffer[LightIndex];
+
+	return (Element.w >> 8) & 0xff;
+}
+
+FSampledLightData GetSampledDeferredLightData(int LightIndex)
+{
+	FSampledLightData L = (FSampledLightData)0;
+	FPackedSampledLightingData RayTracingLightData = GetSampledLightData(LightIndex);
+
+	const uint LightType = RayTracingLightData.Type;
+
+	L.LightData.Position = RayTracingLightData.LightPosition;
+	L.LightData.InvRadius = RayTracingLightData.InvRadius;
+	L.LightData.Color = RayTracingLightData.LightColor;
+	L.LightData.FalloffExponent = RayTracingLightData.FalloffExponent;
+	L.LightData.Direction = RayTracingLightData.Direction;
+	L.LightData.Tangent = RayTracingLightData.Tangent;
+	L.LightData.SpotAngles = RayTracingLightData.SpotAngles;
+	L.LightData.SourceRadius = RayTracingLightData.SourceRadius;
+	L.LightData.SourceLength = RayTracingLightData.SourceLength;
+	L.LightData.SoftSourceRadius = RayTracingLightData.SoftSourceRadius;
+	L.LightData.SpecularScale = RayTracingLightData.SpecularScale;
+	L.LightData.RectLightBarnCosAngle = RayTracingLightData.RectLightBarnCosAngle;
+	L.LightData.RectLightBarnLength = RayTracingLightData.RectLightBarnLength;
+	L.LightData.DistanceFadeMAD = RayTracingLightData.DistanceFadeMAD;
+
+	L.LightData.ShadowMapChannelMask = float4(0, 0, 0, 0);
+	L.LightData.ShadowedBits = 0; // Not lit dynamic shadows 
+	L.LightData.ContactShadowLength = 0.0;
+	L.LightData.ContactShadowLengthInWS = false;
+	L.LightData.ContactShadowNonShadowCastingIntensity = 0.0f;
+
+	L.LightData.bRadialLight = (LightType != LIGHT_TYPE_DIRECTIONAL);
+	L.LightData.bSpotLight = (LightType == LIGHT_TYPE_SPOT);
+	L.LightData.bRectLight = (LightType == LIGHT_TYPE_RECT);
+
+	if (LightType == LIGHT_TYPE_DIRECTIONAL)
+	{
+		L.LightData.bInverseSquared = false;
+	}
+	else
+	{
+		L.LightData.bInverseSquared = L.LightData.FalloffExponent == 0;
+	}
+
+	L.LightProfilePageIndex = (RayTracingLightData.LightProfileIndex >> 16) & 0xffff;
+	L.LightProfileLineIndex = RayTracingLightData.LightProfileIndex & 0xffff;
+	L.RectLightTextureIndex = RayTracingLightData.RectLightTextureIndex;
+	L.LightType = LightType;
+
+	L.LightFunctionIndex = RayTracingLightData.FlagsLightFunctionAndMask & 0xff;
+
+	L.LightID = RayTracingLightData.LightID;
+
+	return L;
+}
+
+
+FRectTexture GetSampledRectTextureData()
+{
+	FRectTexture RectTexture;
+
+#if USE_SOURCE_TEXTURE_ARRAY 
+	RectTexture.SourceTexture0 = SampledLightData.RectLightTexture0;
+	RectTexture.SourceTexture1 = SampledLightData.RectLightTexture1;
+	RectTexture.SourceTexture2 = SampledLightData.RectLightTexture2;
+	RectTexture.SourceTexture3 = SampledLightData.RectLightTexture3;
+	RectTexture.SourceTexture4 = SampledLightData.RectLightTexture4;
+	RectTexture.SourceTexture5 = SampledLightData.RectLightTexture5;
+	RectTexture.SourceTexture6 = SampledLightData.RectLightTexture6;
+	RectTexture.SourceTexture7 = SampledLightData.RectLightTexture7;
+	RectTexture.SourceTextureIndex = 99;
+#else
+	RectTexture = InitRectTexture(SampledLightData.RectLightTexture0);
+#endif
+
+	return RectTexture;
+}
+
+// Capsule sampling code derived from 4.27 path tracer improvements
+void SampleCapsuleLightOcclusionRay(
+	FLightShaderParameters LightParameters,
+	float3 WorldPosition,
+	float3 WorldNormal,
+	float2 RandSample,
+	out float3 RayOrigin,
+	out float3 RayDirection,
+	out float RayTMin,
+	out float RayTMax,
+	out float RayPdf)
+{
+	// Capsule case
+	// #dxr_todo: only sample the visible portion of the capsule and account for the 1/d^2 falloff down the axis
+
+	float Radius = LightParameters.SourceRadius;
+	float Radius2 = Radius * Radius;
+	float SourceLength = LightParameters.SourceLength;
+
+	// the caps are two halves of a full sphere
+	// the body is a cylinder
+	// the common factor of 4*PI is accounted for at the end
+	float CapsArea = Radius2;
+	float BodyArea = 0.5 * Radius * SourceLength;
+
+	// is tangent the right vector?
+	float3 Axis = LightParameters.Tangent;
+
+
+	float3 LightDirection = LightParameters.Position - WorldPosition;
+	FCapsuleSphericalBounds CapsuleBounds = CapsuleGetSphericalBounds(LightDirection, Axis, Radius, SourceLength);
+
+	float4 Result = SampleCapsuleBounds(CapsuleBounds, RandSample);
+
+	float3 L = Result.xyz;
+	float SolidAngle = Result.w;
+
+	// TODO: Reference code scales by PI, but this results in under-estimating results
+	//RayPdf =  (PI * (CapsArea + BodyArea)) / SolidAngle;
+	RayPdf = ((CapsArea + BodyArea)) / SolidAngle;
+
+	// check direction to account for rays that hit the bounding shape but not the capsule
+#if 1
+	// optimized check (also more robust for tiny radii)
+	float Distance = CapsuleTest(L, LightDirection, Axis, Radius2, SourceLength);
+#else
+	// exact check (produces artifacts for tiny radii)
+	float Distance = CapsuleIntersect(L, LightDirection, Axis, Radius2, SourceLength);
+#endif
+	RayOrigin = WorldPosition;
+	RayDirection = normalize(L);
+	RayTMin = 0.0;
+	if (Distance > 0)
+	{
+		RayTMax = Distance;
+	}
+	else
+	{
+		//What should we do here?
+		// didn't pass the acceptance test -- reject this sample
+		RayTMax = 0.001;
+		RayPdf = 0.0f;
+	}
+}
+
+void SamplePointLightOcclusionRay(
+	FLightShaderParameters LightParameters,
+	float3 WorldPosition,
+	float3 WorldNormal,
+	float2 RandSample,
+	out float3 RayOrigin,
+	out float3 RayDirection,
+	out float RayTMin,
+	out float RayTMax,
+	out float RayPdf)
+{
+	float3 LightDirection = LightParameters.Position - WorldPosition;
+	float LightDistanceSquared = dot(LightDirection, LightDirection);
+
+	// Point light case
+
+	// Sample the solid angle subtended by the sphere (which could be singgular, in which case the PDF will be infinite)
+	float Radius = LightParameters.SourceRadius;
+	float Radius2 = Pow2(Radius);
+
+	// #dxr_todo: come up with a better definition when we are inside the light
+	float SinThetaMax2 = saturate(Radius2 / LightDistanceSquared);
+
+	// #dxr_todo: find a better way of handling the region inside the light than just clamping to 1.0 here
+	float4 DirAndPdf = UniformSampleConeRobust(RandSample, SinThetaMax2);
+
+	float CosTheta = DirAndPdf.z;
+	float SinTheta2 = 1.0 - CosTheta * CosTheta;
+
+	RayDirection = TangentToWorld(DirAndPdf.xyz, normalize(LightDirection));
+	RayTMax = length(LightDirection) * (CosTheta - sqrt(max(SinThetaMax2 - SinTheta2, 0.0)));
+
+	RayPdf = SinThetaMax2 < 0.001 ? LightDistanceSquared : DirAndPdf.w * (PI * Radius2);
+
+	RayOrigin = WorldPosition;
+	RayTMin = 0.0;
+	RayDirection = normalize(RayDirection);
+
+	//float3 LightPower = GetColor(LightId);
+	//float3 LightRadiance = LightPower / (PI * Radius2);
+
+	// When the angle is very small, Radiance over pdf simplifies even more since SolidAngle ~= PI * SinThetaMax2
+	// Canceling out common factors further leads to the classic Power / D^2 formula
+	//Result.RadianceOverPdf = SinThetaMax2 < 0.001 ? LightPower / LightDistanceSquared : LightRadiance / Result.Pdf;
+
+	// NOTE: uses distance to center to keep fadeoff mask consistent for all samples
+	//Result.RadianceOverPdf *= ComputeAttenuationFalloff(LightDistanceSquared, LightId);
+	//Result.RadianceOverPdf *= ComputeIESAttenuation(LightId, WorldPos);
+	//return Result;
+}
+
+void SampleSpotLightOcclusionRay(
+	FLightShaderParameters LightParameters,
+	float3 WorldPosition,
+	float3 WorldNormal,
+	float2 RandSample,
+	out float3 RayOrigin,
+	out float3 RayDirection,
+	out float RayTMin,
+	out float RayTMax,
+	out float RayPdf)
+{
+	SamplePointLightOcclusionRay(
+		LightParameters,
+		WorldPosition,
+		WorldNormal,
+		RandSample,
+		RayOrigin,
+		RayDirection,
+		RayTMin,
+		RayTMax,
+		RayPdf);
+
+	float3 LightPosition = LightParameters.Position;
+	float3 LightNormal = LightParameters.Direction;
+	float2 CosConeAngles = LightParameters.SpotAngles;
+	float Attenuation = SpotAttenuation(-normalize(WorldPosition - LightPosition), -LightNormal, CosConeAngles);
+	RayPdf = Attenuation > 0.0 ? RayPdf / Attenuation : 0.0;
+
+}
+
+void SampleDirectionalLightOcclusionRay(
+	FLightShaderParameters LightParameters,
+	float3 WorldPosition,
+	float3 WorldNormal,
+	float2 RandSample,
+	out float3 RayOrigin,
+	out float3 RayDirection,
+	out float RayTMin,
+	out float RayTMax,
+	out float RayPdf)
+{
+	float SinThetaMax = LightParameters.SourceRadius; // currently sin(Angle / 2)
+	float4 DirAndPdf = UniformSampleConeRobust(RandSample, SinThetaMax * SinThetaMax);
+	float3 Direction = TangentToWorld(DirAndPdf.xyz, LightParameters.Direction);
+
+	RayOrigin = WorldPosition;
+	RayDirection = normalize(Direction);
+	RayTMin = 0.0;
+	RayTMax = 1.0e27;
+
+	// Directional lights are special in that their radiance isn't modified by the pdf
+	RayPdf = 1.0f;
+
+	// Because the light is normalized by the solid angle, the radiance/pdf ratio is just the color
+	//return CreateLightSample(GetColor(LightId), DirAndPdf.w, Direction, POSITIVE_INFINITY);
+}
+
+float3 SampleLightTexture(FDeferredLightData LightData, FRectTexture RectTexture, float3 WorldPosition, float2 LightUV)
+{
+	float3 RectColor = float3(1, 1, 1);
+#if USE_SOURCE_TEXTURE_ARRAY
+	if (RectTexture.SourceTextureIndex != 99)
+	{
+		float3 LightPosition = LightData.Position;
+		float3 LightNormal = LightData.Direction;
+		float3 LightdPdu = LightData.Tangent;
+		float3 LightdPdv = normalize(cross(-LightNormal, LightdPdu));
+		float LightWidth = LightData.SourceRadius;
+		float LightHeight = LightData.SourceLength;
+
+		// Define rectangle and compute solid angle
+		float3 LightDirection = LightPosition - WorldPosition;
+		FRect Rect = GetRect(LightDirection,
+			LightNormal,
+			LightdPdu,
+			LightWidth,
+			LightHeight,
+			LightData.RectLightBarnCosAngle,
+			LightData.RectLightBarnLength,
+			true /* bComputeVisibleRect */);
+
+		FSphericalRect SphericalRect = BuildSphericalRect(Rect);
+
+		FSphericalRectSample Sample = UniformSampleSphericalRectWithUV(LightUV, SphericalRect);
+		float2 ClippedUV = Sample.UV;
+		ClippedUV.y = 1.0 - ClippedUV.y;
+		RectColor = SampleRectTexture(RectTexture, ClippedUV, 0.0f, true);
+	}
+#endif
+
+	return RectColor;
+}
+
+void SampleRectLightOcclusionRay(
+	FLightShaderParameters LightParameters,
+	float3 WorldPosition,
+	float3 WorldNormal,
+	float2 RandSample,
+	out float3 RayOrigin,
+	out float3 RayDirection,
+	out float RayTMin,
+	out float RayTMax,
+	out float RayPdf)
+{
+	float3 LightPosition = LightParameters.Position;
+	float3 LightNormal = -LightParameters.Direction; // Path tracing derived code uses a reversed sense of light direction
+	float3 LightdPdu = LightParameters.Tangent;
+	float3 LightdPdv = normalize(cross(LightNormal, LightdPdu));
+	float LightWidth = LightParameters.SourceRadius;
+	float LightHeight = LightParameters.SourceLength;
+
+	// Define rectangle and compute solid angle
+	float3 LightDirection = LightPosition - WorldPosition;
+	FRect Rect = GetRect(LightDirection,
+		-LightNormal,
+		LightdPdu,
+		LightWidth,
+		LightHeight,
+		LightParameters.RectLightBarnCosAngle,
+		LightParameters.RectLightBarnLength,
+		true /* bComputeVisibleRect */);
+	
+	FSphericalRect SphericalRect = BuildSphericalRect(Rect);
+
+#if 0  && USE_RECT_LIGHT_TEXTURES
+	FSphericalRectSample Sample = UniformSampleSphericalRectWithUV(RandSample, SphericalRect);
+	float2 ClippedUV = Sample.UV;
+	float3 Direction = Sample.Direction;
+#else
+	float3 Direction = UniformSampleSphericalRect(RandSample, SphericalRect);
+#endif
+
+	//float3 RadianceOverPdf = GetColor(LightId) * SphericalRect.SolidAngle * ComputeIESAttenuation(LightId, WorldPos);
+	//RadianceOverPdf *= ComputeAttenuationFalloff(dot(LightDirection, LightDirection), LightId);
+#if 0 && USE_RECT_LIGHT_TEXTURES
+	float2 UV = 0.5 * ((2 * ClippedUV - 1) * Rect.Extent + Rect.Offset) / Rect.FullExtent + 0.5;
+	RadianceOverPdf *= EvaluateTexture(LightId, UV);
+#endif
+
+	//return CreateLightSample(RadianceOverPdf, 1.0 / SphericalRect.SolidAngle, normalize(Direction), length(Direction));
+
+	RayOrigin = WorldPosition;
+	RayDirection = normalize(Direction);
+	RayTMin = 0.0;
+	RayTMax = length(Direction);
+	RayPdf = 1.0f / SphericalRect.SolidAngle;
+
+	if (!IsRectVisible(Rect) || dot(Rect.Axis[2], Rect.Origin) < 0)
+	{
+		RayPdf = 0.0f;
+	}
+}
+
+// Attenuation correction term from 4.27 Path tracer light sampling
+float ComputeAttenuationFalloff(float DistanceSquared, FDeferredLightData LightData)
+{
+#if USE_SAMPLED_LIGHTING
+	// Mirrors GetLocalLightAttenuation() custom attenuation controls
+	// #dxr_todo: UE-72508: encapsulate this function in a shared space
+	float InvAttenuationRadius = LightData.InvRadius;
+	float NormalizeDistanceSquared = DistanceSquared * Square(InvAttenuationRadius);
+	if (LightData.bInverseSquared)
+	{
+		return Square(saturate(1.0 - Square(NormalizeDistanceSquared)));
+	}
+	else
+	{
+		// roughly cancel out "native" square distance falloff before applying exponent based falloff function
+		// this appears to match the behavior of the deferred lighting passes
+		float FalloffExponent = LightData.FalloffExponent;
+		return DistanceSquared * pow(1.0 - saturate(NormalizeDistanceSquared), FalloffExponent);
+	}
+#else
+	return 1.0;
+#endif
+}
+
+// some duplicate data here, but it gives functions the ability to choose the representation they require
+// DXC should cull the redundancy
+struct FLightSampleLocation
+{
+	float3 Direction;
+	float  Pdf;
+	float3 Position;
+	float  Distance;
+};
+
+//returns direction + pdf
+FLightSampleLocation ComputeLightSampleLocation(
+	in FDeferredLightData LightData,
+	in float3 WorldPosition,
+	in float3 WorldNormal,
+	in uint LightType,
+	in float2 RandSample)
+{
+	float3 ShadowRayDirection = 0.0;
+
+	float3 RayOrigin = float3(0, 0, 0);
+	float RayTMin = 0;
+	float RayTMax = 0;
+	float RayPdf = 0;
+
+	FLightShaderParameters LightParameters;
+	LightParameters.Position = LightData.Position;
+	LightParameters.SpotAngles = LightData.SpotAngles;
+	LightParameters.SourceRadius = LightData.SourceRadius;
+	LightParameters.SourceLength = LightData.SourceLength;
+	LightParameters.Tangent = LightData.Tangent;
+	LightParameters.Direction = LightData.Direction;
+	LightParameters.FalloffExponent = LightData.FalloffExponent;
+
+	if (LightType == LIGHT_TYPE_DIRECTIONAL)
+	{
+		float ShadowSourceAngleFactor = LightData.RectLightBarnCosAngle;
+		LightParameters.SourceRadius *= ShadowSourceAngleFactor;
+#if !USE_SAMPLED_LIGHTING
+		GenerateDirectionalLightOcclusionRay(
+			LightParameters,
+			WorldPosition, WorldNormal,
+			RandSample,
+			/* out */ RayOrigin,
+			/* out */ ShadowRayDirection,
+			/* out */ RayTMin,
+			/* out */ RayTMax);
+
+		RayPdf = 1.0f;
+#else
+		SampleDirectionalLightOcclusionRay(
+			LightParameters,
+			WorldPosition, WorldNormal,
+			RandSample,
+			/* out */ RayOrigin,
+			/* out */ ShadowRayDirection,
+			/* out */ RayTMin,
+			/* out */ RayTMax,
+			/* out */ RayPdf);
+
+#endif
+	}
+	else if (LightType == LIGHT_TYPE_SPOT)
+	{
+#if !USE_SAMPLED_LIGHTING
+		GenerateSpotLightOcclusionRay(
+			LightParameters,
+			WorldPosition, WorldNormal,
+			RandSample,
+			/* out */ RayOrigin,
+			/* out */ ShadowRayDirection,
+			/* out */ RayTMin,
+			/* out */ RayTMax);
+
+		RayPdf = 1.0f;
+#else
+		SampleSpotLightOcclusionRay(
+			LightParameters,
+			WorldPosition, WorldNormal,
+			RandSample,
+			/* out */ RayOrigin,
+			/* out */ ShadowRayDirection,
+			/* out */ RayTMin,
+			/* out */ RayTMax,
+			/* out */ RayPdf);
+#endif
+	}
+	else if (LightType == LIGHT_TYPE_POINT)
+	{
+#if !USE_SAMPLED_LIGHTING
+		if (LightData.SourceRadius == 0)
+		{
+			GeneratePointLightOcclusionRay(
+				LightParameters,
+				WorldPosition, WorldNormal,
+				RandSample,
+				/* out */ RayOrigin,
+				/* out */ ShadowRayDirection,
+				/* out */ RayTMin,
+				/* out */ RayTMax);
+
+			RayPdf = 1.0f;
+		}
+		else
+		{
+			//GenerateSphereLightOcclusionRayWithAreaSampling(
+			GenerateSphereLightOcclusionRayWithSolidAngleSampling(
+				LightParameters,
+				WorldPosition, WorldNormal,
+				RandSample,
+				/* out */ RayOrigin,
+				/* out */ ShadowRayDirection,
+				/* out */ RayTMin,
+				/* out */ RayTMax,
+				/* out */ RayPdf);
+		}
+#else
+		if (LightData.SourceLength > 0.0)
+		{
+			SampleCapsuleLightOcclusionRay(
+				LightParameters,
+				WorldPosition, WorldNormal,
+				RandSample,
+				/* out */ RayOrigin,
+				/* out */ ShadowRayDirection,
+				/* out */ RayTMin,
+				/* out */ RayTMax,
+				/* out */ RayPdf);
+		}
+		else
+		{
+			SamplePointLightOcclusionRay(
+				LightParameters,
+				WorldPosition, WorldNormal,
+				RandSample,
+				/* out */ RayOrigin,
+				/* out */ ShadowRayDirection,
+				/* out */ RayTMin,
+				/* out */ RayTMax,
+				/* out */ RayPdf);
+#endif
+		}
+	}
+	else if (LightType == LIGHT_TYPE_RECT)
+	{
+#if !USE_SAMPLED_LIGHTING
+		GenerateRectLightOcclusionRay(
+			LightParameters,
+			WorldPosition, WorldNormal,
+			RandSample,
+			/* out */ RayOrigin,
+			/* out */ ShadowRayDirection,
+			/* out */ RayTMin,
+			/* out */ RayTMax,
+			/* out */ RayPdf);
+#else
+		SampleRectLightOcclusionRay(
+			LightParameters,
+			WorldPosition, WorldNormal,
+			RandSample,
+			/* out */ RayOrigin,
+			/* out */ ShadowRayDirection,
+			/* out */ RayTMin,
+			/* out */ RayTMax,
+			/* out */ RayPdf);
+
+#endif 
+	}
+
+	if (LightType != LIGHT_TYPE_DIRECTIONAL)
+	{
+		// falloff correction factor for limited radius and alternate exponents
+		float3 LightVector = WorldPosition - LightData.Position;
+		float DistanceSquared = dot(LightVector, LightVector);
+		float Falloff = ComputeAttenuationFalloff(DistanceSquared, LightData);
+
+		RayPdf = Falloff > 0.0 ? RayPdf / Falloff : 0.0f;
+	}
+
+	FLightSampleLocation SampleLocation;
+
+	SampleLocation.Distance = RayTMax - RayTMin;
+	SampleLocation.Pdf = RayPdf;
+	SampleLocation.Direction = ShadowRayDirection;
+	SampleLocation.Position = WorldPosition + ShadowRayDirection * SampleLocation.Distance;
+
+	return SampleLocation;
+}
+

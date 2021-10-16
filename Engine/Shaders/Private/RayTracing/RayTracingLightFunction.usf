@@ -1,0 +1,17 @@
+
+#define SUPPORT_CONTACT_SHADOWS 0
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Generated/Material.ush"
+
+#include "RayTracingCommon.ush"
+
+#define LightFunctionParameters RaytracingLightFunctionParameters.LightFunctionParameters
+#define LightFunctionWorldToLight RaytracingLightFunctionParameters.LightFunctionWorldToLight
+
+#include "/Engine/Private/LightFunctionCommon.ush"
+
+#include "RayTracingLightFunctionCommon.ush" 
+
+
+

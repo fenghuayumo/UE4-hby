@@ -1,0 +1,123 @@
+/*
+* Copyright (c) 2021 NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA Corporation and its licensors retain all intellectual property and proprietary
+* rights in and to this software, related documentation and any modifications thereto.
+* Any use, reproduction, disclosure or distribution of this software and related
+* documentation without an express license agreement from NVIDIA Corporation is strictly
+* prohibited.
+*
+* TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED *AS IS*
+* AND NVIDIA AND ITS SUPPLIERS DISCLAIM ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
+* INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+* PARTICULAR PURPOSE.  IN NO EVENT SHALL NVIDIA OR ITS SUPPLIERS BE LIABLE FOR ANY
+* SPECIAL, INCIDENTAL, INDIRECT, OR CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT
+* LIMITATION, DAMAGES FOR LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF
+* BUSINESS INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR
+* INABILITY TO USE THIS SOFTWARE, EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF
+* SUCH DAMAGES.
+*/
+
+#include "../Common.ush"
+
+#include "ReservoirManagement.ush"
+
+int InputSlice;
+int OutputSlice;
+float BoilingFilterStrength;
+
+/***************************************************************************************************
+ *
+ *  Boiling Filter
+ *
+ *  Identify runaway samples and kill them to avoid them dominating the result.
+ *
+ ***************************************************************************************************/
+
+#define RTXDI_BOILING_FILTER_GROUP_SIZE 16
+#define RTXDI_BOILING_FILTER_MIN_LANE_COUNT 32
+
+groupshared float s_weights[(RTXDI_BOILING_FILTER_GROUP_SIZE * RTXDI_BOILING_FILTER_GROUP_SIZE) / RTXDI_BOILING_FILTER_MIN_LANE_COUNT];
+groupshared uint s_count[(RTXDI_BOILING_FILTER_GROUP_SIZE * RTXDI_BOILING_FILTER_GROUP_SIZE) / RTXDI_BOILING_FILTER_MIN_LANE_COUNT];
+
+// Boiling filter that is applied at the end of the temporal resampling pass.
+// The filter analyzes the weights of all reservoirs in a thread group, and discards
+// the reservoirs whose weights are very high, i.e. above a certain threshold.
+// If the temporal resampling pass is implemented as a ray-gen shader, and therefore
+// doesn't have access to thread groups or shared memory, the boiling filter can be applied
+// as a separate compute pass.
+// Returns true if the reservoir in this thread passes the filter and should be kept.
+bool RTXDI_SDK_BoilingFilter(uint2 LocalIndex, float FilterStrength, float weight)
+{
+	// Apply the boiling filter.
+	// Boiling happens when some highly unlikely light is discovered and it is relevant
+	// for a large surface area around the pixel that discovered it. Then this light sample
+	// starts to propagate to the neighborhood through spatiotemporal reuse, which looks like
+	// a flash. We can detect such lights because their weight is significantly higher than 
+	// the weight of their neighbors. So, compute the average group weight and apply a threshold.
+	if (FilterStrength > 0.f)
+	{
+		float boilingFilterMultiplier = 10.f / FilterStrength - 9.f;
+
+		// Start with average nonzero weight within the wavefront
+		float waveWeight = WaveActiveSum(weight);
+		uint waveCount = WaveActiveCountBits(weight > 0);
+
+		// Store the results of each wavefront into shared memory
+		uint linearThreadIndex = LocalIndex.x + LocalIndex.y * RTXDI_BOILING_FILTER_GROUP_SIZE;
+		uint waveIndex = linearThreadIndex / WaveGetLaneCount();
+
+		if (WaveIsFirstLane())
+		{
+			s_weights[waveIndex] = waveWeight;
+			s_count[waveIndex] = waveCount;
+		}
+
+		GroupMemoryBarrierWithGroupSync();
+
+		// Reduce the per-wavefront averages into a global average using one wavefront
+		if (linearThreadIndex < (RTXDI_BOILING_FILTER_GROUP_SIZE * RTXDI_BOILING_FILTER_GROUP_SIZE) / WaveGetLaneCount())
+		{
+			waveWeight = s_weights[linearThreadIndex];
+			waveCount = s_count[linearThreadIndex];
+
+			waveWeight = WaveActiveSum(waveWeight);
+			waveCount = WaveActiveSum(waveCount);
+
+			if (linearThreadIndex == 0)
+			{
+				s_weights[0] = (waveCount > 0) ? (waveWeight / float(waveCount)) : 0.0;
+			}
+		}
+
+		GroupMemoryBarrierWithGroupSync();
+
+		// Read the per-group average and apply the threshold
+		float averageNonzeroWeight = s_weights[0];
+		if (weight > averageNonzeroWeight * boilingFilterMultiplier)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+[numthreads(RTXDI_BOILING_FILTER_GROUP_SIZE, RTXDI_BOILING_FILTER_GROUP_SIZE, 1)]
+void BoilingFilterCS(uint3 GlobalIndex : SV_DispatchThreadID, uint3 LocalIndex : SV_GroupThreadID)
+{
+	uint2 PixelCoord = GlobalIndex.xy + View.ViewRectMin.xy;
+
+	if (any(GlobalIndex.xy > View.ViewSizeAndInvSize.xy))
+	{
+		return;
+	}
+
+	RTXDI_SDK_Reservoir Sample = RTXDI_SDK_Reservoir::Load(ReadReservoirData(PixelCoord, InputSlice));
+
+	if (!RTXDI_SDK_BoilingFilter(LocalIndex.xy, BoilingFilterStrength, Sample.weightSum))
+	{
+		Sample = RTXDI_SDK_Reservoir::Empty();
+	}
+	WriteReservoirData(PixelCoord, OutputSlice, Sample.Store());
+}

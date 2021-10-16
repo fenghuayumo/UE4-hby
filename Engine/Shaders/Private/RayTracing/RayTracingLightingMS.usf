@@ -1,0 +1,95 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "../HairStrands/HairStrandsVoxelPageCommonStruct.ush"
+#include "../Common.ush"
+
+#define SUPPORT_CONTACT_SHADOWS		0
+#define USE_SOURCE_TEXTURE			1
+#define USE_SOURCE_TEXTURE_ARRAY	1
+
+#define LTCMatTexture				RaytracingLightsDataPacked.LTCMatTexture
+#define LTCMatSampler				RaytracingLightsDataPacked.LTCMatSampler
+#define LTCAmpTexture				RaytracingLightsDataPacked.LTCAmpTexture
+#define LTCAmpSampler				RaytracingLightsDataPacked.LTCAmpSampler
+#define PreIntegratedGF				ReflectionStruct.PreIntegratedGF			
+#define PreIntegratedGFSampler		ReflectionStruct.PreIntegratedGFSampler	
+#define SSProfilesTexture			RaytracingLightsDataPacked.SSProfilesTexture
+
+#ifndef SUPPORT_LIGHT_FUNCTION
+#define SUPPORT_LIGHT_FUNCTION 0
+#endif
+
+#include "../SceneTextureParameters.ush"
+#include "RayTracingCommon.ush"
+#include "RayTracingDeferredShadingCommon.ush"
+#include "RayTracingLightingCommon.ush" 
+
+#if SUPPORT_LIGHT_FUNCTION
+#include "/Engine/Generated/Material.ush"
+
+#define LightFunctionParameters RaytracingLightFunctionParameters.LightFunctionParameters
+#define LightFunctionWorldToLight RaytracingLightFunctionParameters.LightFunctionWorldToLight
+
+#include "/Engine/Private/LightFunctionCommon.ush"
+#include "RayTracingLightFunctionCommon.ush"
+#endif
+
+RAY_TRACING_ENTRY_MISS(RayTracingLightingMS, FPackedMaterialClosestHitPayload, PackedPayload)
+{
+	RayDesc DummyRay = (RayDesc)0;
+
+#if SUPPORT_LIGHT_FUNCTION
+	if (PackedPayload.IsMinimalPayloadMode())
+	{
+		// Minimal packed payload means we're tracing a shadow ray, so only return the light function contribution
+		PackedPayload.SetMiss();
+		PackedPayload.SetRadiance(GetRayTracingLightFunction(WorldRayOrigin()));
+		return;
+	}
+#endif
+
+	FMaterialClosestHitPayload Payload = UnpackRayTracingPayload(PackedPayload, DummyRay);
+
+	// Light index is packed into HitT as this component is only accessed by closest hit or miss shaders.
+	// Since closest hit execution is disabled using a ray flag, it is safe to pack custom data here.
+	uint LightIndex = asuint(Payload.HitT);
+	float3 CameraVector = -Payload.IndirectIrradiance; // IndirectIrradiance field is used to pass through the camera vector
+	Payload.IndirectIrradiance = (float3)0;
+
+	FGBufferData GBufferData = GetGBufferDataFromPayload(Payload);
+	FRectTexture RectTexture = GetRayTracingRectTextureData();
+
+	int LightProfileIndex = -1;
+	int RectLightTextureIndex = -1;
+	uint LightType = 0;
+	uint Flags = 0;
+	uint Mask = 0;
+	uint LightFunction = 0;
+	FDeferredLightData LightData = GetRayTracingDeferredLightData(LightIndex, LightProfileIndex, RectLightTextureIndex, LightType, Flags, LightFunction, Mask);
+
+#if USE_SOURCE_TEXTURE_ARRAY
+	RectTexture.SourceTextureIndex = RectLightTextureIndex;
+#endif // USE_SOURCE_TEXTURE_ARRAY
+
+	float4 LightAttenuation = 1.0f;
+	float LightProfileMultiplier = 1.0f;
+
+	float3 WorldPosition = WorldRayOrigin(); // Shadow ray is traced from the shaded point
+
+	if (LightProfileIndex >= 0)
+	{
+		LightProfileMultiplier = ComputeRayTracingLightProfileMultiplier(WorldPosition, LightData.Position, LightData.Direction, LightProfileIndex);
+	}
+
+#if SUPPORT_LIGHT_FUNCTION
+	LightProfileMultiplier *= GetRayTracingLightFunction(WorldPosition);
+#endif
+
+	float SurfaceShadow = 1.0f;
+	float3 LightContribution = GetDynamicLighting(WorldPosition, -CameraVector, GBufferData, 1.0f, GBufferData.ShadingModelID, LightData, LightAttenuation, 0.5, uint2(0, 0), RectTexture, SurfaceShadow).xyz;
+
+	float3 AccumulatedRadiance = Payload.Radiance + LightContribution * LightProfileMultiplier;
+
+	PackedPayload.SetRadiance(AccumulatedRadiance);
+}
+

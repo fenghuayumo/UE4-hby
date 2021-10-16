@@ -1,0 +1,34 @@
+// Copyright 1998-2019 Epic Games, Inc. All Rights Reserved.
+
+
+// base light function material shader, so it can be folded where apprpriate
+// see LightFunctionCommon and LightFunctionPixelShader for additional information
+float GetRayTracingLightFunction(float3 WorldPosition)
+{
+	float3 LightVector;
+	{
+		float4 Hom = mul(float4(WorldPosition, 1), LightFunctionWorldToLight);
+		LightVector = Hom.xyz / Hom.w;
+	}
+
+	// Calculate radial view distance for stable fading
+	float ViewDistance = length(View.WorldCameraOrigin - WorldPosition);
+
+	float GreyScale;
+	{
+		float3 Color = GetLightFunctionColor(LightVector, WorldPosition);
+		GreyScale = dot(Color, .3333f);
+	}
+
+	float DistanceFadeAlpha = saturate((RaytracingLightFunctionParameters.LightFunctionParameters2.x - ViewDistance) / (RaytracingLightFunctionParameters.LightFunctionParameters2.x * .2f));
+	// Fade to disabled based on LightFunctionFadeDistance
+	GreyScale = lerp(RaytracingLightFunctionParameters.LightFunctionParameters2.y, GreyScale, DistanceFadeAlpha);
+
+	// Fade to disabled based on ShadowFadeFraction
+	GreyScale = lerp(RaytracingLightFunctionParameters.LightFunctionParameters2.y, GreyScale, LightFunctionParameters.y);
+
+
+	return GreyScale;
+}
+
+

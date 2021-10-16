@@ -1,0 +1,156 @@
+/*
+* Copyright (c) 2021 NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA Corporation and its licensors retain all intellectual property and proprietary
+* rights in and to this software, related documentation and any modifications thereto.
+* Any use, reproduction, disclosure or distribution of this software and related
+* documentation without an express license agreement from NVIDIA Corporation is strictly
+* prohibited.
+*
+* TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED *AS IS*
+* AND NVIDIA AND ITS SUPPLIERS DISCLAIM ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
+* INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+* PARTICULAR PURPOSE.  IN NO EVENT SHALL NVIDIA OR ITS SUPPLIERS BE LIABLE FOR ANY
+* SPECIAL, INCIDENTAL, INDIRECT, OR CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT
+* LIMITATION, DAMAGES FOR LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF
+* BUSINESS INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR
+* INABILITY TO USE THIS SOFTWARE, EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF
+* SUCH DAMAGES.
+*/
+
+#pragma once
+
+#include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
+
+#ifndef USE_ALTERNATE_RNG
+#define USE_ALTERNATE_RNG	0
+#endif
+
+
+#if !USE_ALTERNATE_RNG
+struct FRandomContext
+{
+	RandomSequence RandSequence;
+
+	static FRandomContext Create(uint PositionSeed, uint TimeSeed)
+	{
+		FRandomContext Context;
+		RandomSequence_Initialize(Context.RandSequence, PositionSeed, TimeSeed);
+
+		return Context;
+	}
+
+	float GenerateSample1D()
+	{
+		return RandomSequence_GenerateSample1D(RandSequence);
+	}
+
+	float2 GenerateSample2D()
+	{
+		return RandomSequence_GenerateSample2D(RandSequence);
+	}
+
+	float3 GenerateSample3D()
+	{
+		return RandomSequence_GenerateSample3D(RandSequence);
+	}
+
+	float4 GenerateSample4D()
+	{
+		return RandomSequence_GenerateSample4D(RandSequence);
+	}
+};
+#else
+
+// Alternate RNG implementation derived from RTXDI SDK
+
+// 32 bit Jenkins hash
+uint JenkinsHash(uint a)
+{
+	// http://burtleburtle.net/bob/hash/integer.html
+	a = (a + 0x7ed55d16) + (a << 12);
+	a = (a ^ 0xc761c23c) ^ (a >> 19);
+	a = (a + 0x165667b1) + (a << 5);
+	a = (a + 0xd3a2646c) ^ (a << 9);
+	a = (a + 0xfd7046c5) + (a << 3);
+	a = (a ^ 0xb55a4f09) ^ (a >> 16);
+	return a;
+}
+
+struct FRandomContext
+{
+	uint seed;
+	uint index;
+
+	static FRandomContext Create(uint PositionSeed, uint TimeSeed)
+	{
+		FRandomContext Context;
+
+		Context.index = 1;
+		Context.seed = JenkinsHash(PositionSeed) + TimeSeed;
+
+		return Context;
+	}
+
+	uint murmur3()
+	{
+#define ROT32(x, y) ((x << y) | (x >> (32 - y)))
+
+		// https://en.wikipedia.org/wiki/MurmurHash
+		uint c1 = 0xcc9e2d51;
+		uint c2 = 0x1b873593;
+		uint r1 = 15;
+		uint r2 = 13;
+		uint m = 5;
+		uint n = 0xe6546b64;
+
+		uint hash = seed;
+		uint k = index++;
+		k *= c1;
+		k = ROT32(k, r1);
+		k *= c2;
+
+		hash ^= k;
+		hash = ROT32(hash, r2) * m + n;
+
+		hash ^= 4;
+		hash ^= (hash >> 16);
+		hash *= 0x85ebca6b;
+		hash ^= (hash >> 13);
+		hash *= 0xc2b2ae35;
+		hash ^= (hash >> 16);
+
+#undef ROT32
+
+		return hash;
+	}
+
+	float sampleUniformRng()
+	{
+		uint v = murmur3();
+		const uint one = asuint(1.f);
+		const uint mask = (1 << 23) - 1;
+		return asfloat((mask & v) | one) - 1.f;
+	}
+
+	float GenerateSample1D()
+	{
+		return sampleUniformRng();
+	}
+
+	float2 GenerateSample2D()
+	{
+		return float2(sampleUniformRng(), sampleUniformRng());
+	}
+
+	float3 GenerateSample3D()
+	{
+		return float3(sampleUniformRng(), sampleUniformRng(), sampleUniformRng());
+	}
+
+	float4 GenerateSample4D()
+	{
+		return float4(sampleUniformRng(), sampleUniformRng(), sampleUniformRng(), sampleUniformRng());
+	}
+};
+#endif

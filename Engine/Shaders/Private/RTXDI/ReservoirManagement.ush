@@ -1,0 +1,279 @@
+/*
+* Copyright (c) 2021 NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA Corporation and its licensors retain all intellectual property and proprietary
+* rights in and to this software, related documentation and any modifications thereto.
+* Any use, reproduction, disclosure or distribution of this software and related
+* documentation without an express license agreement from NVIDIA Corporation is strictly
+* prohibited.
+*
+* TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED *AS IS*
+* AND NVIDIA AND ITS SUPPLIERS DISCLAIM ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
+* INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+* PARTICULAR PURPOSE.  IN NO EVENT SHALL NVIDIA OR ITS SUPPLIERS BE LIABLE FOR ANY
+* SPECIAL, INCIDENTAL, INDIRECT, OR CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT
+* LIMITATION, DAMAGES FOR LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF
+* BUSINESS INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR
+* INABILITY TO USE THIS SOFTWARE, EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF
+* SUCH DAMAGES.
+*/
+
+#pragma once
+
+// Code for managing reads/writes to reservoirs
+RWStructuredBuffer<uint4> RWLightReservoirUAV;
+uint3 ReservoirBufferDim;
+
+RWStructuredBuffer<uint4> RWLightReservoirHistoryUAV;
+StructuredBuffer<uint4> LightReservoirHistory;
+uint3 ReservoirHistoryBufferDim;
+
+uint ComputeReservoirAddress(int2 PixelCoord, int Slice, uint3 BufferDim)
+{
+	static const uint TileSize = 4;
+	const uint RowStride = (BufferDim.x / TileSize) * TileSize * TileSize;
+
+	int2 Tile = PixelCoord / TileSize;
+	int2 TileCoord = PixelCoord % TileSize;
+
+	uint Address = Slice * BufferDim.x * BufferDim.y;
+	Address += Tile.y * RowStride;
+	Address += Tile.x * TileSize * TileSize;
+	Address += TileCoord.y * TileSize + TileCoord.x;
+
+	return Address;
+}
+
+uint4 ReadReservoirData(int2 PixelCoord, int Slice)
+{
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirBufferDim);
+
+	return RWLightReservoirUAV[Address];
+}
+
+void WriteReservoirData(int2 PixelCoord, int Slice, uint4 Value)
+{
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirBufferDim);
+
+	RWLightReservoirUAV[Address] = Value;
+}
+
+uint4 ReadReservoirHistoryData(int2 PixelCoord, int Slice)
+{
+
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirHistoryBufferDim);
+
+	return LightReservoirHistory[Address];
+}
+
+void WriteReservoirHistoryData(int2 PixelCoord, int Slice, uint4 Value)
+{
+
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirHistoryBufferDim);
+
+	RWLightReservoirHistoryUAV[Address] = Value;
+}
+
+
+/***************************************************************************************************
+ *
+ *  RTXDI SDK structures
+ *
+ * Strucxtures derived from the RTXDI SDK, but customized to UE4
+ *
+ ***************************************************************************************************/
+
+typedef uint4 RTXDI_SDK_PackedReservoir;
+
+// This structure represents a light sample without storing any actual light information.
+// Therefore, it's called a light sample reference.
+// It stores the global light index, a validity flag, and a unorm2 parameter that can be used
+// to reconstruct the position on the light.
+struct RTXDI_SDK_LightSampleRef
+{
+	static const uint c_ValidBit = 0x80000000;
+	static const uint c_IndexMask = 0x7FFFFFFF;
+
+	// Internal compressed light sample data
+	uint lightData;
+	uint uvData;
+
+	// Extract various basic information about our light sample
+	bool IsValid() { return (lightData & c_ValidBit) != 0; }
+	uint GetLightIndex() { return lightData & c_IndexMask; }
+
+	float2 GetUV()
+	{
+		return float2(uvData & 0xffff, uvData >> 16) / float(0xffff);
+	}
+
+	void SetLightIndex(uint lightID)
+	{
+		lightData = lightID | c_ValidBit;
+	}
+
+	static RTXDI_SDK_LightSampleRef Invalid()
+	{
+		RTXDI_SDK_LightSampleRef s;
+		s.lightData = 0;
+		s.uvData = 0;
+		return s;
+	}
+
+	static RTXDI_SDK_LightSampleRef Create(uint lightIndex, float2 uv)
+	{
+		RTXDI_SDK_LightSampleRef s;
+		s.lightData = lightIndex | c_ValidBit;
+		s.uvData = uint(saturate(uv.x) * 0xffff) | (uint(saturate(uv.y) * 0xffff) << 16);
+		return s;
+	}
+};
+
+// Use 24-bit unsigned float to enable extra precision and keep the reservior in a single 128-bit quantity
+#define CUSTOM_FLOAT 1
+
+// This structure represents a single light reservoir that stores the weights, the sample ref,
+// and sample count (M). It can be stored into uint4 and loaded from uint4, except the weightSum field.
+struct RTXDI_SDK_Reservoir
+{
+	static const uint MaxM = 0xffff;
+
+	RTXDI_SDK_LightSampleRef sampleRef;
+	float weightSum;
+	float targetPdf;
+	uint M;
+
+	static RTXDI_SDK_Reservoir Empty()
+	{
+		RTXDI_SDK_Reservoir s;
+		s.sampleRef = RTXDI_SDK_LightSampleRef::Invalid();
+		s.targetPdf = 0;
+		s.weightSum = 0;
+		s.M = 0;
+		return s;
+	}
+
+	static RTXDI_SDK_Reservoir Load(RTXDI_SDK_PackedReservoir data)
+	{
+		RTXDI_SDK_Reservoir res;
+
+		res.sampleRef.lightData = data.x;
+		res.sampleRef.uvData = data.y;
+#if !CUSTOM_FLOAT
+		res.weightSum = f16tof32(data.z);
+		res.targetPdf = f16tof32(data.z >> 16);
+		res.M = data.w;
+#else
+		res.M = data.w & 0xff;
+		res.M |= (data.z & 0xff) << 8;
+
+		// unsigned 24 bit floats
+		uint weightSum = (data.z & 0xffffff00);
+		uint targetPdf = (data.w & 0xffffff00);
+		res.weightSum = asfloat(weightSum >> 1);
+		res.targetPdf = asfloat(targetPdf >> 1);
+
+#endif
+
+		// Discard reservoirs that have Inf/NaN
+		if (isinf(res.weightSum) || isnan(res.weightSum)) {
+			res = Empty();
+		}
+
+		return res;
+	}
+
+	RTXDI_SDK_PackedReservoir Store()
+	{
+		RTXDI_SDK_PackedReservoir data;
+		data.x = sampleRef.lightData;
+		data.y = sampleRef.uvData;
+#if !CUSTOM_FLOAT
+		data.w = M;
+		data.z = f32tof16(weightSum) | (f32tof16(targetPdf) << 16);
+#else
+
+		const float RoundConst = 1.0f / float(1 << 18); // 1/(2^18) is the first bit unrepresented by the custom float)
+		float RoundedWeight = weightSum + weightSum * RoundConst;
+		float RoundedPdf = targetPdf + targetPdf * RoundConst;
+
+		//remove sign as values are guaranteed positive
+		uint uWeightSum = asuint(max(0.0, RoundedWeight)) << 1;
+		uint uTargetPdf = asuint(max(0.0, RoundedPdf)) << 1;
+
+		//chop to 24 bits
+		uWeightSum = uWeightSum & 0xffffff00;
+		uTargetPdf = uTargetPdf & 0xffffff00;
+
+		//clamp M
+		M = min(M, MaxM);
+
+		// pack M to bottom bits
+		data.z = (uWeightSum) | ((M >> 8) & 0xff);
+		data.w = (uTargetPdf) | (M & 0xff);
+#endif
+
+		return data;
+	}
+
+	void FinalizeResampling(float normalizationNumerator, float normalizationDenominator)
+	{
+		float denominator = targetPdf * normalizationDenominator;
+
+		weightSum = (denominator == 0.0) ? 0.0 : (weightSum * normalizationNumerator) / denominator;
+	}
+
+	// Adds a new, non-reservoir light sample into this reservoir.
+	// Algorithm (3) from the ReSTIR paper, Streaming RIS using weighted reservoir sampling.
+	bool StreamSample(RTXDI_SDK_LightSampleRef newSampleRef, float random, float newTargetPdf, float invSourcePdf)
+	{
+		// What's the current weight
+		float risWeight = newTargetPdf * invSourcePdf;
+
+		// Add one sample to the counter
+		M += 1;
+
+		// Update the weight sum
+		weightSum += risWeight;
+
+		// Decide if we will randomly pick this sample
+		bool selectSample = (random * weightSum < risWeight);
+
+		// If we did select this sample, update the relevant data.
+		// New samples don't have visibility or age information, we can skip that.
+		if (selectSample)
+		{
+			sampleRef = newSampleRef;
+			targetPdf = newTargetPdf;
+		}
+
+		return selectSample;
+	}
+
+	// Adds a reservoir with one sample into this reservoir.
+	// Algorithm (4) from the ReSTIR paper, Combining the streams of multiple reservoirs.
+	// Normalization - Equation (6) - is postponed until all reservoirs are combined.
+	bool CombineReservoirs(RTXDI_SDK_Reservoir newReservoir, float random, float newTargetPdf)
+	{
+		// What's the current weight (times any prior-step RIS normalization factor)
+		float risWeight = newTargetPdf * newReservoir.weightSum * newReservoir.M;
+
+		// Our *effective* candidate pool is the sum of our candidates plus those of our neighbors
+		M += newReservoir.M;
+
+		// Update the weight sum
+		weightSum += risWeight;
+
+		// Decide if we will randomly pick this sample
+		bool selectSample = (random * weightSum < risWeight);
+
+		// If we did select this sample, update the relevant data
+		if (selectSample)
+		{
+			sampleRef = newReservoir.sampleRef;
+			targetPdf = newTargetPdf;
+		}
+
+		return selectSample;
+	}
+};

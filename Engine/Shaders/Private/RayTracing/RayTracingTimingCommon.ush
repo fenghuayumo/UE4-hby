@@ -1,0 +1,55 @@
+// Copyright Epic Games, Inc. All Right
+
+#pragma once
+
+#include "/Engine/Shared/RayTracingDefinitions.h"
+
+// Add permutation for Nvidia/AMD/other
+#define NV_SHADER_EXTN_SLOT u0
+#define NV_SHADER_EXTN_REGISTER_SPACE space1001
+#include "/Engine/Shared/ThirdParty/NVIDIA/nvHLSLExtns.h"
+
+struct NvTimingQuery
+{
+	uint Time;
+
+	bool SupportTiming()
+	{
+		// only supported on windows when ray timing is enabled
+		return RAY_TRACING_SUPPORT_TIMING != 0 && COMPILER_HLSL != 0;
+	}
+
+	void StartTimer()
+	{
+		Time = NvGetSpecial(NV_SPECIALOP_GLOBAL_TIMER_LO);
+	}
+
+	void StopTimer()
+	{
+		uint EndTime = NvGetSpecial(NV_SPECIALOP_GLOBAL_TIMER_LO);
+
+		// Account for (at most one) overflow
+		Time = EndTime >= Time ? (EndTime - Time) : (~0u - (Time - EndTime) + 1);
+	}
+
+	// Handle cases where replication is needed
+	void RecordTiming(RWTexture2D<uint> CumulativeTime, uint2 PixelCoord, uint2 UpscaleFactor)
+	{
+		uint2 BaseCoord = (PixelCoord / UpscaleFactor) * UpscaleFactor;
+
+		LOOP
+		for (uint Y = 0; Y < UpscaleFactor.y; Y++)
+		{
+			LOOP
+			for (uint X = 0; X < UpscaleFactor.x; X++)
+			{
+				uint2 Coord = BaseCoord + uint2(X, Y);
+				InterlockedAdd(CumulativeTime[Coord], Time);
+			}
+		}
+	}
+};
+
+
+
+
