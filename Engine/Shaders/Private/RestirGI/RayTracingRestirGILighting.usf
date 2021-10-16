@@ -307,7 +307,7 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 					RayDesc LightRay = Ray;
 					LightRay.TMax = POSITIVE_INFINITY;
 					float3 EnvironmentRadiance = SkyLight_TraceLight(Ray, SkyLightId).Radiance;
-					Irradiance += EnvironmentRadiance * RayThroughput;// / RayPdf;
+					Irradiance += EnvironmentRadiance * RayThroughput / RayPdf;
 				}
 				break;
 			}
@@ -346,9 +346,9 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 			// }
 
 			//Perform next-event estimation
-			// float SplitFactor = 1.0 / NextEventEstimationSamples;
-			float SplitFactor = 1.0 / 1;
-			for (uint NeeTrial = 0; NeeTrial < 1; ++NeeTrial)
+			float SplitFactor = 1.0 / NextEventEstimationSamples;
+			// float SplitFactor = 1.0 / 1;
+			for (uint NeeTrial = 0; NeeTrial < NextEventEstimationSamples; ++NeeTrial)
 			{
 				// Light selection
 				int LightId;
@@ -421,13 +421,13 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 #endif
 
 						// Record the contribution
-						float3 ExitantRadianceSample = LightRadianceOverPdf * MaterialThroughput * RayThroughput * SplitFactor;// / RayPdf;
+						float3 ExitantRadianceSample = LightRadianceOverPdf * MaterialThroughput * RayThroughput * SplitFactor / RayPdf;
 
 						// Tonemap for firefly suppression
-						if (UseFireflySuppression)
-						{
-							ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
-						}
+						// if (UseFireflySuppression)
+						// {
+						// 	ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
+						// }
 
 						Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
 					}
@@ -469,19 +469,17 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 				// Update ray
 				Ray.Direction = Direction;
 				RayThroughput *= Throughput;
-				// RayPdf *= MaterialPdf;
+				RayPdf *= MaterialPdf;
 			}
-
-			sampleRef.Li = Irradiance;
-			float pdfScale = 1.0 / RayPdf;
-			float weight = Luminance(sampleRef.Li);
-			float risRnd = RandContext.GenerateSample1D();
-
-			bool selected = LocalReservoir.StreamSample(sampleRef, risRnd, weight, pdfScale);
-
 			Bounce++;
 		}
-	
+
+		sampleRef.Li = Irradiance;
+		float pdfScale = 1.0;
+		float weight = Luminance(sampleRef.Li);
+		float risRnd = RandContext.GenerateSample1D();
+
+		bool selected = LocalReservoir.StreamSample(sampleRef, risRnd, weight, pdfScale);
 	}
 	LocalReservoir.FinalizeResampling(1.0, LocalReservoir.M);
 	LocalReservoir.M = 1;
@@ -714,20 +712,16 @@ RAY_TRACING_ENTRY_RAYGEN(GenerateInitialSamplesRGS)
 	float Depth = GBuffer.Depth;
 	float DeviceZ = SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
 
-	// Diffuse color rejection threshold
-	float3 DiffuseColor = GBuffer.DiffuseColor;
-	if (Luminance(DiffuseColor) < DiffuseThreshold)
-	{
-		return;
-	}
+
 	float3 WorldPosition;
 	float3 CameraDirection;
 	ReconstructWorldPositionAndCameraDirectionFromDeviceZ(PixelCoord, DeviceZ, WorldPosition, CameraDirection);
 
 	RTXGI_Reservoir state = RTXGI_Reservoir::Empty();
-
+	// Diffuse color rejection threshold
+	float3 DiffuseColor = GBuffer.DiffuseColor;
 	const bool bIsDepthValid = DeviceZ > 0.0;
-	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid;
+	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid && Luminance(DiffuseColor) > DiffuseThreshold;
 
 	if (bIsValidPixel)
 	{
@@ -765,18 +759,13 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 	float Depth = GBuffer.Depth;
 	float DeviceZ = SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
 
-	float3 DiffuseColor = GBuffer.DiffuseColor;
-	if (Luminance(DiffuseColor) < DiffuseThreshold)
-	{
-		return;
-	}
-
 	float3 WorldPosition;
 	float3 CameraDirection;
 	ReconstructWorldPositionAndCameraDirectionFromDeviceZ(PixelCoord, DeviceZ, WorldPosition, CameraDirection);
 
+	float3 DiffuseColor = GBuffer.DiffuseColor;
 	const bool bIsDepthValid = DeviceZ > 0.0;
-	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid;
+	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid && Luminance(DiffuseColor) > DiffuseThreshold;
 
 	RTXGI_Reservoir risSample = RTXGI_Reservoir::Empty();
 	float3 DiffuseExitantRadiance = 0.0;
@@ -798,7 +787,7 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 				Ray.Origin = WorldPosition;
 				Ray.Direction = normalize(Direction);
 				Ray.TMin = 0;
-				Ray.TMax = length(Direction) - 1e-1;
+				Ray.TMax = length(Direction) - 5e-2;
 				Ray.TMax = min(Ray.TMax, MaxShadowDistance);
 
 				float3 BiasNormal = GBuffer.WorldNormal;
@@ -841,7 +830,10 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 				// sample occluded, kill it for the history
 				risSample = RTXGI_Reservoir::Empty();
 			}
-
+			// if (UseFireflySuppression)
+			// {
+			// 	DiffuseExitantRadiance *= rcp(1.0 + Luminance(DiffuseExitantRadiance));
+			// }
 			WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
 		}
 
@@ -857,7 +849,6 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 		// {
 		// 	DiffuseExitantRadiance = DiffuseExitantRadiance / (GBuffer.DiffuseColor == 0.0 ? 1.0 : GBuffer.DiffuseColor);
 		// }
-
 		DiffuseExitantRadiance = ClampToHalfFloatRange(DiffuseExitantRadiance);
 	}
 	else
@@ -905,9 +896,9 @@ RAY_TRACING_ENTRY_RAYGEN(ApplySpatialResamplingRGS)
 
 
 	RTXGI_Reservoir state = RTXGI_Reservoir::Empty();
-
+	float3 DiffuseColor = GBuffer.DiffuseColor;
 	const bool bIsDepthValid = DeviceZ > 0.0;
-	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid;
+	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid && Luminance(DiffuseColor) > DiffuseThreshold;
 
 	if (bIsValidPixel)
 	{
@@ -944,8 +935,9 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 
 	RTXGI_Reservoir state = RTXGI_Reservoir::Empty();
 
+	float3 DiffuseColor = GBuffer.DiffuseColor;
 	const bool bIsDepthValid = DeviceZ > 0.0;
-	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid;
+	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid && Luminance(DiffuseColor) > DiffuseThreshold;
 
 	if (bIsValidPixel)
 	{

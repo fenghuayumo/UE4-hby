@@ -921,6 +921,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FRestirGICommonParameters, )
 	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<RTXGI_PackedReservoir>, RWGIReservoirUAV)
 	SHADER_PARAMETER(FIntVector, ReservoirBufferDim)
 	SHADER_PARAMETER(uint32, UpscaleFactor)
+	SHADER_PARAMETER(float, DiffuseThreshold)
 END_SHADER_PARAMETER_STRUCT()
 
 static void ApplyRestirGIGlobalSettings(FShaderCompilerEnvironment& OutEnvironment)
@@ -967,7 +968,6 @@ class FRestirGIInitialSamplesRGS : public FGlobalShader
 		SHADER_PARAMETER(uint32, UseRussianRoulette)
 		SHADER_PARAMETER(uint32, UseFireflySuppression)
 
-		SHADER_PARAMETER(float, DiffuseThreshold)
 		SHADER_PARAMETER(float, MaxRayDistanceForGI)
 		SHADER_PARAMETER(float, MaxRayDistanceForAO)
 		SHADER_PARAMETER(float, NextEventEstimationSamples)
@@ -1071,7 +1071,6 @@ class FEvaluateRestirGIRGS : public FGlobalShader
 		SHADER_PARAMETER(uint32, bUseHairVoxel)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureParameters, SceneTextures)
 
-		SHADER_PARAMETER(float, DiffuseThreshold)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWDiffuseUAV)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, RWRayDistanceUAV)
 		SHADER_PARAMETER(FIntVector, ReservoirHistoryBufferDim)
@@ -2133,6 +2132,7 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 	CommonParameters.MaxTemporalHistory = FMath::Max(1, CVarRestirGITemporalMaxHistory.GetValueOnRenderThread());
 	CommonParameters.UpscaleFactor = UpscaleFactor;
 	CommonParameters.MaxShadowDistance = MaxShadowDistance;
+	CommonParameters.DiffuseThreshold = GRayTracingGlobalIlluminationDiffuseThreshold;;
 	FIntPoint LightingResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), UpscaleFactor);
 
 	const bool bCameraCut = !View.PrevViewInfo.SampledGIHistory.GIReservoirs.IsValid() || View.bCameraCut;
@@ -2160,7 +2160,6 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 			PassParameters->EvalSkyLight = GRayTracingGlobalIlluminationEvalSkyLight != 0;
 			PassParameters->UseRussianRoulette = GRayTracingGlobalIlluminationUseRussianRoulette != 0;
 			PassParameters->UseFireflySuppression = CVarRayTracingGlobalIlluminationFireflySuppression.GetValueOnRenderThread() != 0;
-			PassParameters->DiffuseThreshold = GRayTracingGlobalIlluminationDiffuseThreshold;
 			PassParameters->NextEventEstimationSamples = GRayTracingGlobalIlluminationNextEventEstimationSamples;
 			PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
 			SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters);
@@ -2354,7 +2353,6 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 		PassParameters->DemodulateMaterials = CVarRestirGIDemodulateMaterials.GetValueOnRenderThread();
 		//PassParameters->DebugOutput = CVarRayTracingRestirGIDebugMode.GetValueOnRenderThread();
 		PassParameters->FeedbackVisibility = CVarRayTracingRestirGIFeedbackVisibility.GetValueOnRenderThread();
-		PassParameters->DiffuseThreshold = GRayTracingGlobalIlluminationDiffuseThreshold;
 		PassParameters->RestirGICommonParameters = CommonParameters;
 
 		FEvaluateRestirGIRGS::FPermutationDomain PermutationVector;
