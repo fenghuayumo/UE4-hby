@@ -1,0 +1,160 @@
+/*
+* Copyright (c) 2021 NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA Corporation and its licensors retain all intellectual property and proprietary
+* rights in and to this software, related documentation and any modifications thereto.
+* Any use, reproduction, disclosure or distribution of this software and related
+* documentation without an express license agreement from NVIDIA Corporation is strictly
+* prohibited.
+*
+* TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED *AS IS*
+* AND NVIDIA AND ITS SUPPLIERS DISCLAIM ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
+* INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+* PARTICULAR PURPOSE.  IN NO EVENT SHALL NVIDIA OR ITS SUPPLIERS BE LIABLE FOR ANY
+* SPECIAL, INCIDENTAL, INDIRECT, OR CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT
+* LIMITATION, DAMAGES FOR LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF
+* BUSINESS INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR
+* INABILITY TO USE THIS SOFTWARE, EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF
+* SUCH DAMAGES.
+*/
+
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/FastMath.ush"
+#include "/Engine/Private/ScreenPass.ush"
+#include "/Engine/Private/SceneTextureParameters.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+#include "NRD.ush"
+
+#ifndef THREADGROUP_SIZEX
+#define THREADGROUP_SIZEX		8
+#endif
+#ifndef THREADGROUP_SIZEY
+#define THREADGROUP_SIZEY		8
+#endif
+#define THREADGROUP_TOTALSIZE	(THREADGROUP_SIZEX * THREADGROUP_SIZEY)
+
+#ifndef PACK_DIFFUSE_RAY_DISTANCE
+#define PACK_DIFFUSE_RAY_DISTANCE 0
+#endif
+
+#ifndef COMPRESS_DIFFUSE_RADIANCE
+#define COMPRESS_DIFFUSE_RADIANCE 0
+#endif
+
+#ifndef PACK_SPECULAR_RAY_DISTANCE
+#define PACK_SPECULAR_RAY_DISTANCE 0
+#endif
+
+
+#ifndef COMPRESS_SPECULAR_RADIANCE
+#define COMPRESS_SPECULAR_RADIANCE 0
+#endif
+
+
+
+Texture2D Diffuse;
+Texture2D DiffuseRayHitDistance;
+Texture2D Specular;
+Texture2D SpecularRayHitDistance;
+
+
+RWTexture2D<float> OutViewDepth;
+RWTexture2D<float4> OutMotionVectors;
+RWTexture2D<float4> OutNormalAndRoughness;
+
+// TODO change texture format based on whether ray hit distances are packed?
+RWTexture2D<float4> OutDiffuseHit;
+RWTexture2D<float4> OutSpecularHit;
+
+SCREEN_PASS_TEXTURE_VIEWPORT(InBuffer)
+
+SCREEN_PASS_TEXTURE_VIEWPORT(OutBuffer)
+
+[numthreads(THREADGROUP_SIZEX, THREADGROUP_SIZEY, 1)]
+void NRDPackInputsMainCS(
+	uint2 GroupId : SV_GroupID,
+	uint2 DispatchThreadId : SV_DispatchThreadID,
+	uint2 GroupThreadId : SV_GroupThreadID,
+	uint GroupIndex : SV_GroupIndex)
+{
+
+	uint2 InPixelPos = min(DispatchThreadId + InBuffer_ViewportMin, InBuffer_ViewportMax - 1);
+	float2 InUV = ( DispatchThreadId + InBuffer_ViewportMin + 0.5) * InBuffer_ExtentInverse;
+	
+	uint2 OutPixelPos = min(DispatchThreadId + OutBuffer_ViewportMin, OutBuffer_ViewportMax - 1);
+
+	float DeviceZ = SampleDeviceZFromSceneTextures(InUV);
+	FGBufferData GBufferData = GetGBufferDataFromSceneTextures(InUV);
+
+	// GetGBufferDataFromSceneTextures does conversion from device Z to linear Z, this is exactly what we need
+	OutViewDepth[OutPixelPos].x = GBufferData.Depth;
+
+	// Read the velocity texture directly instead of using GBufferData.Velocity;
+	// GetGBufferDataFromSceneTextures reads from the same texture and then  calls DecodeGBufferData which then zeros out .Velocity
+	// due to some logic related to SelectiveOutputMask and SKIP_VELOCITY_MASK
+	// FWIW NiagaraDataInterfaceGBuffer.ush does a similar thing
+	float4 EncodedVelocity = GBufferVelocityTexture.SampleLevel(GBufferVelocityTextureSampler, InUV, 0);
+	
+	float3 Velocity;
+	if (all(EncodedVelocity.xy > 0))
+	{
+		Velocity = DecodeVelocityFromTexture(EncodedVelocity);
+	}
+	else
+	{
+		float4 ClipPos;
+		ClipPos.xy = SvPositionToScreenPosition(float4(InPixelPos.xy, 0, 1)).xy;
+		ClipPos.z = DeviceZ;
+		ClipPos.w = 1;
+
+		float4 PrevClipPos = mul(ClipPos, View.ClipToPrevClip);
+
+		if (PrevClipPos.w > 0)
+		{
+			PrevClipPos /= PrevClipPos.w;
+			Velocity = ClipPos.xyz - PrevClipPos.xyz;
+		}
+		else
+		{
+			Velocity = EncodedVelocity;
+		}
+	}
+
+	float3 OutVelocity = float3(Velocity.xy * float2(0.5, -0.5), Velocity.z );
+	OutMotionVectors[OutPixelPos] = (-OutVelocity.xyzz);
+
+	float RoughnessAndHair = GBufferData.Roughness * 127.0;
+	RoughnessAndHair += GBufferData.ShadingModelID == SHADINGMODELID_HAIR ? 128.0 : 0.0;
+	RoughnessAndHair /= 255.0f;
+
+	OutNormalAndRoughness[OutPixelPos] = float4(GBufferData.WorldNormal * 0.5 + 0.5, RoughnessAndHair);
+
+	{
+		float4 DiffuseHit = float4(Diffuse[InPixelPos].xyz, 0);
+
+#if PACK_DIFFUSE_RAY_DISTANCE
+		DiffuseHit.w = DiffuseRayHitDistance[InPixelPos].x;
+#endif
+
+#if COMPRESS_DIFFUSE_RADIANCE
+		DiffuseHit = RELAX_FrontEnd_PackRadiance(DiffuseHit.rgb, DiffuseHit.w, 1.0);
+#endif
+		OutDiffuseHit[OutPixelPos] = DiffuseHit;
+	}
+
+	{
+		float4 SpecularHit = float4(Specular[InPixelPos].xyz, 0);
+
+#if PACK_SPECULAR_RAY_DISTANCE
+		SpecularHit.w = SpecularRayHitDistance[InPixelPos].x;
+#endif
+
+#if COMPRESS_SPECULAR_RADIANCE
+		SpecularHit = RELAX_FrontEnd_PackRadiance(SpecularHit.rgb, SpecularHit.w, GBufferData.Roughness);
+#endif
+
+		OutSpecularHit[OutPixelPos] = SpecularHit;
+	}
+}

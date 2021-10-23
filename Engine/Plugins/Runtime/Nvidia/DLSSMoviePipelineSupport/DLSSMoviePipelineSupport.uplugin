@@ -1,0 +1,40 @@
+{
+	"FileVersion": 3,
+	"Version": 6,
+	"VersionName": "2.2.2",
+	"FriendlyName": "Movie Render Queue DLSS Support",
+	"Description": "Plugin that adds DLSS support to Movie Render Queue.",
+	"Category": "Rendering",
+	"CreatedBy": "NVIDIA",
+	"CreatedByURL": "https://developer.nvidia.com/dlss",
+	"DocsURL": "",
+	"MarketplaceURL": "https://www.unrealengine.com/marketplace/en-US/product/nvidia-dlss",
+	"SupportURL": "mailto:DLSS-Support@nvidia.com",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "MovieRenderPipeline",
+			"Enabled": true,
+			"Optional": false
+		},
+		{
+			"Name": "DLSS",
+			"Enabled": true,
+			"Optional": false
+		}
+
+	],
+	"Modules": [
+		{
+			"Name": "DLSSMoviePipelineSupport",
+			"Type": "Runtime",
+			"LoadingPhase": "PostEngineInit",
+			"WhitelistPlatforms": [
+				"Win64"
+			]
+		}
+	]
+}

@@ -1,0 +1,27 @@
+{
+	"FileVersion": 1,
+	"Version": 1,
+	"VersionName": "1.16.22-relax",
+	"FriendlyName": "NVIDIA Real-Time Denoiser (NRD/ReLAX)",
+	"Description": "NVIDIA Real-time Denoiser",
+	"Category": "Denoising",
+	"CreatedBy": "NVIDIA",
+	"CreatedByURL": "https://developer.nvidia.com/nvidia-rt-denoiser",
+	"DocsURL": "https://developer.nvidia.com/nvidia-rt-denoiser-early-access-program",
+	"MarketplaceURL": "",
+	"SupportURL": "mailto:NRD-SDK-Support@nvidia.com",
+	"EnabledByDefault": false,
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "NRD",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit",
+			"BlacklistPlatforms": [
+				"TVOS",	"IOS", "Android", "HoloLens", "Lumin", "Win32"
+			]
+		}
+	]
+}

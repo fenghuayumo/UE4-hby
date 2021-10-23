@@ -1,0 +1,12 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "{FF907E75-4538-6EFC-CF4F-FFAB3BC58FEB}",
+	"Category": "",
+	"Description": "",
+	"Plugins": [
+		{
+			"Name": "RTXGI",
+			"Enabled": true
+		}
+	]
+}

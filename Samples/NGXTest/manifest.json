@@ -1,0 +1,32 @@
+{
+	"Version": 1,
+	"Name":
+	[
+		{
+			"Language": "en",
+			"Text": "NVIDIA NGX Integration Test"
+		}
+	],
+	"Description":
+	[
+		{
+			"Language": "en",
+			"Text": "Sample use of NGX blueprints."
+		}
+	],
+	"AssetTypes": [],
+	"SearchTags":
+	[
+		{
+			"Language": "en",
+			"Text": "StarterContent,NVIDIA,NGX"
+		},
+	],
+	"ClassTypes": "",
+	"Category": "Content",
+	"Thumbnail": "MobileStarterContent.png",
+	"Screenshots":
+	[
+		"MobileStarterContent_Preview.png"
+	]
+}

@@ -1,0 +1,42 @@
+/*
+Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+
+NVIDIA CORPORATION and its licensors retain all intellectual property
+and proprietary rights in and to this software, related documentation
+and any modifications thereto. Any use, reproduction, disclosure or
+distribution of this software and related documentation without an express
+license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#include "BindingBridge.ush"
+
+NRI_BEGIN_GLOBAL_CONSTANTS
+    float4x4 gViewToClip;
+NRI_END_GLOBAL_CONSTANTS
+
+#include "RELAX_Common.ush"  
+
+// Inputs
+NRI_RESOURCE(Texture2D<float4>, gIn_Normal_Roughness, t, 0, 0);
+NRI_RESOURCE(Texture2D<float>, gIn_ViewZ, t, 1, 0);
+
+// Outputs
+NRI_RESOURCE(RWTexture2D<uint2>, gOutNormalRoughnessDepth, u, 0, 0);
+
+[numthreads(16, 16, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    int2 pixelPos = dispatchThreadId.xy;
+
+    // Read normal and roughness
+    float4 normalAndRoughness = _NRD_FrontEnd_UnpackNormalAndRoughness(gIn_Normal_Roughness[pixelPos]);
+	float hair = normalAndRoughness.w >= 0.5 ? 1.0 : 0.0;
+    float roughness = (normalAndRoughness.w - hair * 0.5) * 2.0;
+    float3 normal = normalAndRoughness.xyz;
+
+    // Read depth
+    float depth = abs(gIn_ViewZ[pixelPos]);
+
+    // Pack and store
+    gOutNormalRoughnessDepth[pixelPos] = PackNormalRoughnessHairDepth(normal, roughness, hair, depth);
+}
