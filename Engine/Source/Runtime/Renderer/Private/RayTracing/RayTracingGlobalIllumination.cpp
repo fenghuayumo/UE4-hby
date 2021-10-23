@@ -366,6 +366,13 @@ static TAutoConsoleVariable<int32> CVarRestirGIFaceCull(
 	TEXT("  2 - back faces"),
 	ECVF_RenderThreadSafe);
 
+static float GRayTracingRestirGIMultipleBounceRatio = 0.25;
+static TAutoConsoleVariable<float> CVarRestirGILongPathRatio(
+	TEXT("r.RayTracing.RestirGI.MultipleBounceRatio"),
+	GRayTracingRestirGIMultipleBounceRatio,
+	TEXT("long path ratio\n"),
+	ECVF_RenderThreadSafe);
+
 static TAutoConsoleVariable<int32> CVarRestirGIApproximateVisibilityMode(
 	TEXT("r.RayTracing.RestirGI.ApproximateVisibilityMode"), 0,
 	TEXT("Visibility mode for approximate visibility tests (default 0/accurate)\n")
@@ -968,6 +975,7 @@ class FRestirGIInitialSamplesRGS : public FGlobalShader
 		SHADER_PARAMETER(uint32, UseRussianRoulette)
 		SHADER_PARAMETER(uint32, UseFireflySuppression)
 
+		SHADER_PARAMETER(float, LongPathRatio)
 		SHADER_PARAMETER(float, MaxRayDistanceForGI)
 		SHADER_PARAMETER(float, MaxRayDistanceForAO)
 		SHADER_PARAMETER(float, NextEventEstimationSamples)
@@ -2155,6 +2163,7 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 			{
 				MaxRayDistanceForGI = View.FinalPostProcessSettings.AmbientOcclusionRadius;
 			}
+			PassParameters->LongPathRatio = CVarRestirGILongPathRatio.GetValueOnRenderThread();
 			PassParameters->MaxRayDistanceForGI = MaxRayDistanceForGI;
 			PassParameters->MaxRayDistanceForAO = View.FinalPostProcessSettings.AmbientOcclusionRadius;
 			PassParameters->EvalSkyLight = GRayTracingGlobalIlluminationEvalSkyLight != 0;

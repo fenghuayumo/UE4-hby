@@ -247,8 +247,6 @@ struct RTXGI_Reservoir
 		weightSum = (denominator == 0.0) ? 0.0 : (weightSum * normalizationNumerator) / denominator;
 	}
 
-	// Adds a new, non-reservoir GI sample into this reservoir.
-	// Algorithm (3) from the ReSTIR paper, Streaming RIS using weighted reservoir sampling.
 	bool StreamSample(RTXGI_SampleRef newSampleRef, float random, float newTargetPdf, float invSourcePdf)
 	{
 		// What's the current weight
@@ -274,9 +272,6 @@ struct RTXGI_Reservoir
 		return selectSample;
 	}
 
-	// Adds a reservoir with one sample into this reservoir.
-	// Algorithm (4) from the ReSTIR paper, Combining the streams of multiple reservoirs.
-	// Normalization - Equation (6) - is postponed until all reservoirs are combined.
 	bool CombineReservoirs(RTXGI_Reservoir newReservoir, float random, float newTargetPdf)
 	{
 		// What's the current weight (times any prior-step RIS normalization factor)

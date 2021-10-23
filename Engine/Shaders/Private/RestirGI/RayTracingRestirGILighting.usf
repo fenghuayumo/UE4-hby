@@ -60,6 +60,7 @@ int MaxTemporalHistory;
 int ApplyApproximateVisibilityTest;
 int DemodulateMaterials;
 uint UpscaleFactor;
+float LongPathRatio;
 
 float MaxRayDistanceForGI;
 float MaxRayDistanceForAO;
@@ -233,6 +234,13 @@ void GenerateCosineNormalRay(
 
 void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ, float3 WorldPosition, float3 CameraDirection, inout FRandomContext RandContext, inout RTXGI_Reservoir state)
 {
+	const uint2 TileSize = uint2(64,32);
+	const uint2 TiledIndex = uint2(PixelCoord.x / TileSize.x, PixelCoord.y / TileSize.y);
+	const uint2 TileDim = uint2( ( View.ViewSizeAndInvSize.x +TileSize.x -1) / TileSize.x, ( View.ViewSizeAndInvSize.y +TileSize.y -1) / TileSize.y);
+	const uint TileLinearIndex = TiledIndex.y * TileDim.x + TiledIndex.x;
+	FRandomContext RandGen = FRandomContext::Create(TileLinearIndex, View.StateFrameIndex + HistoryReservoir * 32);
+	const bool bRussian = RandGen.GenerateSample1D() < (1 - LongPathRatio);
+
 	const int NumSamples = InitialCandidates;
 
 	RTXGI_Reservoir LocalReservoir = RTXGI_Reservoir::Empty();
@@ -247,15 +255,6 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 		float3 RandSample = RandomSequence_GenerateSample3D(RandSequence);
 
 		RTXGI_SampleRef sampleRef;
-		// Russian roulette based on DiffuseColor
-		if (UseRussianRoulette)
-		{
-			float RRSample = RandSample.x;
-			float ProbabilityOfSuccess = Luminance(DiffuseColor);
-			float ProbabilityOfTermination = 1.0 - ProbabilityOfSuccess;
-			if (RRSample < ProbabilityOfTermination) continue;
-			RayThroughput /= ProbabilityOfSuccess;
-		}
 
 		// Initialize ray
 		RayDesc Ray;
@@ -470,6 +469,25 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 				Ray.Direction = Direction;
 				RayThroughput *= Throughput;
 				RayPdf *= MaterialPdf;
+
+				// Russian roulette based on DiffuseColor
+				float2 Rand = RandomSequence_GenerateSample2D(RandSequence);
+				
+				// float Ratio = 1 - LongPathRatio;
+				if( bRussian )
+				{	
+					// if ( Rand.y < Ratio )
+					{
+						float RRSample = Rand.x;
+						// float ProbabilityOfSuccess = Luminance(DiffuseColor);
+						float3 PathT = RayThroughput * DiffuseColor / RayPdf;
+						float ProbabilityOfSuccess = max(max(PathT.x, PathT.y), PathT.z);
+						float ProbabilityOfTermination = 1.0 - ProbabilityOfSuccess;
+						if (RRSample < ProbabilityOfTermination) break;
+						RayThroughput /= ProbabilityOfSuccess;
+					}
+				}
+
 			}
 			Bounce++;
 		}
@@ -592,7 +610,7 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 			continue;
 		}
 		uint2 samplePosID = uint2(SampleCoord / float(UpscaleFactor) + 0.5);
-		if( any(samplePosID > DispatchID) )
+		if( any(samplePosID > DispatchRaysDimensions().xy ) )
 			continue;
 		RTXGI_Reservoir neighborSample = RTXGI_Reservoir::Load(ReadReservoirData(samplePosID, InputSlice));
 
@@ -666,7 +684,7 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 				}
 #endif
 				uint2 sampleID = uint2(SampleCoord / float(UpscaleFactor) + 0.5);
-				if( any(sampleID > DispatchID) )
+				if( any(sampleID > DispatchRaysDimensions().xy) )
 					continue;
 				RTXGI_Reservoir neighborSample = RTXGI_Reservoir::Load(ReadReservoirData(sampleID, InputSlice));
 
@@ -694,15 +712,11 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
  *
  *  GenerateInitialSamples
  *
- *  Draw random samples from the light list and evaluate an approximate luminance to select
- * a weighted random sample. After selection, test the sample for visibility, and reject if not
- * visible.
- *
  ***************************************************************************************************/
 RAY_TRACING_ENTRY_RAYGEN(GenerateInitialSamplesRGS)
 {
 	uint2 DispatchThreadId = DispatchRaysIndex().xy + View.ViewRectMin.xy;
-	uint2 PixelCoord = GetPixelCoord2(DispatchThreadId, UpscaleFactor);
+	uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
 	uint LinearIndex = CalcLinearIndex(PixelCoord);
 	FRandomContext RandContext = FRandomContext::Create(LinearIndex, View.StateFrameIndex + HistoryReservoir * 32);
 
@@ -727,29 +741,19 @@ RAY_TRACING_ENTRY_RAYGEN(GenerateInitialSamplesRGS)
 	{
 		ProduceInitialSample(PixelCoord, GBuffer, DeviceZ, WorldPosition, CameraDirection, RandContext, state);
 	}
-	float3 dir = normalize(state.sampleRef.GetSamPosition() - WorldPosition);
-	float3	DiffuseExitantRadiance = state.sampleRef.Li * state.weightSum;
-#if USE_PREEXPOSURE
-	DiffuseExitantRadiance *=  View.PreExposure;
-#endif
 
-	RWGlobalIlluminationUAV[DispatchThreadId] = float4(DiffuseExitantRadiance ,1.0);
-	RWGlobalIlluminationRayDistanceUAV[DispatchThreadId] = float2(length(dir) ,1);
 	WriteReservoirData(DispatchThreadId, OutputSlice, state.Store());
 }
 
 /***************************************************************************************************
  *
  *  EvaluateRestirGILighting
- *
- *  Take light samples from reservoirs and shade the sample with them.
- *
  ***************************************************************************************************/
 RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 {
 
 	uint2 DispatchThreadId = DispatchRaysIndex().xy + View.ViewRectMin.xy;
-	uint2 PixelCoord = GetPixelCoord2(DispatchThreadId, UpscaleFactor);
+	uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
 	uint LinearIndex = CalcLinearIndex(PixelCoord);
 	FRandomContext RandContext = FRandomContext::Create(LinearIndex, View.StateFrameIndex);
 
@@ -845,10 +849,7 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 #if USE_PREEXPOSURE
 		DiffuseExitantRadiance *= View.PreExposure;
 #endif
-		// if (DemodulateMaterials  && GBuffer.ShadingModelID != SHADINGMODELID_HAIR)
-		// {
-		// 	DiffuseExitantRadiance = DiffuseExitantRadiance / (GBuffer.DiffuseColor == 0.0 ? 1.0 : GBuffer.DiffuseColor);
-		// }
+
 		DiffuseExitantRadiance = ClampToHalfFloatRange(DiffuseExitantRadiance);
 	}
 	else
@@ -869,17 +870,14 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
  *
  *  ApplySpatialResampling
  *
- *  Shader to handle spatial resampling of light reservoirs.
  *
  ***************************************************************************************************/
 //
-// Presently, using RGS as it allows occlusion rays. Simplifies code management to not have shader
-// type not change due to runtime option
 
 RAY_TRACING_ENTRY_RAYGEN(ApplySpatialResamplingRGS)
 {
 	uint2 DispatchThreadId = DispatchRaysIndex().xy + View.ViewRectMin.xy;
-	uint2 PixelCoord = GetPixelCoord2(DispatchThreadId, UpscaleFactor);
+	uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
 	if (any(PixelCoord > View.ViewSizeAndInvSize.xy))
 	{
 		return;
@@ -911,14 +909,12 @@ RAY_TRACING_ENTRY_RAYGEN(ApplySpatialResamplingRGS)
 /***************************************************************************************************
  *
  *  ApplyTemporalResampling
- *
- *  Shader to handle temporal resampling of light reservoirs.
- *
  ***************************************************************************************************/
 RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 {
 	uint2 DispatchThreadId = DispatchRaysIndex().xy + View.ViewRectMin.xy;
-	uint2 PixelCoord = GetPixelCoord2(DispatchThreadId, UpscaleFactor);
+	uint2 DispatchDimension = DispatchRaysDimensions().xy;
+	uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
 	if (any(PixelCoord > View.ViewSizeAndInvSize.xy))
 	{
 		return;
@@ -953,7 +949,7 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 		int2 prevPos = PixelCoord;
 		float ExpectedPrevLinearDepth = GBuffer.Depth;
 
-		float2 ViewUV = (PixelCoord + 0.5) * View.ViewSizeAndInvSize.zw;
+		float2 ViewUV = (float2(PixelCoord) + 0.5) * View.ViewSizeAndInvSize.zw;
 		float4 NDC = float4(ViewUV * float2(2, -2) + float2(-1, 1), DeviceZ, 1);
 
 #if GBUFFER_HAS_VELOCITY && 0
@@ -967,7 +963,6 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 			float2 PrevNDC = NDC.xy - Velocity;
 			float2 PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
 			prevPos = PrevUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy;
-
 			ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ - DecodeVelocityFromTexture(GBuffer.Velocity).z);
 		}
 		else
@@ -1028,7 +1023,7 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 			// Resample the previous frame sample into the current reservoir, but reduce the gisample's weight
 			// according to the bilinear weight of the current pixel
 			uint2 prePosId = uint2(prevPos / float(UpscaleFactor) + 0.5);
-			if( any(prePosId > DispatchThreadId.xy) )
+			if( any(prePosId > DispatchDimension.xy) )
 				return;
 			RTXGI_Reservoir prevSample = RTXGI_Reservoir::Load(ReadReservoirHistoryData(prePosId, HistoryReservoir));
 			prevSample.M = min(prevSample.M, historyLimit);
