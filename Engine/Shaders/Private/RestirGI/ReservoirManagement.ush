@@ -27,7 +27,7 @@ uint ComputeReservoirAddress(int2 PixelCoord, int Slice, uint3 BufferDim)
 	int2 Tile = PixelCoord / TileSize;
 	int2 TileCoord = PixelCoord % TileSize;
 
-	uint Address = Slice * BufferDim.x * BufferDim.y;
+	uint Address = Slice * BufferDim.x * BufferDim.y; 
 	Address += Tile.y * RowStride;
 	Address += Tile.x * TileSize * TileSize;
 	Address += TileCoord.y * TileSize + TileCoord.x;

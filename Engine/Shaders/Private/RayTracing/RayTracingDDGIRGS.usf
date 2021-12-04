@@ -1,0 +1,682 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#define USE_IES_TERM 0 // this shader doesn't bind the IES atlas, so disable the IES term from path tracer lights
+
+#include "../Common.ush"
+#include "../RectLight.ush"
+//#include "../MonteCarlo.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../ShadingModels.ush"
+#include "../SceneTextureParameters.ush"
+#include "RayTracingCommon.ush"
+#include "RayTracingDeferredShadingCommon.ush"
+#include "RayTracingHitGroupCommon.ush"
+
+#include "RayTracingTimingCommon.ush"
+
+#include "../PathTracing/Light/PathTracingLightSampling.ush"
+#include "../PathTracing/Material/PathTracingMaterialSampling.ush"
+#include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
+
+#include "../DDGI/Irradiance.ush"
+
+#define USE_PATHTRACING_MATERIALS 0
+
+RaytracingAccelerationStructure TLAS;
+RWTexture2D<float4> RWGlobalIlluminationUAV;
+RWTexture2D<float2> RWGlobalIlluminationRayDistanceUAV;
+
+uint SamplesPerPixel;
+uint MaxBounces;
+uint UpscaleFactor;
+float MaxRayDistanceForGI;
+float MaxRayDistanceForAO;
+float MaxShadowDistance;
+float NextEventEstimationSamples;
+float DiffuseThreshold;
+uint EvalSkyLight;
+uint UseRussianRoulette;
+uint UseFireflySuppression;
+float MaxNormalBias;
+uint RenderTileOffsetX;
+uint RenderTileOffsetY;
+uint AccumulateEmissive;
+
+// #if USE_LIGHTING_CHANNELS
+// Texture2D<uint>     LightingChannelsTexture;
+// #endif
+
+SamplerState        PointClampSampler;
+SamplerState        LinearClampSampler;
+uint                NumVolumes;
+
+// generate an array of structures for each probe volume
+#define VOLUME_ENTRY(x) \
+    Texture2D<float4> DDGIVolume_##x##_ProbeIrradiance; \
+    Texture2D<float4> DDGIVolume_##x##_ProbeDistance; \
+    Texture2D<float4> DDGIVolume_##x##_ProbeOffsets; \
+    Texture2D<uint> DDGIVolume_##x##_ProbeStates; \
+    float3 DDGIVolume_##x##_Position; \
+    float4 DDGIVolume_##x##_Rotation; \
+    float3 DDGIVolume_##x##_Radius; \
+    float3 DDGIVolume_##x##_ProbeGridSpacing; \
+    int3   DDGIVolume_##x##_ProbeGridCounts; \
+    uint   DDGIVolume_##x##_LightingChannelMask; \
+    int    DDGIVolume_##x##_ProbeNumIrradianceTexels; \
+    int    DDGIVolume_##x##_ProbeNumDistanceTexels; \
+    float  DDGIVolume_##x##_ProbeIrradianceEncodingGamma; \
+    float  DDGIVolume_##x##_NormalBias; \
+    float  DDGIVolume_##x##_ViewBias; \
+    float  DDGIVolume_##x##_BlendDistance; \
+    float  DDGIVolume_##x##_BlendDistanceBlack; \
+    float  DDGIVolume_##x##_ApplyLighting; \
+    int3   DDGIVolume_##x##_ProbeScrollOffsets; \
+    float  DDGIVolume_##x##_IrradianceScalar; \
+    int    DDGIVolume_##x##_ProbeNumRays; \
+    float4x4  DDGIVolume_##x##_RayRotationTransform;
+VOLUME_LIST
+#undef VOLUME_ENTRY
+RWTexture2D<float4> RWDebugUAV;
+
+RWTexture2D<float4> DDGIVolumeRayDataUAV;
+
+float4 ApplyVolumeLightingContribution(
+    Texture2D<float4> ProbeIrradiance,
+    Texture2D<float4> ProbeDistance,
+    Texture2D<float4> ProbeOffsets,
+    Texture2D<uint> ProbeStates,
+    float3 WorldPosition,
+    float3 Normal,
+    float3 CameraDirection,
+    uint PixelLightingMask,
+    uint VolumeLightingChannelMask,
+    float3 VolumeRadius,
+    RTDDGIVolumeDescGPU Volume,
+    float3 Albedo,
+    float BlendDistance,
+    float BlendDistanceBlack,
+    float ApplyLighting,
+    float IrradianceScalar)
+{
+    // Ignore the DDGIVolume if the lighting mask doesn't overlap
+    #if USE_LIGHTING_CHANNELS
+    if ((PixelLightingMask & VolumeLightingChannelMask) == 0)
+        return 0.f;
+    #endif
+
+    // Ignore the DDGIVolume if the pixel is outside of the DDGIVolume
+    float3 RelPos = WorldPosition - Volume.origin;
+    RelPos = abs(RTXGIQuaternionRotate(RelPos, RTXGIQuaternionConjugate(Volume.rotation)));
+    if ((RelPos.x > VolumeRadius.x || RelPos.y > VolumeRadius.y || RelPos.z > VolumeRadius.z))
+        return 0.f;
+
+    float4 LightWeight = 0.f;
+
+    // Get irradiance from the DDGIVolume
+    if (ApplyLighting > 0.0f)
+    {
+        // Fill out a DDGIVolumeResources
+        DDGIVolumeResources Resources;
+        {
+            Resources.probeIrradianceSRV = ProbeIrradiance;
+            Resources.probeDistanceSRV = ProbeDistance;
+            Resources.bilinearSampler = LinearClampSampler;
+        #if RTXGI_DDGI_PROBE_RELOCATION
+            Resources.probeOffsetsSRV = ProbeOffsets;
+        #endif
+        #if RTXGI_DDGI_PROBE_CLASSIFICATION
+            Resources.probeStatesSRV = ProbeStates;
+        #endif
+        }
+
+        float3 SurfaceBias = DDGIGetSurfaceBias(Normal, CameraDirection, Volume);
+        float3 Irradiance = DDGIGetVolumeIrradiance(
+            WorldPosition,
+            SurfaceBias,
+            Normal,
+            Volume,
+            Resources
+        );
+
+        LightWeight.rgb = Irradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
+    }
+    else
+    {
+        LightWeight.rgb = float3(0.0f, 0.0f, 0.0f);
+    }
+
+    float3 EdgeDist = (VolumeRadius - abs(RelPos));
+    float EdgeMinDist = min(EdgeDist.x, min(EdgeDist.y, EdgeDist.z));
+    if (BlendDistance == 0.0f)
+        LightWeight.a = (EdgeMinDist < BlendDistanceBlack) ? 0.0f : 1.0f;
+    else
+        LightWeight.a = clamp((EdgeMinDist - BlendDistanceBlack) / BlendDistance, 0.0f, 1.0f);
+
+    return LightWeight;
+}
+
+void GenerateCosineNormalRay(
+	float3 WorldPosition,
+	float3 WorldNormal,
+	float2 RandSample,
+	out float3 RayOrigin,
+	out float3 RayDirection,
+	out float RayTMin,
+	out float RayTMax,
+	out float RayPdf
+)
+{
+	// Perform cosine-hemispherical sampling and convert to world-space
+	float4 Direction_Tangent = CosineSampleHemisphere(RandSample);
+	float3 Direction_World = TangentToWorld(Direction_Tangent.xyz, WorldNormal);
+
+	RayOrigin = WorldPosition;
+	RayDirection = Direction_World;
+	RayTMin = 0.01;
+	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+	RayPdf = Direction_Tangent.w;
+}
+
+#define MAX_RAY_COUNT 256
+
+float InitRayCDF(float3 worldPosition,  float3 Normal,float3  CameraDirection,  RTDDGIVolumeDescGPU volume, inout float RayPickCDF[MAX_RAY_COUNT])
+{
+    // Bias the world space position
+    float3 surfaceBias = DDGIGetSurfaceBias(Normal, CameraDirection, volume);
+    float3 biasedWorldPosition = (worldPosition + surfaceBias);
+    // Get the 3D grid coordinates of the base probe (near the biased world position)
+    int3   baseProbeCoords = DDGIGetBaseProbeGridCoords(biasedWorldPosition, volume.origin, volume.rotation, volume.probeGridCounts, volume.probeGridSpacing);
+    // Get the adjacent probe's index (used for texture lookups)
+    int ProbeIndex = DDGIGetProbeIndex(baseProbeCoords, volume.probeGridCounts);
+
+	// Build irradiance estimate prefix sum
+	float CdfSum = 0.0;
+    const int rayCount = min( MAX_RAY_COUNT, volume.numRaysPerProbe);
+
+    for(uint rayIndex =0 ; rayIndex < rayCount; rayIndex++)
+    {
+        int2 probeRayIndex = int2(rayIndex,ProbeIndex);
+        float3 Direction_World = DDGIGetProbeRayDirection(rayIndex, volume.numRaysPerProbe, volume.probeRayRotationTransform);
+        // if( dot(Normal, Direction_World) > 0 )
+        float NdotL = saturate(dot(Normal, Direction_World));
+
+        #if (RTXGI_DDGI_FORMAT_RADIANCE == 1)
+            float3 probeRayRadiance = DDGIVolumeRayDataUAV[probeRayIndex].rgb;
+            float  probeRayDistance = DDGIVolumeRayDataUAV[probeRayIndex].a;
+        #else
+            float3 probeRayRadiance = RTXGIUintToFloat3(asuint(DDGIVolumeRayDataUAV[probeRayIndex].r));
+            float  probeRayDistance = DDGIVolumeRayDataUAV[probeRayIndex].g;
+        #endif
+
+        CdfSum += Luminance(probeRayRadiance * NdotL);
+        RayPickCDF[rayIndex] = CdfSum;
+    }
+    // for(uint rayIndex = 0 ; rayIndex < rayCount; rayIndex++)
+    // {
+    //     RayPickCDF[rayIndex] /= CdfSum;
+    // }
+    return CdfSum;
+}
+
+void SelectRay(float RandSample,int numRays, inout float RayPickCDF[MAX_RAY_COUNT], out int RayID, out float RayPickPdf)
+{
+#if 0
+	// linear search
+	float PreviousCdfValue = 0;
+	for (RayID = 0; RayID < numRays - 1; ++RayID)
+	{
+		if (RandSample < RayPickCDF[RayID])
+		{
+			break;
+		}
+		PreviousCdfValue = RayPickCDF[RayID];
+	}
+
+	RayPickPdf = RayPickCDF[RayID] - PreviousCdfValue;
+#else
+    // binary search
+	RayID = 0;
+	for (int Count = numRays; Count > 0;)
+	{
+		int Step = Count / 2;
+		int Iterator = RayID + Step;
+		if (RandSample < RayPickCDF[Iterator])
+		{
+			Count = Step;
+		}
+		else
+		{
+			RayID = Iterator + 1;
+			Count -= Step + 1;
+		}
+	}
+
+	RayPickPdf = RayPickCDF[RayID] - ((RayID > 0) ? RayPickCDF[RayID - 1] : 0.0);
+#endif
+}
+
+void GenerateGuidingRay(
+	float3 WorldPosition,
+	float3 WorldNormal,
+	float2 RandSample,
+    float RayPickCDF[MAX_RAY_COUNT],
+    float CdfSum,
+    RTDDGIVolumeDescGPU volume,
+	out float3 RayOrigin,
+	out float3 RayDirection,
+	out float RayTMin,
+	out float RayTMax,
+	out float RayPdf
+)
+{
+    int RayID = 0;
+    int rayCount = min( MAX_RAY_COUNT, volume.numRaysPerProbe);
+    
+    SelectRay(RandSample.x * CdfSum,rayCount, RayPickCDF, RayID, RayPdf);
+    RayPdf /= CdfSum;
+    // RayPdf = RayPdf * rayCount / ( 2 * 3.1416926 * CdfSum);
+    // RayID = min(RandSample.x *rayCount,rayCount-1 );
+    float3 Direction_World = DDGIGetProbeRayDirection(RayID, volume.numRaysPerProbe, volume.probeRayRotationTransform);
+	RayOrigin = WorldPosition;
+	RayDirection = Direction_World;
+	RayTMin = 0.01;
+	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+}
+
+RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
+{
+	uint2 DispatchThreadId = DispatchRaysIndex().xy + uint2(View.ViewRectMin.xy) + uint2(RenderTileOffsetX, RenderTileOffsetY);
+	RWGlobalIlluminationUAV[DispatchThreadId] = 0.0;
+	RWGlobalIlluminationRayDistanceUAV[DispatchThreadId] = float2(-1.0, 0.0);
+
+	uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
+	uint LinearIndex = CalcLinearIndex(PixelCoord);
+
+	bool IsUnidirectionalEnabled = false;
+
+	// Get G-Buffer surface data
+	float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
+	float2 UV = (float2(PixelCoord) + 0.5) * InvBufferSize;
+
+#if 0
+	FGBufferData GBufferData = GetGBufferDataFromSceneTextures(UV);
+#else
+	//#dxr-todo: workaround for flickering. UE-87281
+	FGBufferData GBufferData = GetGBufferDataFromSceneTexturesLoad(PixelCoord);
+#endif
+	// Remap DiffuseColor when using SubsurfaceProfile (GBuffer decoding replaces with 100% albedo)
+	if (UseSubsurfaceProfile(GBufferData.ShadingModelID))
+	{
+		GBufferData.DiffuseColor = GBufferData.StoredBaseColor;
+	}
+	float DeviceZ = SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+	float3 WorldPosition;
+	float3 CameraDirection;
+	ReconstructWorldPositionAndCameraDirectionFromDeviceZ(PixelCoord, DeviceZ, WorldPosition, CameraDirection);
+	float3 WorldNormal = GBufferData.WorldNormal;
+	uint ShadingModelID = GBufferData.ShadingModelID;
+	if (ShadingModelID == SHADINGMODELID_UNLIT)
+	{
+		return;
+	}
+
+	// Diffuse color rejection threshold
+	float3 DiffuseColor = GBufferData.DiffuseColor;
+	if (Luminance(DiffuseColor) < DiffuseThreshold)
+	{
+		return;
+	}
+
+	float3 Irradiance = 0;
+	float HitDistance = 0.0;
+	float HitCount = 0.0;
+	float AmbientOcclusion = 0.0;
+    
+    uint PixelLightingMask = 0;
+    // Make DDGIVolumeDescGPU's. Rely on inlining and deadstripping to make this a noop.
+    #define VOLUME_ENTRY(x) \
+        RTDDGIVolumeDescGPU DDGIVolume_##x; \
+        DDGIVolume_##x.origin = DDGIVolume_##x##_Position; \
+        DDGIVolume_##x.rotation = DDGIVolume_##x##_Rotation; \
+        DDGIVolume_##x.probeGridSpacing = DDGIVolume_##x##_ProbeGridSpacing; \
+        DDGIVolume_##x.probeGridCounts = DDGIVolume_##x##_ProbeGridCounts; \
+        DDGIVolume_##x.probeNumIrradianceTexels = DDGIVolume_##x##_ProbeNumIrradianceTexels; \
+        DDGIVolume_##x.probeNumDistanceTexels = DDGIVolume_##x##_ProbeNumDistanceTexels; \
+        DDGIVolume_##x.probeIrradianceEncodingGamma = DDGIVolume_##x##_ProbeIrradianceEncodingGamma; \
+        DDGIVolume_##x.normalBias = DDGIVolume_##x##_NormalBias; \
+        DDGIVolume_##x.viewBias = DDGIVolume_##x##_ViewBias; \
+        DDGIVolume_##x.probeScrollOffsets = DDGIVolume_##x##_ProbeScrollOffsets;\
+        DDGIVolume_##x.numRaysPerProbe = DDGIVolume_##x##_ProbeNumRays;\
+        DDGIVolume_##x.probeRayRotationTransform = DDGIVolume_##x##_RayRotationTransform;
+    VOLUME_LIST
+    #undef VOLUME_ENTRY
+    float RayPickCDF[MAX_RAY_COUNT];
+    float CdfSum = InitRayCDF(WorldPosition, WorldNormal,CameraDirection, DDGIVolume_0, RayPickCDF);
+    for (uint SampleIndex = 0; SampleIndex < SamplesPerPixel; ++SampleIndex)
+	{
+		RandomSequence RandSequence;
+		RandomSequence_Initialize(RandSequence, PixelCoord, SampleIndex, View.StateFrameIndex, SamplesPerPixel);
+
+		float3 RayThroughput = 1.0;
+		float3 RandSample = RandomSequence_GenerateSample3D(RandSequence);
+
+		// Russian roulette based on DiffuseColor
+		if (UseRussianRoulette)
+		{
+			float RRSample = RandSample.x;
+			float ProbabilityOfSuccess = Luminance(DiffuseColor);
+			float ProbabilityOfTermination = 1.0 - ProbabilityOfSuccess;
+			if (RRSample < ProbabilityOfTermination) continue;
+			RayThroughput /= ProbabilityOfSuccess;
+		}
+
+		// Initialize ray
+		RayDesc Ray;
+		float RayPdf = 1.0;
+#if 1
+		// GenerateCosineNormalRay(WorldPosition, WorldNormal, RandSample.yz, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
+		
+        GenerateGuidingRay( WorldPosition, WorldNormal, RandSample.yz, RayPickCDF,CdfSum ,DDGIVolume_0,
+            Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
+        half3 N = WorldNormal;
+		half3 V = -CameraDirection;
+		half3 L = Ray.Direction;
+		float NoL = saturate(dot(N, L));
+		FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
+		FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
+		RayThroughput *= LightingSample.Diffuse / DiffuseColor;
+#else
+		float2 RandSample = RandomSequence_GenerateSample2D(RandSequence);
+		float2 ViewportUV = (PixelCoord.xy + RandSample.xy) * View.BufferSizeAndInvSize.zw;
+		Ray.Origin = ReconstructWorldPositionFromDepth(ViewportUV, 0.0f);
+		Ray.Direction = normalize(ReconstructWorldPositionFromDepth(ViewportUV, 1.f) - Ray.Origin);
+		Ray.TMin = 0.0;
+		Ray.TMax = 1.0e12;
+		float3 RayThroughput = 1.0;
+#endif
+		Ray.TMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+		ApplyCameraRelativeDepthBias(Ray, PixelCoord, DeviceZ, WorldNormal, MaxNormalBias);
+		
+		float MaterialPdf = 0.0;
+		uint Bounce = 0;
+		while (Bounce < 1)
+		{
+			// Cast ray
+			uint RayFlags = 0;
+			const uint InstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
+			const bool bEnableSkyLightContribution = true;
+			const bool bIgnoreTranslucentMaterials = false;
+
+#if !ENABLE_TWO_SIDED_GEOMETRY
+			RayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+#endif
+
+			FRayCone RayCone = (FRayCone)0;
+			FMaterialClosestHitPayload Payload = TraceMaterialRay(
+				TLAS,
+				RayFlags,
+				InstanceInclusionMask,
+				Ray,
+				RayCone,
+				PixelCoord,
+				bEnableSkyLightContribution,
+				bIgnoreTranslucentMaterials);
+
+			// Environment hit
+			if (Payload.IsMiss())
+			{
+				// Optional multi-bounce SkyLight contribution
+				if (EvalSkyLight && Bounce > 0)
+				{
+					uint SkyLightId = 0;
+					RayDesc LightRay = Ray;
+					LightRay.TMax = POSITIVE_INFINITY;
+					float3 EnvironmentRadiance = SkyLight_TraceLight(Ray, SkyLightId).Radiance;
+					Irradiance += EnvironmentRadiance * RayThroughput / RayPdf;
+				}
+				break;
+			}
+
+			if (Bounce == 0)
+			{
+				HitDistance += Payload.HitT;
+				HitCount += 1.0;
+				if (Payload.HitT < MaxRayDistanceForAO)
+				{
+					AmbientOcclusion += 1.0;
+				}
+                // NOTE: if wanting to visualize / debug the blend, it's useful to hard code some colors temporarily.
+                // like have volume zero be red, and volume one be yellow
+
+                float4 AccLightWeight = 0.f;
+
+                // Blending logic:
+                // Probes from overlapping volumes will accumulate very similar irradiance.
+                // Therefore, as long as we are in fade region(-s), keep color from the densest volume, but max() the weight to preserve luminance of the fade.
+                // Finally, if we are in non fade region of a specific volume, lerp() accumulated irradiance with irradiance from that volume.
+                #define VOLUME_ENTRY(x) \
+                if (x < NumVolumes && AccLightWeight.a < 1.f) \
+                { \
+                    float4 LightWeight = ApplyVolumeLightingContribution( \
+                        DDGIVolume_##x##_ProbeIrradiance, \
+                        DDGIVolume_##x##_ProbeDistance, \
+                        DDGIVolume_##x##_ProbeOffsets, \
+                        DDGIVolume_##x##_ProbeStates, \
+                        Ray.Origin, \
+                        Payload.WorldNormal, \
+                        Ray.Direction, \
+                        PixelLightingMask, \
+                        uint(DDGIVolume_##x##_LightingChannelMask), \
+                        DDGIVolume_##x##_Radius, \
+                        DDGIVolume_##x, \
+                        Payload.DiffuseColor, \
+                        DDGIVolume_##x##_BlendDistance, \
+                        DDGIVolume_##x##_BlendDistanceBlack, \
+                        DDGIVolume_##x##_ApplyLighting, \
+                        DDGIVolume_##x##_IrradianceScalar); \
+                    \
+                    if (AccLightWeight.a == 0.f) \
+                    { \
+                        AccLightWeight = LightWeight; \
+                    } \
+                    else if (LightWeight.a < 1.f) \
+                    { \
+                        AccLightWeight.a = max(AccLightWeight.a, LightWeight.a); \
+                    } \
+                    else if (LightWeight.a == 1.f) \
+                    { \
+                        AccLightWeight.rgb = lerp(LightWeight.rgb, AccLightWeight.rgb, AccLightWeight.a); \
+                        AccLightWeight.a = 1.f; \
+                    } \
+                }
+                VOLUME_LIST
+                #undef VOLUME_ENTRY
+                RWDebugUAV[DispatchThreadId] = float4(AccLightWeight.rgb * AccLightWeight.a,1.0);
+                // Irradiance += AccLightWeight.rgb * AccLightWeight.a;
+			}
+			if (Payload.HitT > MaxRayDistanceForGI) break;
+
+			// Update intersection
+			Ray.Origin += Ray.Direction * Payload.HitT;
+
+			// Create faux GBuffer to use with EvaluateBxDF
+			FGBufferData GBufferData = (FGBufferData)0;
+			GBufferData.Depth = 1.f; // Do not use depth
+			GBufferData.WorldNormal = Payload.WorldNormal;
+			GBufferData.BaseColor = Payload.BaseColor;
+			GBufferData.CustomData = Payload.CustomData;
+			GBufferData.GBufferAO = Payload.GBufferAO;
+			GBufferData.IndirectIrradiance = (Payload.IndirectIrradiance.x + Payload.IndirectIrradiance.y + Payload.IndirectIrradiance.z) / 3.f;
+			GBufferData.SpecularColor = Payload.SpecularColor;
+			GBufferData.DiffuseColor = Payload.DiffuseColor;			
+			GBufferData.Metallic = Payload.Metallic;
+			GBufferData.Specular = Payload.Specular;
+			GBufferData.Roughness = Payload.Roughness;
+			GBufferData.ShadingModelID = Payload.ShadingModelID;
+			GBufferData.CustomData = Payload.CustomData;
+
+			if (AccumulateEmissive)
+			{
+				Irradiance += Payload.Radiance;
+			}
+
+			// Perform next-event estimation
+			float SplitFactor = 1.0 / NextEventEstimationSamples;
+			for (uint NeeTrial = 0; NeeTrial < NextEventEstimationSamples; ++NeeTrial)
+			{
+				// Light selection
+				int LightId;
+				float3 LightRadianceOverPdf = 0;
+				float NeePdf = 0.0;
+
+				float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
+
+				RayDesc LightRay;
+				if (SampleLight(RandSample3,
+								Ray.Origin,
+								Payload.WorldNormal,
+								Payload.PrimitiveLightingChannelMask,
+								ENABLE_TRANSMISSION,
+								LightId,
+								LightRay.Direction,
+								LightRay.TMax,
+								LightRadianceOverPdf,
+								NeePdf))
+				{
+					LightRay.Origin = Ray.Origin;
+					LightRay.TMin = 0;
+					LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
+					bool bTransmission = HasTransmission(LightId);
+					float3 BiasNormal = Payload.WorldNormal;
+					if (bTransmission && dot(BiasNormal, LightRay.Direction) < 0.0)
+					{
+						BiasNormal = -BiasNormal;
+					}
+					ApplyPositionBias(LightRay, BiasNormal, MaxNormalBias);
+
+					// Trace visibility ray
+					uint NeeRayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+					const uint NeeInstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
+
+#if !ENABLE_TWO_SIDED_GEOMETRY
+					NeeRayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+#endif
+
+					FMinimalPayload NeePayload = TraceVisibilityRay(
+						TLAS,
+						NeeRayFlags,
+						NeeInstanceInclusionMask,
+						PixelCoord,
+						LightRay);
+
+					// No hit indicates successful next-event connection
+					if (NeePayload.IsMiss())
+					{
+						// Evaluate material
+						float3 MaterialThroughput;
+						float MaterialEvalPdf = 0.0;
+#if USE_PATHTRACING_MATERIALS
+						float3 MaterialWeight = 0;
+						EvalMaterial(Ray.Direction, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
+						MaterialThroughput = MaterialWeight * MaterialEvalPdf;
+#else
+						half3 N = Payload.WorldNormal;
+						half3 V = -Ray.Direction;
+						half3 L = LightRay.Direction;
+						float NoL = saturate(dot(N, L));
+						FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
+						FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
+						MaterialThroughput = LightingSample.Diffuse;
+						if (bTransmission)
+						{
+							MaterialThroughput += LightingSample.Transmission;
+						}
+						MaterialEvalPdf = 1.0;
+#endif
+
+						// Record the contribution
+						float3 ExitantRadianceSample = LightRadianceOverPdf * MaterialThroughput * RayThroughput * SplitFactor / RayPdf;
+
+						// Tonemap for firefly suppression
+						if (UseFireflySuppression)
+						{
+							ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
+						}
+
+						Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
+					}
+				}
+			}
+			// Perform material sampling
+// 			if (Bounce + 1 < MaxBounces)
+// 			{
+// 				float3 Direction;
+// 				float3 Throughput = 1.0;
+// #if USE_PATHTRACING_MATERIALS
+// 				RandSample4 = RandomSequence_GenerateSample4D(RandSequence);
+
+// 				float PositionBiasSign;
+// 				float3 Weight = 0;
+// 				SampleMaterial(Ray.Direction, Payload, RandSample, Direction, Weight, MaterialPdf, PositionBiasSign);
+// 				Throughput = Weight * MaterialPdf;
+// #else
+
+// 				float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
+
+// 				float3 RayOrigin = Ray.Origin;
+// 				GenerateCosineNormalRay(RayOrigin, Payload.WorldNormal, RandSample3.xy, Ray.Origin, Direction, Ray.TMin, Ray.TMax, MaterialPdf);
+				
+// 				half3 N = Payload.WorldNormal;
+// 				half3 V = -Ray.Direction;
+// 				half3 L = Direction;
+// 				float NoL = saturate(dot(N, L));
+// 				FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
+// 				FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
+// 				Throughput = LightingSample.Diffuse;
+// #endif
+// 				if (MaterialPdf <= 0.0)
+// 				{
+// 					break;
+// 				}
+
+// 				// Update ray
+// 				Ray.Direction = Direction;
+// 				RayThroughput *= Throughput;
+// 				RayPdf *= MaterialPdf;
+// 			}
+
+			Bounce++;
+		}
+	}
+
+	if (SamplesPerPixel > 0)
+	{
+		Irradiance /= SamplesPerPixel;
+		// Tonemap inversion for firefly suppression
+		if (UseFireflySuppression)
+		{
+			Irradiance *= rcp(1 - Luminance(Irradiance));
+		}
+
+		AmbientOcclusion /= SamplesPerPixel;
+	}
+
+	if (HitCount > 0.0)
+	{
+		HitDistance /= HitCount;
+	}
+	else
+	{
+		HitDistance = -1.0;
+	}
+
+	AmbientOcclusion = saturate(AmbientOcclusion);
+
+#if USE_PREEXPOSURE
+	Irradiance *= View.PreExposure;
+#endif
+
+	Irradiance = ClampToHalfFloatRange(Irradiance);
+	RWGlobalIlluminationUAV[DispatchThreadId] = float4(Irradiance, AmbientOcclusion);
+	RWGlobalIlluminationRayDistanceUAV[DispatchThreadId] = float2(HitDistance, SamplesPerPixel);
+}

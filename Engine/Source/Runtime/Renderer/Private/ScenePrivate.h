@@ -80,9 +80,11 @@ class UStaticMesh;
 class UStaticMeshComponent;
 class UTextureCube;
 class UWindDirectionalSourceComponent;
+class UTestGIComponent;
 class FRHIGPUBufferReadback;
 class FRHIGPUTextureReadback;
 class FRuntimeVirtualTextureSceneProxy;
+class FTestGIVolumeSceneProxy;
 
 /** Holds information about a single primitive's occlusion. */
 class FPrimitiveOcclusionHistory
@@ -2498,6 +2500,9 @@ public:
 	/** Packed array of runtime virtual texture lod info. */
 	TArray<FPrimitiveVirtualTextureLodInfo> PrimitiveVirtualTextureLod;
 
+	/*GI Volume*/
+	TSet<FTestGIVolumeSceneProxy*>	TestGIProxies;
+
 	TBitArray<> PrimitivesNeedingStaticMeshUpdate;
 	TSet<FPrimitiveSceneInfo*> PrimitivesNeedingStaticMeshUpdateWithoutVisibilityCheck;
 
@@ -2751,6 +2756,14 @@ public:
 	virtual ~FScene();
 
 	// FSceneInterface interface.
+		/*
+	*/
+	virtual void AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override;
+
+	virtual void RemoveTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override;
+
+	virtual void AddTestGIVolume(UTestGIComponent* TestGI) override;
+	virtual void RemoveTestGIVolume(UTestGIComponent* TestGI) override;
 	virtual void AddPrimitive(UPrimitiveComponent* Primitive) override;
 	virtual void RemovePrimitive(UPrimitiveComponent* Primitive) override;
 	virtual void ReleasePrimitive(UPrimitiveComponent* Primitive) override;

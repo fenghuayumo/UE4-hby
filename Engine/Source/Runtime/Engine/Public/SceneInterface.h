@@ -30,9 +30,11 @@ class UPrimitiveComponent;
 class UReflectionCaptureComponent;
 class USkyLightComponent;
 class UStaticMeshComponent;
+class UTestGIComponent;
 class UTextureCube;
 class FViewInfo;
 class FSceneRenderer;
+class FTestGIVolumeSceneProxy;
 
 enum EBasePassDrawListType
 {
@@ -54,6 +56,11 @@ public:
 
 	// FSceneInterface interface
 
+	virtual void AddTestGIVolume(UTestGIComponent* TestGI)  = 0;
+	virtual void RemoveTestGIVolume(UTestGIComponent* TestGI)  = 0;
+	virtual void AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) = 0;
+
+	virtual void RemoveTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) = 0;
 	/** 
 	 * Adds a new primitive component to the scene
 	 * 

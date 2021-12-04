@@ -46,6 +46,8 @@ Texture2D<float4> NormalHistory;
 
 RWTexture2D<float4> RWGlobalIlluminationUAV;
 RWTexture2D<float2> RWGlobalIlluminationRayDistanceUAV;
+// RWStructuredBuffer<uint> CheckSumBuffer;
+// RWStructuredBuffer<uint>	CellCounters;
 
 float MaxNormalBias;
 int InputSlice;
@@ -209,6 +211,25 @@ bool CheckApproximateVisibility(uint2 PixelCoord, float DeviceZ, float3 WorldPos
 
 	return !MinimalPayload.IsHit();
 }
+
+// uint FindOrInsertCell(float3 WorldPos)
+// {
+// 	float pSize;
+// 	uint3 p = uint3(floor(WorldPos.x / pSize), floor( (WorldPos.y / pSize), floor(WorldPos.z / pSize));
+// 	uint cell_index = pcg(pSize + pcg(p.z + pcg(p.y + pcg(p.z)))) % 100000;
+// 	uint checkSum = max(xxhash32(pSize + xxhash32(p.z + xxhash32(p.y + xxhash32(p.z)))), 1);
+// 	uint i = 0;
+// 	for(; i < 32; i++)
+// 	{
+// 		idx = i + cell_index * 32;
+// 		uint checkSumPrev;
+// 		InterlockedCompareExchange(CheckSumBuffer[idx] ,0, checkSum, checkSumPrev);
+// 		if(checkSumPrev == 0 || checkSumPrev == checkSum )
+// 			break;
+// 	}
+
+// 	return i + cell_index * 32;
+// }
 
 void GenerateCosineNormalRay(
 	float3 WorldPosition,

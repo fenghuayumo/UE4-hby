@@ -31,6 +31,7 @@
 #include "Components/DecalComponent.h"
 #include "Components/ReflectionCaptureComponent.h"
 #include "Components/RuntimeVirtualTextureComponent.h"
+#include "Components/TestGIComponent.h"
 #include "ScenePrivateBase.h"
 #include "SceneCore.h"
 #include "Rendering/MotionVectorSimulation.h"
@@ -59,6 +60,7 @@
 #include "GPUScene.h"
 #include "HAL/LowLevelMemTracker.h"
 #include "VT/RuntimeVirtualTextureSceneProxy.h"
+#include "Engine/TestGIVolume.h"
 #if RHI_RAYTRACING
 #include "RayTracingDynamicGeometryCollection.h"
 #endif
@@ -1848,6 +1850,53 @@ bool FScene::HasAtmosphereLightRequiringLightingBuild() const
 		AnySunLightNotMovable |= AtmosphereLights[Index] != nullptr && !AtmosphereLights[Index]->Proxy->IsMovable();
 	}
 	return AnySunLightNotMovable;
+}
+
+void FScene::AddTestGIVolume(UTestGIComponent* TestGI)
+{
+	LLM_SCOPE(ELLMTag::SceneRender);
+	// Create the light's scene proxy.
+	FTestGIVolumeSceneProxy* Proxy = TestGI->CreateTestGIProxy();
+
+	if (Proxy)
+	{
+		// Send a command to the rendering thread to add the light to the scene.
+		//FScene* Scene = this;
+
+		//ENQUEUE_RENDER_COMMAND(FAddTestGIVolumeCommand)(
+		//	[Scene, Proxy](FRHICommandListImmediate& RHICmdList)
+		//	{
+		//		CSV_SCOPED_TIMING_STAT_EXCLUSIVE(Scene_AddTestGIProxy);
+		//		Scene->AddTestGIVolumeSceneProxy_RenderThread(Proxy);
+		//	});
+	}
+
+}
+
+void FScene::RemoveTestGIVolume(UTestGIComponent* TestGI)
+{
+	FTestGIVolumeSceneProxy* SceneProxy = TestGI->SceneProxy;
+
+	//if (SceneProxy)
+	//{
+	//	// Send a command to the rendering thread to remove the primitive from the scene.
+	//	FScene* Scene = this;
+	//	ENQUEUE_RENDER_COMMAND(FRemoveTestGICommand)(
+	//		[Scene, SceneProxy](FRHICommandList&)
+	//		{
+	//			Scene->RemoveTestGIVolumeSceneProxy_RenderThread(SceneProxy);
+	//		});
+	//}
+}
+
+void FScene::AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component)
+{
+	TestGIProxies.Add(Component);
+}
+
+void FScene::RemoveTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component)
+{
+	TestGIProxies.Remove(Component);
 }
 
 void FScene::AddOrRemoveDecal_RenderThread(FDeferredDecalProxy* Proxy, bool bAdd)
@@ -4412,6 +4461,11 @@ public:
 		}
 	}
 
+	virtual void AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override {}
+
+	virtual void RemoveTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override {}
+	virtual void AddTestGIVolume(UTestGIComponent* TestGI) override {}
+	virtual void RemoveTestGIVolume(UTestGIComponent* TestGI) override {}
 	virtual void AddPrimitive(UPrimitiveComponent* Primitive) override {}
 	virtual void RemovePrimitive(UPrimitiveComponent* Primitive) override {}
 	virtual void ReleasePrimitive(UPrimitiveComponent* Primitive) override {}

@@ -25,6 +25,8 @@
 #include "RayTracingTypes.h"
 #include "PathTracingDefinitions.h"
 #include "PathTracing.h"
+#include "RayTracingDDGIUpdate.h"
+#include "Components/TestGIComponent.h"
 
 static TAutoConsoleVariable<int32> CVarRayTracingGlobalIllumination(
 	TEXT("r.RayTracing.GlobalIllumination"),
@@ -33,7 +35,8 @@ static TAutoConsoleVariable<int32> CVarRayTracingGlobalIllumination(
 	TEXT(" 0: ray tracing global illumination off \n")
 	TEXT(" 1: ray tracing restir global illumination off \n")
 	TEXT(" 2: ray tracing global illumination enabled (brute force) \n")
-	TEXT(" 3: ray tracing global illumination enabled (final gather)"),
+	TEXT(" 3: ray tracing global illumination enabled (final gather)")
+	TEXT(" 4: ray tracing ddgi\n"),
 	ECVF_RenderThreadSafe
 );
 
@@ -405,12 +408,18 @@ static TAutoConsoleVariable<int32> CVarRayTracingRestirGIFeedbackVisibility(
 	TEXT("Whether to feedback the final visibility result to the history (default = 1)"),
 	ECVF_RenderThreadSafe);
 
-
+static TAutoConsoleVariable<float> CVarRayGuidingCellSize(
+	TEXT("r.RayTracing.RayGuidingCellSize"),
+	1,
+	TEXT("Set Spatial Cell Size (default = 1)"),
+	ECVF_RenderThreadSafe);
 
 DECLARE_GPU_STAT_NAMED(RayTracingGIBruteForce, TEXT("Ray Tracing GI: Brute Force"));
 DECLARE_GPU_STAT_NAMED(RayTracingGIFinalGather, TEXT("Ray Tracing GI: Final Gather"));
 DECLARE_GPU_STAT_NAMED(RayTracingGIRestir, TEXT("Ray Tracing GI: Restir"));
 DECLARE_GPU_STAT_NAMED(RayTracingGICreateGatherPoints, TEXT("Ray Tracing GI: Create Gather Points"));
+DECLARE_GPU_STAT_NAMED(RayTracingDDGI, TEXT("Ray Tracing GI: DDGI"));
+DECLARE_GPU_STAT_NAMED(RTDDGI_Update, TEXT("Ray TracingDDGI Update"));
 
 DECLARE_GPU_STAT_NAMED(RestirGenerateSample, TEXT("Ray Tracing GI: GenerateSample"));
 DECLARE_GPU_STAT_NAMED(RestirTemporalResampling, TEXT("Ray Tracing GI: TemporalResampling"));
@@ -580,6 +589,17 @@ bool IsFinalGatherEnabled(const FViewInfo& View)
 	}
 
 	return View.FinalPostProcessSettings.RayTracingGIType == ERayTracingGlobalIlluminationType::FinalGather;
+}
+
+bool IsRayTracingDDGI(const FViewInfo& View)
+{
+	int32 CVarRayTracingGlobalIlluminationValue = CVarRayTracingGlobalIllumination.GetValueOnRenderThread();
+	if (CVarRayTracingGlobalIlluminationValue >= 0)
+	{
+		return CVarRayTracingGlobalIlluminationValue == 4;
+	}
+
+	return View.FinalPostProcessSettings.RayTracingGIType == ERayTracingGlobalIlluminationType::DDGIPlus;
 }
 
 class FGlobalIlluminationRGS : public FGlobalShader
@@ -851,16 +871,45 @@ class FRayTracingGlobalIlluminationFinalGatherRGS : public FGlobalShader
 
 IMPLEMENT_GLOBAL_SHADER(FRayTracingGlobalIlluminationFinalGatherRGS, "/Engine/Private/RayTracing/RayTracingFinalGatherRGS.usf", "RayTracingFinalGatherRGS", SF_RayGen);
 
+BEGIN_SHADER_PARAMETER_STRUCT(FVolumeData, )
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeIrradiance)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeDistance)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeOffsets)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, ProbeStates)
+SHADER_PARAMETER(FVector, Position)
+SHADER_PARAMETER(FVector4, Rotation)
+SHADER_PARAMETER(FVector, Radius)
+SHADER_PARAMETER(FVector, ProbeGridSpacing)
+SHADER_PARAMETER(FIntVector, ProbeGridCounts)
+SHADER_PARAMETER(FIntVector, ProbeScrollOffsets)
+SHADER_PARAMETER(uint32, LightingChannelMask)
+SHADER_PARAMETER(int, ProbeNumIrradianceTexels)
+SHADER_PARAMETER(int, ProbeNumDistanceTexels)
+SHADER_PARAMETER(float, ProbeIrradianceEncodingGamma)
+SHADER_PARAMETER(float, NormalBias)
+SHADER_PARAMETER(float, ViewBias)
+SHADER_PARAMETER(float, BlendDistance)
+SHADER_PARAMETER(float, BlendDistanceBlack)
+SHADER_PARAMETER(float, ApplyLighting)
+SHADER_PARAMETER(float, IrradianceScalar)
+SHADER_PARAMETER(int, ProbeNumRays)
+SHADER_PARAMETER(FMatrix, RayRotationTransform)
+END_SHADER_PARAMETER_STRUCT()
 
-class FGlobalIlluminationTestRGS : public FGlobalShader
+class FGlobalIlluminationDDGIRGS : public FGlobalShader
 {
-	DECLARE_GLOBAL_SHADER(FGlobalIlluminationTestRGS)
-	SHADER_USE_ROOT_PARAMETER_STRUCT(FGlobalIlluminationTestRGS, FGlobalShader)
+	DECLARE_GLOBAL_SHADER(FGlobalIlluminationDDGIRGS)
+	SHADER_USE_ROOT_PARAMETER_STRUCT(FGlobalIlluminationDDGIRGS, FGlobalShader)
 
-		class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
+	class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
 	class FEnableTransmissionDim : SHADER_PERMUTATION_INT("ENABLE_TRANSMISSION", 2);
-
-	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableTransmissionDim>;
+	//class FLightingChannelsDim : SHADER_PERMUTATION_BOOL("USE_LIGHTING_CHANNELS");
+	class FEnableRelocation : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_PROBE_RELOCATION");
+	class FEnableScrolling : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_INFINITE_SCROLLING_VOLUME");
+	class FFormatRadiance : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_FORMAT_RADIANCE");
+	class FFormatIrradiance : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_FORMAT_IRRADIANCE");
+	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableTransmissionDim, FEnableRelocation, FEnableScrolling,
+		FFormatRadiance, FFormatIrradiance>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -871,6 +920,16 @@ class FGlobalIlluminationTestRGS : public FGlobalShader
 	{
 		// We need the skylight to do its own form of MIS because RTGI doesn't do its own
 		OutEnvironment.SetDefine(TEXT("PATHTRACING_SKY_MIS"), 1);
+
+		FString volumeMacroList;
+		for (int i = 0; i < FTestGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES; ++i)
+			volumeMacroList += FString::Printf(TEXT(" VOLUME_ENTRY(%i)"), i);
+		OutEnvironment.SetDefine(TEXT("VOLUME_LIST"), volumeMacroList.GetCharArray().GetData());
+
+		OutEnvironment.SetDefine(TEXT("RTXGI_DDGI_PROBE_CLASSIFICATION"), FTestGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_PROBE_CLASSIFICATION ? 1 : 0);
+
+		// needed for a typed UAV load. This already assumes we are raytracing, so should be fine.
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
 	}
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
@@ -886,7 +945,8 @@ class FGlobalIlluminationTestRGS : public FGlobalShader
 		SHADER_PARAMETER(uint32, UseRussianRoulette)
 		SHADER_PARAMETER(uint32, UseFireflySuppression)
 		SHADER_PARAMETER(float, MaxNormalBias)
-
+		SHADER_PARAMETER(uint32, RenderTileOffsetX)
+		SHADER_PARAMETER(uint32, RenderTileOffsetY)
 		SHADER_PARAMETER(uint32, AccumulateEmissive)
 
 		SHADER_PARAMETER_SRV(RaytracingAccelerationStructure, TLAS)
@@ -899,10 +959,17 @@ class FGlobalIlluminationTestRGS : public FGlobalShader
 		SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureParameters, SceneTextures)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, TransmissionProfilesLinearSampler)
-		END_SHADER_PARAMETER_STRUCT()
+		//SHADER_PARAMETER_RDG_TEXTURE(Texture2D, LightingChannelsTexture)
+		SHADER_PARAMETER_SAMPLER(SamplerState, PointClampSampler)
+		SHADER_PARAMETER_SAMPLER(SamplerState, LinearClampSampler)
+		SHADER_PARAMETER(int32, NumVolumes)
+		SHADER_PARAMETER_STRUCT_ARRAY(FVolumeData, DDGIVolume, [FTestGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES])
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWDebugUAV)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, DDGIVolumeRayDataUAV)
+	END_SHADER_PARAMETER_STRUCT()
 };
 
-IMPLEMENT_GLOBAL_SHADER(FGlobalIlluminationTestRGS, "/Engine/Private/RayTracing/RayTracingGITest.usf", "GlobalIlluminationRGS", SF_RayGen);
+IMPLEMENT_GLOBAL_SHADER(FGlobalIlluminationDDGIRGS, "/Engine/Private/RayTracing/RayTracingDDGIRGS.usf", "GlobalIlluminationRGS", SF_RayGen);
 
 
 struct RTXGI_PackedReservoir
@@ -933,14 +1000,10 @@ END_SHADER_PARAMETER_STRUCT()
 
 static void ApplyRestirGIGlobalSettings(FShaderCompilerEnvironment& OutEnvironment)
 {
-	//OutEnvironment.SetDefine(TEXT("RTXGI_INTEGRATION_VERSION"), 4270);
-
-	//OutEnvironment.SetDefine(TEXT("LIGHT_ESTIMATION_MODE"), 1);
 	OutEnvironment.SetDefine(TEXT("USE_ALTERNATE_RNG"), 0);
 	OutEnvironment.SetDefine(TEXT("USE_LDS_FOR_SPATIAL_RESAMPLE"), 1);
 	// We need the skylight to do its own form of MIS because RTGI doesn't do its own
 	OutEnvironment.SetDefine(TEXT("PATHTRACING_SKY_MIS"), 1);
-	//OutEnvironment.SetDefine(TEXT("RESTIR_BIAS"), 1);
 }
 
 class FRestirGIInitialSamplesRGS : public FGlobalShader
@@ -1052,11 +1115,6 @@ class FEvaluateRestirGIRGS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FEvaluateRestirGIRGS)
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FEvaluateRestirGIRGS, FGlobalShader)
-
-	//class FEvaluateLightingDim : SHADER_PERMUTATION_BOOL("EVALUATE_LIGHTING_SAMPLED");
-	//class FHairLightingDim : SHADER_PERMUTATION_BOOL("USE_HAIR_LIGHTING");
-
-	//using FPermutationDomain = TShaderPermutationDomain<>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -1250,6 +1308,12 @@ public:
 /** The global resource for the disc sample buffer. */
 TGlobalResource<FRestirGIDiscSampleBuffer> GRestiGIDiscSampleBuffer;
 
+struct SceneBounds
+{
+	FVector		pMin;
+	FVector		PMax;
+};
+
 bool ShouldRenderRayTracingRestirGI(const FViewInfo& View)
 {
 	const int32 CVarRayTracingGlobalIlluminationValue = CVarRayTracingGlobalIllumination.GetValueOnRenderThread();
@@ -1317,10 +1381,15 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIllumination(const FV
 		}
 
 		{
-			FGlobalIlluminationTestRGS::FPermutationDomain PermutationVector;
-			PermutationVector.Set<FGlobalIlluminationTestRGS::FEnableTwoSidedGeometryDim>(EnableTwoSidedGeometry == 1);
-			PermutationVector.Set<FGlobalIlluminationTestRGS::FEnableTransmissionDim>(EnableTransmission);
-			TShaderMapRef<FGlobalIlluminationTestRGS> RayGenerationShader1(View.ShaderMap, PermutationVector);
+			FGlobalIlluminationDDGIRGS::FPermutationDomain PermutationVector;
+			PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableTwoSidedGeometryDim>(EnableTwoSidedGeometry == 1);
+			PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableTransmissionDim>(EnableTransmission);
+			PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableRelocation>(true);
+			PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableScrolling>(false);
+			PermutationVector.Set<FGlobalIlluminationDDGIRGS::FFormatIrradiance>(false);
+			PermutationVector.Set<FGlobalIlluminationDDGIRGS::FFormatRadiance>(false);
+			//PermutationVector.Set<FGlobalIlluminationDDGIRGS::FLightingChannelsDim>(false);
+			TShaderMapRef<FGlobalIlluminationDDGIRGS> RayGenerationShader1(View.ShaderMap, PermutationVector);
 			OutRayGenShaders.Add(RayGenerationShader1.GetRayTracingShader());
 		}
 		if (bSortMaterials)
@@ -1369,6 +1438,8 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIllumination(const FV
 	//}
 
 	//PrepareRayTracingRestirGI(View, OutRayGenShaders);
+
+	RayTracingDDIGIUpdate::PrepareRayTracingShaders(View, OutRayGenShaders);
 }
 
 void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIlluminationDeferredMaterial(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
@@ -1450,6 +1521,10 @@ bool FDeferredShadingSceneRenderer::RenderRayTracingGlobalIllumination(
 	else if (IsFinalGatherEnabled(View))
 	{
 		RenderRayTracingGlobalIlluminationFinalGather(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
+	}
+	else if (IsRayTracingDDGI(View))
+	{
+		RenderTestDDGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
 	}
 	else
 	{
@@ -2097,6 +2172,7 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 		// Adjust ray TMax so shadow rays do not hit the sky sphere 
 		MaxShadowDistance = FMath::Max(0.0, 0.99 * Scene->SkyLight->SkyDistanceThreshold);
 	}
+
 	// Intermediate lighting targets
 	FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(
 		SceneTextures.SceneDepthTexture->Desc.Extent / UpscaleFactor,
@@ -2300,89 +2376,89 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 				PassParameters->SceneTextures = GetSceneTextureParameters(GraphBuilder); //SceneTextures;
 				PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(View.RayTracingSubSurfaceProfileTexture);
 
-				PassParameters->InputSlice = Reservoir - 1;
-				PassParameters->OutputSlice = Reservoir;
-				PassParameters->HistoryReservoir = Reservoir - 1;
-				PassParameters->SpatialSamples = FMath::Max(CVarRestirGISpatialSamples.GetValueOnRenderThread(), 1);
-				PassParameters->SpatialSamplesBoost = FMath::Max(CVarRestirGISpatialSamplesBoost.GetValueOnRenderThread(), 1);
-				PassParameters->SpatialSamplingRadius = FMath::Max(1.0f, CVarRestirGISpatialSamplingRadius.GetValueOnRenderThread());
-				PassParameters->SpatialDepthRejectionThreshold = FMath::Clamp(CVarRestirGISpatialDepthRejectionThreshold.GetValueOnRenderThread(), 0.0f, 1.0f);
-				PassParameters->SpatialNormalRejectionThreshold = FMath::Clamp(CVarRestirGISpatialNormalRejectionThreshold.GetValueOnRenderThread(), -1.0f, 1.0f);
-				PassParameters->ApplyApproximateVisibilityTest = CVarRestirGISpatialApplyApproxVisibility.GetValueOnRenderThread();
+PassParameters->InputSlice = Reservoir - 1;
+PassParameters->OutputSlice = Reservoir;
+PassParameters->HistoryReservoir = Reservoir - 1;
+PassParameters->SpatialSamples = FMath::Max(CVarRestirGISpatialSamples.GetValueOnRenderThread(), 1);
+PassParameters->SpatialSamplesBoost = FMath::Max(CVarRestirGISpatialSamplesBoost.GetValueOnRenderThread(), 1);
+PassParameters->SpatialSamplingRadius = FMath::Max(1.0f, CVarRestirGISpatialSamplingRadius.GetValueOnRenderThread());
+PassParameters->SpatialDepthRejectionThreshold = FMath::Clamp(CVarRestirGISpatialDepthRejectionThreshold.GetValueOnRenderThread(), 0.0f, 1.0f);
+PassParameters->SpatialNormalRejectionThreshold = FMath::Clamp(CVarRestirGISpatialNormalRejectionThreshold.GetValueOnRenderThread(), -1.0f, 1.0f);
+PassParameters->ApplyApproximateVisibilityTest = CVarRestirGISpatialApplyApproxVisibility.GetValueOnRenderThread();
 
-				PassParameters->NeighborOffsetMask = GRestiGIDiscSampleBuffer.NumSamples - 1;
-				PassParameters->NeighborOffsets = GRestiGIDiscSampleBuffer.DiscSampleBufferSRV;
+PassParameters->NeighborOffsetMask = GRestiGIDiscSampleBuffer.NumSamples - 1;
+PassParameters->NeighborOffsets = GRestiGIDiscSampleBuffer.DiscSampleBufferSRV;
 
-				PassParameters->RestirGICommonParameters = CommonParameters;
+PassParameters->RestirGICommonParameters = CommonParameters;
 
-				FRestirGISpatialResampling::FPermutationDomain PermutationVector;
-				PermutationVector.Set<FRestirGISpatialResampling::FFUseRestirBiasDim>(CVarRayTracingRestirGIEnableSpatialBias.GetValueOnRenderThread());
+FRestirGISpatialResampling::FPermutationDomain PermutationVector;
+PermutationVector.Set<FRestirGISpatialResampling::FFUseRestirBiasDim>(CVarRayTracingRestirGIEnableSpatialBias.GetValueOnRenderThread());
 
-				auto RayGenShader = View.ShaderMap->GetShader<FRestirGISpatialResampling>(PermutationVector);
-				//auto RayGenShader = GetShaderPermutation<FRestirGISpatialResampling>(Options, View);
+auto RayGenShader = View.ShaderMap->GetShader<FRestirGISpatialResampling>(PermutationVector);
+//auto RayGenShader = GetShaderPermutation<FRestirGISpatialResampling>(Options, View);
 
-				ClearUnusedGraphResources(RayGenShader, PassParameters);
+ClearUnusedGraphResources(RayGenShader, PassParameters);
 
-				GraphBuilder.AddPass(
-					RDG_EVENT_NAME("RestirGI-SpatialResample"),
-					PassParameters,
-					ERDGPassFlags::Compute,
-					[PassParameters, this, &View, RayGenShader, LightingResolution](FRHICommandList& RHICmdList)
-					{
-						FRayTracingShaderBindingsWriter GlobalResources;
-						SetShaderParameters(GlobalResources, RayGenShader, *PassParameters);
+GraphBuilder.AddPass(
+	RDG_EVENT_NAME("RestirGI-SpatialResample"),
+	PassParameters,
+	ERDGPassFlags::Compute,
+	[PassParameters, this, &View, RayGenShader, LightingResolution](FRHICommandList& RHICmdList)
+	{
+		FRayTracingShaderBindingsWriter GlobalResources;
+		SetShaderParameters(GlobalResources, RayGenShader, *PassParameters);
 
-						FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
-						RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, LightingResolution.X, LightingResolution.Y);
+		FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
+		RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, LightingResolution.X, LightingResolution.Y);
 
-					});
-				InitialSlice = Reservoir;
+	});
+InitialSlice = Reservoir;
 			}
 		}
 	}
 	// Shading evaluation pass
 	{
-		//RDG_GPU_STAT_SCOPE(GraphBuilder, RestirEvaluateGI);
-		//RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: EvaluateGI");
-		const bool bUseHairLighting = false;
-		FEvaluateRestirGIRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FEvaluateRestirGIRGS::FParameters>();
+	//RDG_GPU_STAT_SCOPE(GraphBuilder, RestirEvaluateGI);
+	//RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: EvaluateGI");
+	const bool bUseHairLighting = false;
+	FEvaluateRestirGIRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FEvaluateRestirGIRGS::FParameters>();
 
-		PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
-		PassParameters->SceneTextures = GetSceneTextureParameters(GraphBuilder); //SceneTextures;
-		PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(View.RayTracingSubSurfaceProfileTexture);
+	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+	PassParameters->SceneTextures = GetSceneTextureParameters(GraphBuilder); //SceneTextures;
+	PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(View.RayTracingSubSurfaceProfileTexture);
 
-		//PassParameters->RWDiffuseUAV = GraphBuilder.CreateUAV(Diffuse);
-		//PassParameters->RWRayDistanceUAV = GraphBuilder.CreateUAV(RayHitDistance);
-		PassParameters->RWDiffuseUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->Color);
-		PassParameters->RWRayDistanceUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->RayHitDistance);
-		PassParameters->ReservoirHistoryBufferDim = ReservoirHistoryBufferDim;
-		PassParameters->RWGIReservoirHistoryUAV = GraphBuilder.CreateUAV(GIReservoirsHistory);
-		PassParameters->InputSlice = InitialSlice;
-		PassParameters->NumReservoirs = NumReservoirs;
-		PassParameters->DemodulateMaterials = CVarRestirGIDemodulateMaterials.GetValueOnRenderThread();
-		//PassParameters->DebugOutput = CVarRayTracingRestirGIDebugMode.GetValueOnRenderThread();
-		PassParameters->FeedbackVisibility = CVarRayTracingRestirGIFeedbackVisibility.GetValueOnRenderThread();
-		PassParameters->RestirGICommonParameters = CommonParameters;
+	//PassParameters->RWDiffuseUAV = GraphBuilder.CreateUAV(Diffuse);
+	//PassParameters->RWRayDistanceUAV = GraphBuilder.CreateUAV(RayHitDistance);
+	PassParameters->RWDiffuseUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->Color);
+	PassParameters->RWRayDistanceUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->RayHitDistance);
+	PassParameters->ReservoirHistoryBufferDim = ReservoirHistoryBufferDim;
+	PassParameters->RWGIReservoirHistoryUAV = GraphBuilder.CreateUAV(GIReservoirsHistory);
+	PassParameters->InputSlice = InitialSlice;
+	PassParameters->NumReservoirs = NumReservoirs;
+	PassParameters->DemodulateMaterials = CVarRestirGIDemodulateMaterials.GetValueOnRenderThread();
+	//PassParameters->DebugOutput = CVarRayTracingRestirGIDebugMode.GetValueOnRenderThread();
+	PassParameters->FeedbackVisibility = CVarRayTracingRestirGIFeedbackVisibility.GetValueOnRenderThread();
+	PassParameters->RestirGICommonParameters = CommonParameters;
 
-		FEvaluateRestirGIRGS::FPermutationDomain PermutationVector;
-		auto RayGenShader = View.ShaderMap->GetShader<FEvaluateRestirGIRGS>();
-		ClearUnusedGraphResources(RayGenShader, PassParameters);
+	FEvaluateRestirGIRGS::FPermutationDomain PermutationVector;
+	auto RayGenShader = View.ShaderMap->GetShader<FEvaluateRestirGIRGS>();
+	ClearUnusedGraphResources(RayGenShader, PassParameters);
 
-		GraphBuilder.AddPass(
-			RDG_EVENT_NAME("RestirGI-ShadeSamples"),
-			PassParameters,
-			ERDGPassFlags::Compute,
-			[PassParameters, this, &View, RayGenShader, LightingResolution](FRHICommandList& RHICmdList)
-			{
-				FRayTracingShaderBindingsWriter GlobalResources;
-				SetShaderParameters(GlobalResources, RayGenShader, *PassParameters);
+	GraphBuilder.AddPass(
+		RDG_EVENT_NAME("RestirGI-ShadeSamples"),
+		PassParameters,
+		ERDGPassFlags::Compute,
+		[PassParameters, this, &View, RayGenShader, LightingResolution](FRHICommandList& RHICmdList)
+		{
+			FRayTracingShaderBindingsWriter GlobalResources;
+			SetShaderParameters(GlobalResources, RayGenShader, *PassParameters);
 
-				FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
-				RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, LightingResolution.X, LightingResolution.Y);
-			});
+			FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
+			RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, LightingResolution.X, LightingResolution.Y);
+		});
 	}
 
-	if ( !View.bStatePrevViewInfoIsReadOnly)
+	if (!View.bStatePrevViewInfoIsReadOnly)
 	{
 		//Extract history feedback here
 		GraphBuilder.QueueBufferExtraction(GIReservoirsHistory, &View.ViewState->PrevFrameViewInfo.SampledGIHistory.GIReservoirs);
@@ -2391,6 +2467,248 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 	}
 
 }
+
+void FDeferredShadingSceneRenderer::RenderTestDDGI(
+	FRDGBuilder& GraphBuilder,
+	FSceneTextureParameters& SceneTextures,
+	FViewInfo& View,
+	const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
+	int32 UpscaleFactor,
+	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs)
+{
+	RDG_GPU_STAT_SCOPE(GraphBuilder, RayTracingDDGI);
+	RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: DDGI+");
+	//if (!View.bIsSceneCapture && !View.bIsReflectionCapture && !View.bIsPlanarReflection)
+	{
+		RDG_GPU_STAT_SCOPE(GraphBuilder, RTDDGI_Update);
+		RDG_EVENT_SCOPE(GraphBuilder, "RTDDGI Update");
+		RayTracingDDIGIUpdate::DDGIUpdatePerFrame_RenderThread(*Scene, View, GraphBuilder);
+	}
+
+	// DDGIVolume and useful metadata
+	struct FProxyEntry
+	{
+		FVector Position;
+		FQuat Rotation;
+		FVector Scale;
+		float Density;
+		uint32 lightingChannelMask;
+		const FTestGIVolumeSceneProxy* proxy;
+	};
+
+	// Find all the volumes that intersect the view frustum
+	TArray<FProxyEntry> volumes;
+	for (FTestGIVolumeSceneProxy* volumeProxy : Scene->TestGIProxies)
+	{
+		// Skip this volume if it belongs to another scene
+		if (volumeProxy->OwningScene != Scene) continue;
+
+		// Skip this volume if it is not enabled
+		if (!volumeProxy->ComponentData.EnableVolume) continue;
+
+		// Skip this volume if it doesn't intersect the view frustum
+		if (!volumeProxy->IntersectsViewFrustum(View.ViewMatrices, View.GetViewDirection(), View.ViewFrustum, View.SceneViewInitOptions.OverrideFarClippingPlaneDistance) )continue;
+
+		// Get the volume position, rotation, and scale
+		FVector ProxyPosition = volumeProxy->ComponentData.Origin;
+		FQuat   ProxyRotation = volumeProxy->ComponentData.Transform.GetRotation();
+		FVector ProxyScale = volumeProxy->ComponentData.Transform.GetScale3D();
+
+		float ProxyDensity = float(volumeProxy->ComponentData.ProbeCounts.X * volumeProxy->ComponentData.ProbeCounts.Y * volumeProxy->ComponentData.ProbeCounts.Z) / (ProxyScale.X * ProxyScale.Y * ProxyScale.Z);
+		uint32 ProxyLightingChannelMask =
+			(volumeProxy->ComponentData.LightingChannels.bChannel0 ? 1 : 0) |
+			(volumeProxy->ComponentData.LightingChannels.bChannel1 ? 2 : 0) |
+			(volumeProxy->ComponentData.LightingChannels.bChannel2 ? 4 : 0);
+
+		// Add the current volume to the list of in-frustum volumes
+		volumes.Add(FProxyEntry{ ProxyPosition, ProxyRotation, ProxyScale, ProxyDensity, ProxyLightingChannelMask, volumeProxy });
+	}
+
+	// Early out if no volumes contribute light to the current view
+	if (volumes.Num() == 0) return;
+
+	// TODO: manage in-frustum volumes in a more sophisticated way
+	// Support a large number of volumes by culling volumes based on spatial data, projected view area, and/or other heuristics
+
+	// Sort the in-frustum volumes by user specified priority and probe density
+	Algo::Sort(volumes, [](const FProxyEntry& A, const FProxyEntry& B)
+		{
+			if (A.proxy->ComponentData.LightingPriority < B.proxy->ComponentData.LightingPriority) return true;
+			if ((A.proxy->ComponentData.LightingPriority == B.proxy->ComponentData.LightingPriority) && (A.Density > B.Density)) return true;
+			return false;
+		});
+
+	// Get the number of relevant in-frustum volumes
+	int32 numVolumes = FMath::Min(volumes.Num(), FTestGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES);
+
+	// Truncate the in-frustum volumes list to the maximum number of volumes supported
+	volumes.SetNum(numVolumes, true);
+
+	// Sort the final volume list by descending probe density
+	Algo::Sort(volumes, [](const FProxyEntry& A, const FProxyEntry& B)
+		{
+			return (A.Density > B.Density);
+		});
+
+
+	int32 RayTracingGISamplesPerPixel = GetRayTracingGlobalIlluminationSamplesPerPixel(View);
+
+	float MaxShadowDistance = 1.0e27;
+	if (GRayTracingGlobalIlluminationMaxShadowDistance > 0.0)
+	{
+		MaxShadowDistance = GRayTracingGlobalIlluminationMaxShadowDistance;
+	}
+	else if (Scene->SkyLight)
+	{
+		// Adjust ray TMax so shadow rays do not hit the sky sphere 
+		MaxShadowDistance = FMath::Max(0.0, 0.99 * Scene->SkyLight->SkyDistanceThreshold);
+	}
+
+	bool enableRelocation = true;
+	bool enableScrolling = false;
+
+	FGlobalIlluminationDDGIRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGlobalIlluminationDDGIRGS::FParameters>();
+	PassParameters->SamplesPerPixel = RayTracingGISamplesPerPixel;
+	int32 CVarRayTracingGlobalIlluminationMaxBouncesValue = CVarRayTracingGlobalIlluminationMaxBounces.GetValueOnRenderThread();
+	PassParameters->MaxBounces = CVarRayTracingGlobalIlluminationMaxBouncesValue > -1 ? CVarRayTracingGlobalIlluminationMaxBouncesValue : View.FinalPostProcessSettings.RayTracingGIMaxBounces;
+	PassParameters->MaxNormalBias = GetRaytracingMaxNormalBias();
+	float MaxRayDistanceForGI = GRayTracingGlobalIlluminationMaxRayDistance;
+	if (MaxRayDistanceForGI == -1.0)
+	{
+		MaxRayDistanceForGI = View.FinalPostProcessSettings.AmbientOcclusionRadius;
+	}
+	PassParameters->MaxRayDistanceForGI = MaxRayDistanceForGI;
+	PassParameters->MaxRayDistanceForAO = View.FinalPostProcessSettings.AmbientOcclusionRadius;
+	PassParameters->MaxShadowDistance = MaxShadowDistance;
+	PassParameters->UpscaleFactor = UpscaleFactor;
+	PassParameters->EvalSkyLight = GRayTracingGlobalIlluminationEvalSkyLight != 0;
+	PassParameters->UseRussianRoulette = GRayTracingGlobalIlluminationUseRussianRoulette != 0;
+	PassParameters->UseFireflySuppression = CVarRayTracingGlobalIlluminationFireflySuppression.GetValueOnRenderThread() != 0;
+	PassParameters->DiffuseThreshold = GRayTracingGlobalIlluminationDiffuseThreshold;
+	PassParameters->NextEventEstimationSamples = GRayTracingGlobalIlluminationNextEventEstimationSamples;
+	PassParameters->TLAS = View.RayTracingScene.RayTracingSceneRHI->GetShaderResourceView();
+	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+	SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters);
+	PassParameters->SceneTextures = SceneTextures;
+	PassParameters->AccumulateEmissive = FMath::Clamp(CVarRayTracingGlobalIlluminationAccumulateEmissive.GetValueOnRenderThread(), 0, 1);
+
+	// TODO: should be converted to RDG
+	TRefCountPtr<IPooledRenderTarget> SubsurfaceProfileRT((IPooledRenderTarget*)GetSubsufaceProfileTexture_RT(GraphBuilder.RHICmdList));
+	if (!SubsurfaceProfileRT)
+	{
+		SubsurfaceProfileRT = GSystemTextures.BlackDummy;
+	}
+	PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(SubsurfaceProfileRT);
+	PassParameters->TransmissionProfilesLinearSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	PassParameters->RWGlobalIlluminationUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->Color);
+	PassParameters->RWGlobalIlluminationRayDistanceUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->RayHitDistance);
+	PassParameters->RenderTileOffsetX = 0;
+	PassParameters->RenderTileOffsetY = 0;
+	PassParameters->NumVolumes = numVolumes;
+	PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+
+	FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(
+		SceneTextures.SceneDepthTexture->Desc.Extent / UpscaleFactor,
+		PF_FloatRGBA,
+		FClearValueBinding::None,
+		TexCreate_ShaderResource | TexCreate_RenderTargetable | TexCreate_UAV);
+
+	auto DebugTex = GraphBuilder.CreateTexture(Desc, TEXT("DebugInDirectDiffuse"));
+
+	PassParameters->RWDebugUAV = GraphBuilder.CreateUAV(DebugTex);
+	
+	// Set the shader parameters for the relevant volumes
+	for (int32 volumeIndex = 0; volumeIndex < numVolumes; ++volumeIndex)
+	{
+		FProxyEntry volume = volumes[volumeIndex];
+		const FTestGIVolumeSceneProxy* volumeProxy = volume.proxy;
+
+		// Set the volume textures
+		PassParameters->DDGIVolume[volumeIndex].ProbeIrradiance = GraphBuilder.RegisterExternalTexture(volumeProxy->ProbesIrradiance);
+		PassParameters->DDGIVolume[volumeIndex].ProbeDistance = GraphBuilder.RegisterExternalTexture(volumeProxy->ProbesDistance);
+		PassParameters->DDGIVolume[volumeIndex].ProbeOffsets = RegisterExternalTextureWithFallback(GraphBuilder, volumeProxy->ProbesOffsets, GSystemTextures.BlackDummy);
+		PassParameters->DDGIVolume[volumeIndex].ProbeStates = RegisterExternalTextureWithFallback(GraphBuilder, volumeProxy->ProbesStates, GSystemTextures.BlackDummy);
+
+		// Set the volume parameters
+		PassParameters->DDGIVolume[volumeIndex].Position = volumeProxy->ComponentData.Origin;
+		PassParameters->DDGIVolume[volumeIndex].Rotation = FVector4(volume.Rotation.X, volume.Rotation.Y, volume.Rotation.Z, volume.Rotation.W);
+		PassParameters->DDGIVolume[volumeIndex].Radius = volume.Scale * 100.0f;
+		PassParameters->DDGIVolume[volumeIndex].LightingChannelMask = volume.lightingChannelMask;
+
+		FVector volumeSize = volumeProxy->ComponentData.Transform.GetScale3D() * 200.0f;
+		FVector probeGridSpacing;
+		probeGridSpacing.X = volumeSize.X / float(volumeProxy->ComponentData.ProbeCounts.X);
+		probeGridSpacing.Y = volumeSize.Y / float(volumeProxy->ComponentData.ProbeCounts.Y);
+		probeGridSpacing.Z = volumeSize.Z / float(volumeProxy->ComponentData.ProbeCounts.Z);
+
+		PassParameters->DDGIVolume[volumeIndex].ProbeGridSpacing = probeGridSpacing;
+		PassParameters->DDGIVolume[volumeIndex].ProbeGridCounts = volumeProxy->ComponentData.ProbeCounts;
+		PassParameters->DDGIVolume[volumeIndex].ProbeNumIrradianceTexels = FTestGIVolumeSceneProxy::FComponentData::c_NumTexelsIrradiance;
+		PassParameters->DDGIVolume[volumeIndex].ProbeNumDistanceTexels = FTestGIVolumeSceneProxy::FComponentData::c_NumTexelsDistance;
+		PassParameters->DDGIVolume[volumeIndex].ProbeIrradianceEncodingGamma = volumeProxy->ComponentData.ProbeIrradianceEncodingGamma;
+		PassParameters->DDGIVolume[volumeIndex].NormalBias = volumeProxy->ComponentData.NormalBias;
+		PassParameters->DDGIVolume[volumeIndex].ViewBias = volumeProxy->ComponentData.ViewBias;
+		PassParameters->DDGIVolume[volumeIndex].BlendDistance = volumeProxy->ComponentData.BlendDistance;
+		PassParameters->DDGIVolume[volumeIndex].BlendDistanceBlack = volumeProxy->ComponentData.BlendDistanceBlack;
+		PassParameters->DDGIVolume[volumeIndex].ProbeScrollOffsets = volumeProxy->ComponentData.ProbeScrollOffsets;
+
+		// Only apply lighting if this is the pass it should be applied in
+		// The shader needs data for all of the volumes for blending purposes
+		bool applyLighting = true;
+		applyLighting = applyLighting && (enableRelocation == volumeProxy->ComponentData.EnableProbeRelocation);
+		applyLighting = applyLighting && (enableScrolling == volumeProxy->ComponentData.EnableProbeScrolling);
+		PassParameters->DDGIVolume[volumeIndex].ApplyLighting = applyLighting;
+		PassParameters->DDGIVolume[volumeIndex].IrradianceScalar = volumeProxy->ComponentData.IrradianceScalar;
+
+		// Apply the lighting multiplier to artificially lighten or darken the indirect light from the volume
+		PassParameters->DDGIVolume[volumeIndex].IrradianceScalar /= volumeProxy->ComponentData.LightingMultiplier;
+		PassParameters->DDGIVolumeRayDataUAV = volumeProxy->ProbesRadianceUAV;
+		PassParameters->DDGIVolume[volumeIndex].ProbeNumRays = volumeProxy->ComponentData.GetNumRaysPerProbe();
+		PassParameters->DDGIVolume[volumeIndex].RayRotationTransform = volumeProxy->ComponentData.RayRotationTransform;
+	}
+
+	// When there are fewer relevant volumes than the maximum supported, set the empty volume texture slots to dummy values
+	for (int32 volumeIndex = numVolumes; volumeIndex < FTestGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES; ++volumeIndex)
+	{
+		PassParameters->DDGIVolume[volumeIndex].ProbeIrradiance = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+		PassParameters->DDGIVolume[volumeIndex].ProbeDistance = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+		PassParameters->DDGIVolume[volumeIndex].ProbeOffsets = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+		PassParameters->DDGIVolume[volumeIndex].ProbeStates = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+	}
+
+	bool highBitCount = false;
+	FGlobalIlluminationDDGIRGS::FPermutationDomain PermutationVector;
+	PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingGlobalIlluminationEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);
+	PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableTransmissionDim>(CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread());
+	//PermutationVector.Set<FGlobalIlluminationDDGIRGS::FLightingChannelsDim>(false);
+	PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableRelocation>(enableRelocation);
+	PermutationVector.Set<FGlobalIlluminationDDGIRGS::FEnableScrolling>(enableScrolling);
+	PermutationVector.Set<FGlobalIlluminationDDGIRGS::FFormatRadiance>(highBitCount);
+	PermutationVector.Set<FGlobalIlluminationDDGIRGS::FFormatIrradiance>(highBitCount);
+	TShaderMapRef<FGlobalIlluminationDDGIRGS> RayGenerationShader(GetGlobalShaderMap(FeatureLevel), PermutationVector);
+
+	ClearUnusedGraphResources(RayGenerationShader, PassParameters);
+
+	FIntPoint RayTracingResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), UpscaleFactor);
+	//FIntPoint RayTracingResolution = View.ViewRect.Size();
+
+	{
+		GraphBuilder.AddPass(
+			RDG_EVENT_NAME("GlobalIlluminationRayTracing %dx%d", RayTracingResolution.X, RayTracingResolution.Y),
+			PassParameters,
+			ERDGPassFlags::Compute,
+			[PassParameters, this, &View, RayGenerationShader, RayTracingResolution](FRHICommandList& RHICmdList)
+			{
+				FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
+
+				FRayTracingShaderBindingsWriter GlobalResources;
+				SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters);
+				RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenerationShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, RayTracingResolution.X, RayTracingResolution.Y);
+			});
+	}
+}
+
 #else
 {
 	unimplemented();

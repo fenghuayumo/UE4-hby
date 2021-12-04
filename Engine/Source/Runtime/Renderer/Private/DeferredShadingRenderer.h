@@ -377,6 +377,15 @@ private:
 		// Output
 		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
 
+	void RenderTestDDGI(
+		FRDGBuilder& GraphBuilder,
+		FSceneTextureParameters& SceneTextures,
+		FViewInfo& View,
+		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
+		int32 UpscaleFactor,
+		// Output
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+
 	/** Renders an array of lights for the stationary light overlap viewmode. */
 	void RenderLightArrayForOverlapViewmode(
 		FRHICommandList& RHICmdList,
