@@ -20,6 +20,13 @@
 
 #include "../DDGI/Irradiance.ush"
 
+#define NUM_X	16
+#define NUM_Y   8
+#define NUM_XY  (NUM_X * NUM_Y)
+struct GuidingEntry
+{
+	uint Luminance[NUM_XY];
+};
 #define USE_PATHTRACING_MATERIALS 0
 
 RaytracingAccelerationStructure TLAS;
@@ -79,6 +86,9 @@ VOLUME_LIST
 RWTexture2D<float4> RWDebugUAV;
 
 RWTexture2D<float4> DDGIVolumeRayDataUAV;
+
+RWStructuredBuffer<GuidingEntry> RWRayGuidingEntries;
+RWStructuredBuffer<uint> RWRayGuidingMaxQ;
 
 float4 ApplyVolumeLightingContribution(
     Texture2D<float4> ProbeIrradiance,
@@ -177,48 +187,48 @@ void GenerateCosineNormalRay(
 	RayPdf = Direction_Tangent.w;
 }
 
-#define MAX_RAY_COUNT 256
+// #define MAX_RAY_COUNT 256
 
-float InitRayCDF(float3 worldPosition,  float3 Normal,float3  CameraDirection,  RTDDGIVolumeDescGPU volume, inout float RayPickCDF[MAX_RAY_COUNT])
-{
-    // Bias the world space position
-    float3 surfaceBias = DDGIGetSurfaceBias(Normal, CameraDirection, volume);
-    float3 biasedWorldPosition = (worldPosition + surfaceBias);
-    // Get the 3D grid coordinates of the base probe (near the biased world position)
-    int3   baseProbeCoords = DDGIGetBaseProbeGridCoords(biasedWorldPosition, volume.origin, volume.rotation, volume.probeGridCounts, volume.probeGridSpacing);
-    // Get the adjacent probe's index (used for texture lookups)
-    int ProbeIndex = DDGIGetProbeIndex(baseProbeCoords, volume.probeGridCounts);
+// float InitRayCDF(float3 worldPosition,  float3 Normal,float3  CameraDirection,  RTDDGIVolumeDescGPU volume, inout float RayPickCDF[MAX_RAY_COUNT])
+// {
+//     // Bias the world space position
+//     float3 surfaceBias = DDGIGetSurfaceBias(Normal, CameraDirection, volume);
+//     float3 biasedWorldPosition = (worldPosition + surfaceBias);
+//     // Get the 3D grid coordinates of the base probe (near the biased world position)
+//     int3   baseProbeCoords = DDGIGetBaseProbeGridCoords(biasedWorldPosition, volume.origin, volume.rotation, volume.probeGridCounts, volume.probeGridSpacing);
+//     // Get the adjacent probe's index (used for texture lookups)
+//     int ProbeIndex = DDGIGetProbeIndex(baseProbeCoords, volume.probeGridCounts);
 
-	// Build irradiance estimate prefix sum
-	float CdfSum = 0.0;
-    const int rayCount = min( MAX_RAY_COUNT, volume.numRaysPerProbe);
+// 	// Build irradiance estimate prefix sum
+// 	float CdfSum = 0.0;
+//     const int rayCount = min( MAX_RAY_COUNT, volume.numRaysPerProbe);
 
-    for(uint rayIndex =0 ; rayIndex < rayCount; rayIndex++)
-    {
-        int2 probeRayIndex = int2(rayIndex,ProbeIndex);
-        float3 Direction_World = DDGIGetProbeRayDirection(rayIndex, volume.numRaysPerProbe, volume.probeRayRotationTransform);
-        // if( dot(Normal, Direction_World) > 0 )
-        float NdotL = saturate(dot(Normal, Direction_World));
+//     for(uint rayIndex =0 ; rayIndex < rayCount; rayIndex++)
+//     {
+//         int2 probeRayIndex = int2(rayIndex,ProbeIndex);
+//         float3 Direction_World = DDGIGetProbeRayDirection(rayIndex, volume.numRaysPerProbe, volume.probeRayRotationTransform);
+//         // if( dot(Normal, Direction_World) > 0 )
+//         float NdotL = saturate(dot(Normal, Direction_World));
 
-        #if (RTXGI_DDGI_FORMAT_RADIANCE == 1)
-            float3 probeRayRadiance = DDGIVolumeRayDataUAV[probeRayIndex].rgb;
-            float  probeRayDistance = DDGIVolumeRayDataUAV[probeRayIndex].a;
-        #else
-            float3 probeRayRadiance = RTXGIUintToFloat3(asuint(DDGIVolumeRayDataUAV[probeRayIndex].r));
-            float  probeRayDistance = DDGIVolumeRayDataUAV[probeRayIndex].g;
-        #endif
+//         #if (RTXGI_DDGI_FORMAT_RADIANCE == 1)
+//             float3 probeRayRadiance = DDGIVolumeRayDataUAV[probeRayIndex].rgb;
+//             float  probeRayDistance = DDGIVolumeRayDataUAV[probeRayIndex].a;
+//         #else
+//             float3 probeRayRadiance = RTXGIUintToFloat3(asuint(DDGIVolumeRayDataUAV[probeRayIndex].r));
+//             float  probeRayDistance = DDGIVolumeRayDataUAV[probeRayIndex].g;
+//         #endif
 
-        CdfSum += Luminance(probeRayRadiance * NdotL);
-        RayPickCDF[rayIndex] = CdfSum;
-    }
-    // for(uint rayIndex = 0 ; rayIndex < rayCount; rayIndex++)
-    // {
-    //     RayPickCDF[rayIndex] /= CdfSum;
-    // }
-    return CdfSum;
-}
+//         CdfSum += Luminance(probeRayRadiance * NdotL);
+//         RayPickCDF[rayIndex] = CdfSum;
+//     }
+//     // for(uint rayIndex = 0 ; rayIndex < rayCount; rayIndex++)
+//     // {
+//     //     RayPickCDF[rayIndex] /= CdfSum;
+//     // }
+//     return CdfSum;
+// }
 
-void SelectRay(float RandSample,int numRays, inout float RayPickCDF[MAX_RAY_COUNT], out int RayID, out float RayPickPdf)
+void SelectRay(float RandSample,int numRays, inout float RayPickCDF[NUM_XY], out int RayID, out float RayPickPdf)
 {
 #if 0
 	// linear search
@@ -255,32 +265,113 @@ void SelectRay(float RandSample,int numRays, inout float RayPickCDF[MAX_RAY_COUN
 #endif
 }
 
-void GenerateGuidingRay(
+// void GenerateGuidingRay(
+// 	float3 WorldPosition,
+// 	float3 WorldNormal,
+// 	float2 RandSample,
+//     float RayPickCDF[MAX_RAY_COUNT],
+//     float CdfSum,
+//     RTDDGIVolumeDescGPU volume,
+// 	out float3 RayOrigin,
+// 	out float3 RayDirection,
+// 	out float RayTMin,
+// 	out float RayTMax,
+// 	out float RayPdf
+// )
+// {
+//     int RayID = 0;
+//     int rayCount = min( MAX_RAY_COUNT, volume.numRaysPerProbe);
+    
+//     SelectRay(RandSample.x * CdfSum,rayCount, RayPickCDF, RayID, RayPdf);
+//     RayPdf /= CdfSum;
+//     // RayPdf = RayPdf * rayCount / ( 2 * 3.1416926 * CdfSum);
+//     // RayID = min(RandSample.x *rayCount,rayCount-1 );
+//     float3 Direction_World = DDGIGetProbeRayDirection(RayID, volume.numRaysPerProbe, volume.probeRayRotationTransform);
+// 	RayOrigin = WorldPosition;
+// 	RayDirection = Direction_World;
+// 	RayTMin = 0.01;
+// 	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+// }
+
+void UpdateGuidingEntry(int entryIndex , uint CellIndex, float value)
+{
+	const float alpha = 0.85;
+	GuidingEntry entry = RWRayGuidingEntries[entryIndex];
+	uint oldValue = entry.Luminance[CellIndex];
+	InterlockedCompareStore(RWRayGuidingEntries[entryIndex].Luminance[CellIndex],  oldValue, asuint((1-alpha) * asfloat(oldValue) + alpha * value) );
+	uint oldMaxQ;
+	InterlockedMax(RWRayGuidingMaxQ[entryIndex], RWRayGuidingEntries[entryIndex].Luminance[CellIndex], oldMaxQ);
+}
+
+float SetupRayGuidingCDF(uint entryIndex, inout float RayPickCDF[NUM_XY])
+{
+	float CdfSum = 0.0;
+	
+	for (int y = 0; y < NUM_Y; y++)
+	{
+		for (int x = 0; x < NUM_X; x++)
+		{
+			const int idx = x + y * NUM_X;
+			CdfSum += asfloat(RWRayGuidingEntries[entryIndex].Luminance[idx]);
+			RayPickCDF[idx] = CdfSum;
+		}
+	}
+
+	return CdfSum;
+}
+
+void  GenerateGuidingRay(
 	float3 WorldPosition,
 	float3 WorldNormal,
-	float2 RandSample,
-    float RayPickCDF[MAX_RAY_COUNT],
-    float CdfSum,
-    RTDDGIVolumeDescGPU volume,
+	float3 RandSample,
+	int EntryIndex ,
 	out float3 RayOrigin,
 	out float3 RayDirection,
 	out float RayTMin,
 	out float RayTMax,
-	out float RayPdf
-)
+	out float RayPdf,
+	out int  CellID,
+	inout float RayPickCDF[NUM_XY])
 {
-    int RayID = 0;
-    int rayCount = min( MAX_RAY_COUNT, volume.numRaysPerProbe);
-    
-    SelectRay(RandSample.x * CdfSum,rayCount, RayPickCDF, RayID, RayPdf);
-    RayPdf /= CdfSum;
-    // RayPdf = RayPdf * rayCount / ( 2 * 3.1416926 * CdfSum);
-    // RayID = min(RandSample.x *rayCount,rayCount-1 );
-    float3 Direction_World = DDGIGetProbeRayDirection(RayID, volume.numRaysPerProbe, volume.probeRayRotationTransform);
+	GuidingEntry entry = RWRayGuidingEntries[EntryIndex];
+	float CdfSum = SetupRayGuidingCDF(EntryIndex, RayPickCDF);
+	float CellPdf;
+	SelectRay(RandSample.x * CdfSum, NUM_XY, RayPickCDF,CellID, CellPdf);
+	CellPdf /= CdfSum;
+
+	const int thetaIdx = CellID / NUM_X;
+	const int phiIdx = CellID % NUM_X;
+	const float u = ((float)thetaIdx + RandSample.y) / NUM_Y;
+	const float v = ((float)phiIdx + RandSample.z) / NUM_X;
+
+	float3 localWi = float3(
+		sqrt(1.0f - u * u) * cos(float(RTXGI_2PI) * v),
+		sqrt(1.0f - u * u) * sin(float(RTXGI_2PI) * v),
+		u);
+
+	float3 Direction_World = TangentToWorld(localWi.xyz, WorldNormal);
+	RayPdf = (NUM_XY * CellPdf / float(RTXGI_2PI)); // Solid angle probability
+
 	RayOrigin = WorldPosition;
 	RayDirection = Direction_World;
 	RayTMin = 0.01;
 	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+}
+
+void InitGuiding(uint entryIndex)
+{
+	// GuidingEntry entry = RWRayGuidingEntries[EntryIndex];
+	// Initialize directinal density as consine weighted diffuse
+	for (int y = 0; y < NUM_Y; y++)
+	{
+		for (int x = 0; x < NUM_X; x++)
+		{
+			const float initDensity = y / float(NUM_Y);
+			const int idx = x + y * NUM_X;
+			RWRayGuidingEntries[entryIndex].Luminance[idx] = asuint(initDensity);
+		}
+	}
+	RWRayGuidingMaxQ[entryIndex] = asuint(0.0);
 }
 
 RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
@@ -350,10 +441,13 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
         DDGIVolume_##x.probeRayRotationTransform = DDGIVolume_##x##_RayRotationTransform;
     VOLUME_LIST
     #undef VOLUME_ENTRY
-    float RayPickCDF[MAX_RAY_COUNT];
-    float CdfSum = InitRayCDF(WorldPosition, WorldNormal,CameraDirection, DDGIVolume_0, RayPickCDF);
+    float RayPickCDF[NUM_XY];
+    // float CdfSum = InitRayCDF(WorldPosition, WorldNormal,CameraDirection, DDGIVolume_0, RayPickCDF);
+	uint entryIndex = DispatchRaysDimensions().x * DispatchRaysIndex().y + DispatchRaysIndex().x;
+ 	InitGuiding(entryIndex);
     for (uint SampleIndex = 0; SampleIndex < SamplesPerPixel; ++SampleIndex)
 	{
+		float3 PathRadiance = 0;
 		RandomSequence RandSequence;
 		RandomSequence_Initialize(RandSequence, PixelCoord, SampleIndex, View.StateFrameIndex, SamplesPerPixel);
 
@@ -373,11 +467,12 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 		// Initialize ray
 		RayDesc Ray;
 		float RayPdf = 1.0;
+		int PrevCellIndex = 0;
 #if 1
 		// GenerateCosineNormalRay(WorldPosition, WorldNormal, RandSample.yz, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
-		
-        GenerateGuidingRay( WorldPosition, WorldNormal, RandSample.yz, RayPickCDF,CdfSum ,DDGIVolume_0,
-            Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
+
+        GenerateGuidingRay( WorldPosition, WorldNormal, RandSample,entryIndex,
+            Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf, PrevCellIndex, RayPickCDF);
         half3 N = WorldNormal;
 		half3 V = -CameraDirection;
 		half3 L = Ray.Direction;
@@ -432,7 +527,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					RayDesc LightRay = Ray;
 					LightRay.TMax = POSITIVE_INFINITY;
 					float3 EnvironmentRadiance = SkyLight_TraceLight(Ray, SkyLightId).Radiance;
-					Irradiance += EnvironmentRadiance * RayThroughput / RayPdf;
+					PathRadiance += EnvironmentRadiance * RayThroughput / RayPdf;
 				}
 				break;
 			}
@@ -492,7 +587,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
                 VOLUME_LIST
                 #undef VOLUME_ENTRY
                 RWDebugUAV[DispatchThreadId] = float4(AccLightWeight.rgb * AccLightWeight.a,1.0);
-                // Irradiance += AccLightWeight.rgb * AccLightWeight.a;
+                PathRadiance += AccLightWeight.rgb * AccLightWeight.a;
 			}
 			if (Payload.HitT > MaxRayDistanceForGI) break;
 
@@ -517,7 +612,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 
 			if (AccumulateEmissive)
 			{
-				Irradiance += Payload.Radiance;
+				PathRadiance += Payload.Radiance;
 			}
 
 			// Perform next-event estimation
@@ -603,10 +698,12 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 							ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
 						}
 
-						Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
+						PathRadiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
 					}
 				}
 			}
+			float maxVal = max(Luminance(PathRadiance * DiffuseColor), asfloat(RWRayGuidingMaxQ[entryIndex]) );
+			UpdateGuidingEntry(entryIndex,  PrevCellIndex, maxVal);
 			// Perform material sampling
 // 			if (Bounce + 1 < MaxBounces)
 // 			{
@@ -647,6 +744,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 
 			Bounce++;
 		}
+		Irradiance += PathRadiance;
 	}
 
 	if (SamplesPerPixel > 0)

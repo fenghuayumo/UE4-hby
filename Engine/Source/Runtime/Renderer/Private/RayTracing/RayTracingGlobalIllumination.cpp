@@ -40,6 +40,28 @@ static TAutoConsoleVariable<int32> CVarRayTracingGlobalIllumination(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarGlobalIlluminationAdaptiveSamplingEnable(
+	TEXT("r.GlobalIllumination.AdaptiveSampling"),
+	false,
+	TEXT("Whether to use a adaptive sampling for global illumination (default = false)"),
+	ECVF_RenderThreadSafe);
+
+static int32 GRayTracingGlobalIlluminationStepSpp = 16;
+static FAutoConsoleVariableRef CVarRayTracingGlobalIlluminationStepSpp(
+	TEXT("r.RayTracing.GlobalIllumination.StepSpp"),
+	GRayTracingGlobalIlluminationStepSpp,
+	TEXT("StepSpp each Iteration for adaptive sampling)"),
+	ECVF_RenderThreadSafe
+);
+
+static int32 GRayTracingGlobalIlluminationAdaptiveThreholdSpp = 16;
+static FAutoConsoleVariableRef CVarRayTracingGlobalIlluminationAdaptiveThreholdSpp(
+	TEXT("r.RayTracing.GlobalIllumination.AdaptiveThreHoldSpp"),
+	GRayTracingGlobalIlluminationAdaptiveThreholdSpp,
+	TEXT("Adaptive Threhold Spp)"),
+	ECVF_RenderThreadSafe
+);
+
 static int32 GRayTracingGlobalIlluminationSamplesPerPixel = -1;
 static FAutoConsoleVariableRef CVarRayTracingGlobalIlluminationSamplesPerPixel(
 	TEXT("r.RayTracing.GlobalIllumination.SamplesPerPixel"),
@@ -609,7 +631,7 @@ class FGlobalIlluminationRGS : public FGlobalShader
 
 	class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
 	class FEnableTransmissionDim : SHADER_PERMUTATION_INT("ENABLE_TRANSMISSION", 2);
-
+	//class FEnableAdaptiveDim : SHADER_PERMUTATION_BOOL("ENABLE_ADAPTIVE");
 	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableTransmissionDim>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -658,6 +680,29 @@ class FGlobalIlluminationRGS : public FGlobalShader
 };
 
 IMPLEMENT_GLOBAL_SHADER(FGlobalIlluminationRGS, "/Engine/Private/RayTracing/RayTracingGlobalIlluminationRGS.usf", "GlobalIlluminationRGS", SF_RayGen);
+
+//class FDistributeAdaptiveWeightCS : public FGlobalShader
+//{
+//	DECLARE_GLOBAL_SHADER(FDistributeAdaptiveWeightCS)
+//	SHADER_USE_ROOT_PARAMETER_STRUCT(FDistributeAdaptiveWeightCS, FGlobalShader)
+//
+//
+//	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+//	{
+//		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+//	}
+//
+//	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+//	{
+//
+//	}
+//
+//	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+//	
+//	END_SHADER_PARAMETER_STRUCT()
+//};
+//
+//IMPLEMENT_GLOBAL_SHADER(FDistributeAdaptiveWeightCS, "/Engine/Private/RayTracing/RayTracingGlobalIlluminationRGS.usf", "DistributeAdaptiveWeight", SF_Compute);
 
 // Note: This constant must match the definition in RayTracingGatherPoints.ush
 constexpr int32 MAXIMUM_GATHER_POINTS_PER_PIXEL = 32;
@@ -896,6 +941,15 @@ SHADER_PARAMETER(int, ProbeNumRays)
 SHADER_PARAMETER(FMatrix, RayRotationTransform)
 END_SHADER_PARAMETER_STRUCT()
 
+
+#define NUM_X	16
+#define NUM_Y   8
+#define NUM_XY  (NUM_X * NUM_Y)
+struct GuidingEntry
+{
+	uint32_t Luminance[NUM_XY];
+};
+
 class FGlobalIlluminationDDGIRGS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FGlobalIlluminationDDGIRGS)
@@ -966,6 +1020,8 @@ class FGlobalIlluminationDDGIRGS : public FGlobalShader
 		SHADER_PARAMETER_STRUCT_ARRAY(FVolumeData, DDGIVolume, [FTestGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES])
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWDebugUAV)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, DDGIVolumeRayDataUAV)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<GuidingEntry>, RWRayGuidingEntries)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWRayGuidingMaxQ)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -1368,7 +1424,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIllumination(const FV
 
 	const bool bSortMaterials = CVarRayTracingGlobalIlluminationFinalGatherSortMaterials.GetValueOnRenderThread() != 0;
 	int EnableTransmission = CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread();
-
+	const bool bEnableAdaptive = CVarGlobalIlluminationAdaptiveSamplingEnable.GetValueOnRenderThread();
 	// Declare all RayGen shaders that require material closest hit shaders to be bound
 	for (int EnableTwoSidedGeometry = 0; EnableTwoSidedGeometry < 2; ++EnableTwoSidedGeometry)
 	{
@@ -1376,6 +1432,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIllumination(const FV
 			FGlobalIlluminationRGS::FPermutationDomain PermutationVector;
 			PermutationVector.Set<FGlobalIlluminationRGS::FEnableTwoSidedGeometryDim>(EnableTwoSidedGeometry == 1);
 			PermutationVector.Set<FGlobalIlluminationRGS::FEnableTransmissionDim>(EnableTransmission);
+			//PermutationVector.Set<FGlobalIlluminationRGS::FEnableAdaptiveDim>(bEnableAdaptive);
 			TShaderMapRef<FGlobalIlluminationRGS> RayGenerationShader(View.ShaderMap, PermutationVector);
 			OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
 		}
@@ -2143,6 +2200,10 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 			}
 		}
 	}
+
+	//distribute adaptive weight
+	//FDistributeAdaptiveWeightCS::FParameters* CSParameters = GraphBuilder.AllocParameters<FDistributeAdaptiveWeightCS::FParameters>();
+
 }
 #else
 {
@@ -2376,43 +2437,43 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 				PassParameters->SceneTextures = GetSceneTextureParameters(GraphBuilder); //SceneTextures;
 				PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(View.RayTracingSubSurfaceProfileTexture);
 
-PassParameters->InputSlice = Reservoir - 1;
-PassParameters->OutputSlice = Reservoir;
-PassParameters->HistoryReservoir = Reservoir - 1;
-PassParameters->SpatialSamples = FMath::Max(CVarRestirGISpatialSamples.GetValueOnRenderThread(), 1);
-PassParameters->SpatialSamplesBoost = FMath::Max(CVarRestirGISpatialSamplesBoost.GetValueOnRenderThread(), 1);
-PassParameters->SpatialSamplingRadius = FMath::Max(1.0f, CVarRestirGISpatialSamplingRadius.GetValueOnRenderThread());
-PassParameters->SpatialDepthRejectionThreshold = FMath::Clamp(CVarRestirGISpatialDepthRejectionThreshold.GetValueOnRenderThread(), 0.0f, 1.0f);
-PassParameters->SpatialNormalRejectionThreshold = FMath::Clamp(CVarRestirGISpatialNormalRejectionThreshold.GetValueOnRenderThread(), -1.0f, 1.0f);
-PassParameters->ApplyApproximateVisibilityTest = CVarRestirGISpatialApplyApproxVisibility.GetValueOnRenderThread();
+				PassParameters->InputSlice = Reservoir - 1;
+				PassParameters->OutputSlice = Reservoir;
+				PassParameters->HistoryReservoir = Reservoir - 1;
+				PassParameters->SpatialSamples = FMath::Max(CVarRestirGISpatialSamples.GetValueOnRenderThread(), 1);
+				PassParameters->SpatialSamplesBoost = FMath::Max(CVarRestirGISpatialSamplesBoost.GetValueOnRenderThread(), 1);
+				PassParameters->SpatialSamplingRadius = FMath::Max(1.0f, CVarRestirGISpatialSamplingRadius.GetValueOnRenderThread());
+				PassParameters->SpatialDepthRejectionThreshold = FMath::Clamp(CVarRestirGISpatialDepthRejectionThreshold.GetValueOnRenderThread(), 0.0f, 1.0f);
+				PassParameters->SpatialNormalRejectionThreshold = FMath::Clamp(CVarRestirGISpatialNormalRejectionThreshold.GetValueOnRenderThread(), -1.0f, 1.0f);
+				PassParameters->ApplyApproximateVisibilityTest = CVarRestirGISpatialApplyApproxVisibility.GetValueOnRenderThread();
 
-PassParameters->NeighborOffsetMask = GRestiGIDiscSampleBuffer.NumSamples - 1;
-PassParameters->NeighborOffsets = GRestiGIDiscSampleBuffer.DiscSampleBufferSRV;
+				PassParameters->NeighborOffsetMask = GRestiGIDiscSampleBuffer.NumSamples - 1;
+				PassParameters->NeighborOffsets = GRestiGIDiscSampleBuffer.DiscSampleBufferSRV;
 
-PassParameters->RestirGICommonParameters = CommonParameters;
+				PassParameters->RestirGICommonParameters = CommonParameters;
 
-FRestirGISpatialResampling::FPermutationDomain PermutationVector;
-PermutationVector.Set<FRestirGISpatialResampling::FFUseRestirBiasDim>(CVarRayTracingRestirGIEnableSpatialBias.GetValueOnRenderThread());
+				FRestirGISpatialResampling::FPermutationDomain PermutationVector;
+				PermutationVector.Set<FRestirGISpatialResampling::FFUseRestirBiasDim>(CVarRayTracingRestirGIEnableSpatialBias.GetValueOnRenderThread());
 
-auto RayGenShader = View.ShaderMap->GetShader<FRestirGISpatialResampling>(PermutationVector);
-//auto RayGenShader = GetShaderPermutation<FRestirGISpatialResampling>(Options, View);
+				auto RayGenShader = View.ShaderMap->GetShader<FRestirGISpatialResampling>(PermutationVector);
+				//auto RayGenShader = GetShaderPermutation<FRestirGISpatialResampling>(Options, View);
 
-ClearUnusedGraphResources(RayGenShader, PassParameters);
+				ClearUnusedGraphResources(RayGenShader, PassParameters);
 
-GraphBuilder.AddPass(
-	RDG_EVENT_NAME("RestirGI-SpatialResample"),
-	PassParameters,
-	ERDGPassFlags::Compute,
-	[PassParameters, this, &View, RayGenShader, LightingResolution](FRHICommandList& RHICmdList)
-	{
-		FRayTracingShaderBindingsWriter GlobalResources;
-		SetShaderParameters(GlobalResources, RayGenShader, *PassParameters);
+				GraphBuilder.AddPass(
+					RDG_EVENT_NAME("RestirGI-SpatialResample"),
+					PassParameters,
+					ERDGPassFlags::Compute,
+					[PassParameters, this, &View, RayGenShader, LightingResolution](FRHICommandList& RHICmdList)
+					{
+						FRayTracingShaderBindingsWriter GlobalResources;
+						SetShaderParameters(GlobalResources, RayGenShader, *PassParameters);
 
-		FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
-		RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, LightingResolution.X, LightingResolution.Y);
+						FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
+						RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, LightingResolution.X, LightingResolution.Y);
 
-	});
-InitialSlice = Reservoir;
+					});
+				InitialSlice = Reservoir;
 			}
 		}
 	}
@@ -2467,6 +2528,7 @@ InitialSlice = Reservoir;
 	}
 
 }
+
 
 void FDeferredShadingSceneRenderer::RenderTestDDGI(
 	FRDGBuilder& GraphBuilder,
@@ -2618,6 +2680,14 @@ void FDeferredShadingSceneRenderer::RenderTestDDGI(
 
 	PassParameters->RWDebugUAV = GraphBuilder.CreateUAV(DebugTex);
 	
+	FIntVector GuidingBufferDim = FIntVector(Desc.Extent.X, Desc.Extent.Y, 1);
+	FRDGBufferDesc RayGuidingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(GuidingEntry), GuidingBufferDim.X * GuidingBufferDim.Y * GuidingBufferDim.Z);
+	FRDGBufferRef GIGuidingBuffer = GraphBuilder.CreateBuffer(RayGuidingDesc, TEXT("RayGuidingLuminance"));
+	FRDGBufferRef GIMaxQBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32_t), GuidingBufferDim.X * GuidingBufferDim.Y * GuidingBufferDim.Z), TEXT("RayGuidingMaxQ"));
+
+	PassParameters->RWRayGuidingEntries = GraphBuilder.CreateUAV(GIGuidingBuffer);
+	PassParameters->RWRayGuidingMaxQ = GraphBuilder.CreateUAV(GIMaxQBuffer);
+
 	// Set the shader parameters for the relevant volumes
 	for (int32 volumeIndex = 0; volumeIndex < numVolumes; ++volumeIndex)
 	{
