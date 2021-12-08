@@ -1,0 +1,104 @@
+#include "/Engine/Private/Common.ush"
+
+RWTexture2D<float4> CurrentRadianceTexture;
+RWTexture2D<float4> RWSampleRecord;
+RWTexture2D<uint2> RWSampleSpp;
+int AdaptiveThresholdSpp;
+int StepSpp;
+uint Iteration;
+
+//计算每个tile 内的方差并以此估计错误
+void AddSampleRecord(uint2 pixelCoord, float Luminance)
+{
+	float4 Value = RWSampleRecord[pixelCoord];
+	float Mean = Value.y; 
+	float RuningVairance = Value.z;
+	float SampleCount = Value.x;
+	SampleCount += 1;
+	float Delta = Luminance - Mean;
+	Mean += Delta / SampleCount;
+	RuningVairance += Delta * (Luminance-Mean);
+	float Variance = RuningVairance / (SampleCount - 1);
+	float Error = Variance / (SampleCount * max(Mean * Mean, 1e-3));
+	RWSampleRecord[pixelCoord] = float4(SampleCount,Mean,RuningVairance,Error);
+}
+
+//根据样本错误分配权重
+void DistributeAdaptiveSamples(in uint2 pixelCoord, float sumWeight)
+{
+    float adaptiveWeight = RWSampleRecord[pixelCoord].w;
+
+    // if( adaptiveWeight < 1e-4) adaptiveWeight = 0;
+
+	//RWGlobalIlluminationUAV.GetDemension();
+    // int adaptiveBudget = int(stepSpp - 1) * imgSize.x*imgSize.y;
+    // int budgetPerTile = int(adaptiveBudget /(VarianceTileSize*VarianceTileSize) );
+    float budgetPerTile = float(StepSpp); 
+    float weightToSampleFactor = float(budgetPerTile)/sumWeight;
+
+    float fractionalSamples = adaptiveWeight*weightToSampleFactor;
+    int adaptiveSamples = ceil(fractionalSamples);
+    
+    uint nextSampleCount = adaptiveSamples;// maybe (adaptivesample + 1) will be better 
+    uint currentSpp = RWSampleSpp[pixelCoord].x;
+	RWSampleSpp[pixelCoord] = uint2(currentSpp, currentSpp + nextSampleCount);
+}
+
+groupshared uint SumWeight;
+
+[numthreads(16, 16, 1)]
+void DistributeAdaptiveWeightCS(
+	uint3 DispatchThreadID : SV_DispatchThreadID,
+	uint3 ThreadId : SV_GroupThreadID,
+	uint3 GroupID : SV_GroupID
+	) 
+{
+	uint2 pixelCoord = DispatchThreadID.xy;
+
+	uint NumSamples = Iteration + 1;
+	if (NumSamples <= 1)
+    {
+		RWSampleRecord[pixelCoord] = 0.0;
+		RWSampleSpp[pixelCoord] = 0;
+    }
+
+    //由于在这种渐进式的渲染方式中，运行完pt后都要累积计算一个variance tile内的方差，均值，error等信息
+    //这个之所以放在一个Compute Shader中运行主要是由于，RayGen Shader中不支持较好的同步和原子操作，只能分步骤放在Compute Shader中处理了
+	for(int i = 0; i < VARIANCE_TILE_SIZE; i++)
+	{
+		for(int j = 0; j < VARIANCE_TILE_SIZE; j++)
+		{
+			float3 Color = CurrentRadianceTexture[pixelCoord + uint2(i,j)].xyz;
+			float luminace = Luminance(Color);
+			AddSampleRecord(pixelCoord, luminace);
+		}
+	}
+
+
+	if( Iteration > AdaptiveThresholdSpp)
+	{
+		if (pixelCoord.x == 0 && pixelCoord.y == 0)
+        {
+            SumWeight = 0;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        // float adaptiveWeight = RWSampleRecord[pixelCoord].w;
+        // SumWeight += adaptiveWeight;
+        // GroupMemoryBarrierWithGroupSync();
+        //累加所有Tile的误差
+        uint oldValue;
+        InterlockedAdd(SumWeight, asuint(RWSampleRecord[pixelCoord].w), oldValue);
+
+		uint2 csp = RWSampleSpp[pixelCoord].xy;
+        uint currentSpp = csp.x; uint nextSpp = csp.y;
+        //判断当前spp是否到达了这次迭代的次数的最大值，如果是的话，就需要为下一次迭代分配spp
+        if( currentSpp < nextSpp)
+        {
+            currentSpp++;
+			RWSampleSpp[pixelCoord] = uint2(currentSpp, nextSpp);
+        }
+        else
+            DistributeAdaptiveSamples(pixelCoord, asfloat(SumWeight));
+
+	}
+}
