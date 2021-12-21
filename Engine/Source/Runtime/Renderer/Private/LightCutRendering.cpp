@@ -410,7 +410,7 @@ void LightTree::Sort(FRDGBuilder& GraphBuilder,
 		PassParameters,
 		FComputeShaderUtils::GetGroupCount(NumLights, FGenerateMortonCodeCS::GetThreadBlockSize()));
 
-	FBitonicSortUtils::Sort(GraphBuilder, IndexKeyList, ListCounter, 0, true, true);
+	FBitonicSortUtils::Sort(GraphBuilder, IndexKeyList, ListCounter, 0, false, true);
 }
 
 void LightTree::GenerateLevelZero(FRDGBuilder& GraphBuilder, FRDGBufferSRV* LightsSRV)
