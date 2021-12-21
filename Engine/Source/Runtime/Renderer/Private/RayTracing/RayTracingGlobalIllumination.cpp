@@ -27,7 +27,8 @@
 #include "PathTracing.h"
 #include "RayTracingDDGIUpdate.h"
 #include "Components/TestGIComponent.h"
-
+#include "LightCutRendering.h"
+#include <limits>
 static TAutoConsoleVariable<int32> CVarRayTracingGlobalIllumination(
 	TEXT("r.RayTracing.GlobalIllumination"),
 	-1,
@@ -37,28 +38,6 @@ static TAutoConsoleVariable<int32> CVarRayTracingGlobalIllumination(
 	TEXT(" 2: ray tracing global illumination enabled (brute force) \n")
 	TEXT(" 3: ray tracing global illumination enabled (final gather)")
 	TEXT(" 4: ray tracing ddgi\n"),
-	ECVF_RenderThreadSafe
-);
-
-static TAutoConsoleVariable<bool> CVarGlobalIlluminationAdaptiveSamplingEnable(
-	TEXT("r.GlobalIllumination.AdaptiveSampling"),
-	false,
-	TEXT("Whether to use a adaptive sampling for global illumination (default = false)"),
-	ECVF_RenderThreadSafe);
-
-static int32 GRayTracingGlobalIlluminationStepSpp = 16;
-static FAutoConsoleVariableRef CVarRayTracingGlobalIlluminationStepSpp(
-	TEXT("r.RayTracing.GlobalIllumination.StepSpp"),
-	GRayTracingGlobalIlluminationStepSpp,
-	TEXT("StepSpp each Iteration for adaptive sampling)"),
-	ECVF_RenderThreadSafe
-);
-
-static int32 GRayTracingGlobalIlluminationAdaptiveThreholdSpp = 16;
-static FAutoConsoleVariableRef CVarRayTracingGlobalIlluminationAdaptiveThreholdSpp(
-	TEXT("r.RayTracing.GlobalIllumination.AdaptiveThreHoldSpp"),
-	GRayTracingGlobalIlluminationAdaptiveThreholdSpp,
-	TEXT("Adaptive Threhold Spp)"),
 	ECVF_RenderThreadSafe
 );
 
@@ -436,6 +415,22 @@ static TAutoConsoleVariable<float> CVarRayGuidingCellSize(
 	TEXT("Set Spatial Cell Size (default = 1)"),
 	ECVF_RenderThreadSafe);
 
+//LightSamping Related
+static TAutoConsoleVariable<int> CVarLightSamplingType(
+	TEXT("r.RayTracing.LightSamplingType"),
+	1,
+	TEXT(" 0:	BrtuteForce \n")
+	TEXT(" 1:	LightGrid \n")
+	TEXT(" 2:	LightTree \n")
+	TEXT(" 3:	LightCut"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int> CVarLightTreeDistanceType(
+	TEXT("r.LightTree.DistanceType"),
+	1,
+	TEXT("Set LightTree DistanceType"),
+	ECVF_RenderThreadSafe);
+
 DECLARE_GPU_STAT_NAMED(RayTracingGIBruteForce, TEXT("Ray Tracing GI: Brute Force"));
 DECLARE_GPU_STAT_NAMED(RayTracingGIFinalGather, TEXT("Ray Tracing GI: Final Gather"));
 DECLARE_GPU_STAT_NAMED(RayTracingGIRestir, TEXT("Ray Tracing GI: Restir"));
@@ -447,10 +442,12 @@ DECLARE_GPU_STAT_NAMED(RestirGenerateSample, TEXT("Ray Tracing GI: GenerateSampl
 DECLARE_GPU_STAT_NAMED(RestirTemporalResampling, TEXT("Ray Tracing GI: TemporalResampling"));
 DECLARE_GPU_STAT_NAMED(RestirSpatioalResampling, TEXT("Ray Tracing GI: SpatioalResampling"));
 DECLARE_GPU_STAT_NAMED(RestirEvaluateGI, TEXT("Ray Tracing GI: EvaluateGI"));
+
+extern void PrepareLightGrid(FRDGBuilder& GraphBuilder, FPathTracingLightGrid* LightGridParameters, const FPathTracingLight* Lights, uint32 NumLights, uint32 NumInfiniteLights, FRDGBufferSRV* LightsSRV);
 static void SetupLightParameters(
 	FScene* Scene,
 	const FViewInfo& View, FRDGBuilder& GraphBuilder,
-	FRDGBufferSRV** OutLightBuffer, uint32* OutLightCount, FPathTracingSkylight* SkylightParameters)
+	FRDGBufferSRV** OutLightBuffer, uint32* OutLightCount, FPathTracingSkylight* SkylightParameters, FPathTracingLightGrid* LightGridParameters = nullptr)
 {
 	FPathTracingLight Lights[RAY_TRACING_LIGHT_COUNT_MAXIMUM];
 	unsigned LightCount = 0;
@@ -461,7 +458,10 @@ static void SetupLightParameters(
 
 	const bool bUseMISCompensation = true;
 	const bool bSkylightEnabled = SkyLight && SkyLight->bAffectGlobalIllumination && CVarRayTracingGlobalIlluminationSkyLight.GetValueOnRenderThread() != 0;
+	uint32 NumLights = 0;
 
+	// Prepend SkyLight to light buffer since it is not part of the regular light list
+	const float Inf = std::numeric_limits<float>::infinity();
 	// Prepend SkyLight to light buffer (if it is active)
 	if (PrepareSkyTexture(GraphBuilder, Scene, View, bSkylightEnabled, bUseMISCompensation, SkylightParameters))
 	{
@@ -472,15 +472,64 @@ static void SetupLightParameters(
 		// SkyLight does not have a LightingChannelMask
 		DestLight.Flags |= PATHTRACER_FLAG_LIGHTING_CHANNEL_MASK;
 		DestLight.Flags |= PATHTRACING_LIGHT_SKY;
-
+		DestLight.BoundMin = FVector(-Inf, -Inf, -Inf);
+		DestLight.BoundMax = FVector(Inf, Inf, Inf);
 		LightCount++;
 	}
+	for (auto Light : Scene->Lights)
+	{
+		ELightComponentType LightComponentType = (ELightComponentType)Light.LightSceneInfo->Proxy->GetLightType();
 
+		if (LightComponentType != LightType_Directional)
+		{
+			continue;
+		}
+
+		FLightShaderParameters LightParameters;
+		Light.LightSceneInfo->Proxy->GetLightShaderParameters(LightParameters);
+
+		if (LightParameters.Color.IsZero())
+		{
+			continue;
+		}
+
+		FPathTracingLight& DestLight = Lights[LightCount++];
+		uint32 Transmission = Light.LightSceneInfo->Proxy->Transmission();
+		uint8 LightingChannelMask = Light.LightSceneInfo->Proxy->GetLightingChannelMask();
+
+		DestLight.Flags = Transmission ? PATHTRACER_FLAG_TRANSMISSION_MASK : 0;
+		DestLight.Flags |= LightingChannelMask & PATHTRACER_FLAG_LIGHTING_CHANNEL_MASK;
+		DestLight.Flags |= Light.LightSceneInfo->Proxy->CastsDynamicShadow() ? PATHTRACER_FLAG_CAST_SHADOW_MASK : 0;
+		DestLight.IESTextureSlice = -1;
+		DestLight.RectLightTextureIndex = -1;
+
+		// these mean roughly the same thing across all light types
+		DestLight.Color = LightParameters.Color;
+		DestLight.Position = LightParameters.Position;
+		DestLight.Normal = -LightParameters.Direction;
+		DestLight.dPdu = FVector::CrossProduct(LightParameters.Tangent, LightParameters.Direction);
+		DestLight.dPdv = LightParameters.Tangent;
+		DestLight.Attenuation = LightParameters.InvRadius;
+		DestLight.FalloffExponent = 0;
+
+		DestLight.Normal = LightParameters.Direction;
+		DestLight.Dimensions = FVector(LightParameters.SourceRadius, LightParameters.SoftSourceRadius, 0.0f);
+		DestLight.Flags |= PATHTRACING_LIGHT_DIRECTIONAL;
+
+		DestLight.BoundMin = FVector(-Inf, -Inf, -Inf);
+		DestLight.BoundMax = FVector(Inf, Inf, Inf);
+	}
+
+	uint32 InfiniteLights = LightCount;
 	
 	const uint32 MaxLightCount = FMath::Min(CVarRayTracingGlobalIlluminationMaxLightCount.GetValueOnRenderThread(), RAY_TRACING_LIGHT_COUNT_MAXIMUM);
 	for (auto Light : Scene->Lights)
 	{
 		if (LightCount >= MaxLightCount) break;
+
+		ELightComponentType LightComponentType = (ELightComponentType)Light.LightSceneInfo->Proxy->GetLightType();
+		if ((LightComponentType == LightType_Directional) /* already handled by the loop above */)
+			continue;
 
 		if (Light.LightSceneInfo->Proxy->HasStaticLighting() && Light.LightSceneInfo->IsPrecomputedLightingValid()) continue;
 		if (!Light.LightSceneInfo->Proxy->AffectGlobalIllumination()) continue;
@@ -500,18 +549,9 @@ static void SetupLightParameters(
 		DestLight.Attenuation = LightShaderParameters.InvRadius;
 		DestLight.IESTextureSlice = -1; // not used by this path at the moment
 
-		ELightComponentType LightComponentType = (ELightComponentType)Light.LightSceneInfo->Proxy->GetLightType();
 		switch (LightComponentType)
 		{
-		case LightType_Directional:
-		{
-			if (CVarRayTracingGlobalIlluminationDirectionalLight.GetValueOnRenderThread() == 0) continue;
 
-			DestLight.Normal = LightShaderParameters.Direction;
-			DestLight.Color = LightShaderParameters.Color;
-			DestLight.Flags |= PATHTRACING_LIGHT_DIRECTIONAL;
-			break;
-		}
 		case LightType_Rect:
 		{
 			if (CVarRayTracingGlobalIlluminationRectLight.GetValueOnRenderThread() == 0) continue;
@@ -524,6 +564,21 @@ static void SetupLightParameters(
 			DestLight.Dimensions = FVector(2.0f * LightShaderParameters.SourceRadius, 2.0f * LightShaderParameters.SourceLength, 0.0f);
 			DestLight.Shaping = FVector2D(LightShaderParameters.RectLightBarnCosAngle, LightShaderParameters.RectLightBarnLength);
 			DestLight.Flags |= PATHTRACING_LIGHT_RECT;
+
+			float Radius = 1.0f / LightShaderParameters.InvRadius;
+			FVector Center = DestLight.Position;
+			FVector Normal = DestLight.Normal;
+			FVector Disc = FVector(
+				FMath::Sqrt(FMath::Clamp(1 - Normal.X * Normal.X, 0.0f, 1.0f)),
+				FMath::Sqrt(FMath::Clamp(1 - Normal.Y * Normal.Y, 0.0f, 1.0f)),
+				FMath::Sqrt(FMath::Clamp(1 - Normal.Z * Normal.Z, 0.0f, 1.0f))
+			);
+			// quad bbox is the bbox of the disc +  the tip of the hemisphere
+			// TODO: is it worth trying to account for barndoors? seems unlikely to cut much empty space since the volume _inside_ the barndoor receives light
+			FVector Tip = Center + Normal * Radius;
+			DestLight.BoundMin = Tip.ComponentMin(Center - Radius * Disc);
+			DestLight.BoundMax = Tip.ComponentMax(Center + Radius * Disc);
+
 			break;
 		}
 		case LightType_Point:
@@ -537,6 +592,12 @@ static void SetupLightParameters(
 			float SourceRadius = 0.0; // LightShaderParameters.SourceRadius causes too much noise for little pay off at this time
 			DestLight.Dimensions = FVector(SourceRadius, 0.0, 0.0);
 			DestLight.Flags |= PATHTRACING_LIGHT_POINT;
+
+			float Radius = 1.0f / LightShaderParameters.InvRadius;
+			FVector Center = DestLight.Position;
+			// simple sphere of influence
+			DestLight.BoundMin = Center - FVector(Radius, Radius, Radius);
+			DestLight.BoundMax = Center + FVector(Radius, Radius, Radius);
 			break;
 		}
 		case LightType_Spot:
@@ -551,6 +612,25 @@ static void SetupLightParameters(
 			DestLight.Dimensions = FVector(SourceRadius, 0.0, 0.0);
 			DestLight.Shaping = LightShaderParameters.SpotAngles;
 			DestLight.Flags |= PATHTRACING_LIGHT_SPOT;
+			float Radius = 1.0f / LightShaderParameters.InvRadius;
+			FVector Center = DestLight.Position;
+			FVector Normal = DestLight.Normal;
+			FVector Disc = FVector(
+				FMath::Sqrt(FMath::Clamp(1 - Normal.X * Normal.X, 0.0f, 1.0f)),
+				FMath::Sqrt(FMath::Clamp(1 - Normal.Y * Normal.Y, 0.0f, 1.0f)),
+				FMath::Sqrt(FMath::Clamp(1 - Normal.Z * Normal.Z, 0.0f, 1.0f))
+			);
+			// box around ray from light center to tip of the cone
+			FVector Tip = Center + Normal * Radius;
+			DestLight.BoundMin = Center.ComponentMin(Tip);
+			DestLight.BoundMax = Center.ComponentMax(Tip);
+			// expand by disc around the farthest part of the cone
+
+			float CosOuter = LightShaderParameters.SpotAngles.X;
+			float SinOuter = FMath::Sqrt(1.0f - CosOuter * CosOuter);
+
+			DestLight.BoundMin = DestLight.BoundMin.ComponentMin(Center + Radius * (Normal * CosOuter - Disc * SinOuter));
+			DestLight.BoundMax = DestLight.BoundMax.ComponentMax(Center + Radius * (Normal * CosOuter + Disc * SinOuter));
 			break;
 		}
 		};
@@ -567,6 +647,8 @@ static void SetupLightParameters(
 		*OutLightBuffer = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(CreateStructuredBuffer(GraphBuilder, TEXT("RTGILightsBuffer"), sizeof(FPathTracingLight), FMath::Max(LightCount, 1u), Lights, DataSize)));
 		*OutLightCount = LightCount;
 	}
+	if(LightGridParameters)
+		PrepareLightGrid(GraphBuilder, LightGridParameters, Lights, LightCount, InfiniteLights, *OutLightBuffer);
 }
 
 int32 GetRayTracingGlobalIlluminationSamplesPerPixel(const FViewInfo& View)
@@ -624,6 +706,14 @@ bool IsRayTracingDDGI(const FViewInfo& View)
 	return View.FinalPostProcessSettings.RayTracingGIType == ERayTracingGlobalIlluminationType::DDGIPlus;
 }
 
+enum class ELightSamplingType
+{
+	BrtuteForce = 0,
+	LIGHT_GRID = 1,
+	LIGHT_TREE = 2,
+	LIGHT_CUT = 3,
+	MAX,
+};
 class FGlobalIlluminationRGS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FGlobalIlluminationRGS)
@@ -631,8 +721,8 @@ class FGlobalIlluminationRGS : public FGlobalShader
 
 	class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
 	class FEnableTransmissionDim : SHADER_PERMUTATION_INT("ENABLE_TRANSMISSION", 2);
-	//class FEnableAdaptiveDim : SHADER_PERMUTATION_BOOL("ENABLE_ADAPTIVE");
-	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableTransmissionDim>;
+	class FLightSamplingTypeDim : SHADER_PERMUTATION_ENUM_CLASS("LIGHT_SAMPLING_TYPE", ELightSamplingType);
+	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableTransmissionDim, FLightSamplingTypeDim>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -643,6 +733,7 @@ class FGlobalIlluminationRGS : public FGlobalShader
 	{
 		// We need the skylight to do its own form of MIS because RTGI doesn't do its own
 		OutEnvironment.SetDefine(TEXT("PATHTRACING_SKY_MIS"), 1);
+		//OutEnvironment.SetDefine(TEXT("LIGHT_SAMPLING_TYPE"), 1);
 	}
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
@@ -672,37 +763,22 @@ class FGlobalIlluminationRGS : public FGlobalShader
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FPathTracingLight>, SceneLights)
 		SHADER_PARAMETER(uint32, SceneLightCount)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FPathTracingLightGrid, LightGridParameters)
+
 		SHADER_PARAMETER_STRUCT_INCLUDE(FPathTracingSkylight, SkylightParameters)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureParameters, SceneTextures)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, TransmissionProfilesLinearSampler)
+
+		SHADER_PARAMETER_STRUCT_INCLUDE(FLightCutCommonParameter, LightCutCommonParameters)
+		SHADER_PARAMETER(uint32, DistanceType)
+		SHADER_PARAMETER(uint32, LeafStartIndex)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, NodesBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, LightCutBuffer)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
 IMPLEMENT_GLOBAL_SHADER(FGlobalIlluminationRGS, "/Engine/Private/RayTracing/RayTracingGlobalIlluminationRGS.usf", "GlobalIlluminationRGS", SF_RayGen);
-
-//class FDistributeAdaptiveWeightCS : public FGlobalShader
-//{
-//	DECLARE_GLOBAL_SHADER(FDistributeAdaptiveWeightCS)
-//	SHADER_USE_ROOT_PARAMETER_STRUCT(FDistributeAdaptiveWeightCS, FGlobalShader)
-//
-//
-//	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-//	{
-//		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
-//	}
-//
-//	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-//	{
-//
-//	}
-//
-//	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-//	
-//	END_SHADER_PARAMETER_STRUCT()
-//};
-//
-//IMPLEMENT_GLOBAL_SHADER(FDistributeAdaptiveWeightCS, "/Engine/Private/RayTracing/RayTracingGlobalIlluminationRGS.usf", "DistributeAdaptiveWeight", SF_Compute);
 
 // Note: This constant must match the definition in RayTracingGatherPoints.ush
 constexpr int32 MAXIMUM_GATHER_POINTS_PER_PIXEL = 32;
@@ -1424,14 +1500,16 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIllumination(const FV
 
 	const bool bSortMaterials = CVarRayTracingGlobalIlluminationFinalGatherSortMaterials.GetValueOnRenderThread() != 0;
 	int EnableTransmission = CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread();
-	const bool bEnableAdaptive = CVarGlobalIlluminationAdaptiveSamplingEnable.GetValueOnRenderThread();
+	//const bool bEnableAdaptive = CVarGlobalIlluminationAdaptiveSamplingEnable.GetValueOnRenderThread();
 	// Declare all RayGen shaders that require material closest hit shaders to be bound
 	for (int EnableTwoSidedGeometry = 0; EnableTwoSidedGeometry < 2; ++EnableTwoSidedGeometry)
 	{
+		for(uint32 i= 0; i < 4;i++)
 		{
 			FGlobalIlluminationRGS::FPermutationDomain PermutationVector;
 			PermutationVector.Set<FGlobalIlluminationRGS::FEnableTwoSidedGeometryDim>(EnableTwoSidedGeometry == 1);
 			PermutationVector.Set<FGlobalIlluminationRGS::FEnableTransmissionDim>(EnableTransmission);
+			PermutationVector.Set< FGlobalIlluminationRGS::FLightSamplingTypeDim>((ELightSamplingType)i);
 			//PermutationVector.Set<FGlobalIlluminationRGS::FEnableAdaptiveDim>(bEnableAdaptive);
 			TShaderMapRef<FGlobalIlluminationRGS> RayGenerationShader(View.ShaderMap, PermutationVector);
 			OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
@@ -2060,7 +2138,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationFinalGathe
 	unimplemented();
 }
 #endif
-
+LightTree GTree;
 void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce(
 	FRDGBuilder& GraphBuilder,
 	FSceneTextureParameters& SceneTextures,
@@ -2107,7 +2185,13 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	PassParameters->NextEventEstimationSamples = GRayTracingGlobalIlluminationNextEventEstimationSamples;
 	PassParameters->TLAS = View.RayTracingScene.RayTracingSceneRHI->GetShaderResourceView();
 	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
-	SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters);
+	SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters,
+		&PassParameters->LightGridParameters);
+
+	GTree.Build(GraphBuilder, PassParameters->SceneLightCount, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax, PassParameters->SceneLights, View.ViewState->FrameIndex);
+
+	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax);
+
 	PassParameters->SceneTextures = SceneTextures;
 	PassParameters->AccumulateEmissive = FMath::Clamp(CVarRayTracingGlobalIlluminationAccumulateEmissive.GetValueOnRenderThread(), 0, 1);
 
@@ -2136,10 +2220,21 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	PassParameters->RWGlobalIlluminationRayDistanceUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->RayHitDistance);
 	PassParameters->RenderTileOffsetX = 0;
 	PassParameters->RenderTileOffsetY = 0;
-
+	FLightCutCommonParameter	LightCutCommonParameters;
+	LightCutCommonParameters.CutShareGroupSize = GetCVarCutBlockSize().GetValueOnRenderThread();
+	LightCutCommonParameters.MaxCutNodes = GetCVarMaxCutNodes().GetValueOnRenderThread();
+	LightCutCommonParameters.ErrorLimit = GetCVarErrorLimit().GetValueOnRenderThread();
+	LightCutCommonParameters.UseApproximateCosineBound = GetCVarUseApproximateCosineBound().GetValueOnRenderThread();
+	LightCutCommonParameters.InterleaveRate = GetCVarInterleaveRate().GetValueOnRenderThread();
+	PassParameters->LightCutCommonParameters = LightCutCommonParameters;
+	PassParameters->LightCutBuffer = GraphBuilder.CreateSRV(GTree.LightCutBuffer);
+	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(GTree.LightNodesBuffer);
+	PassParameters->DistanceType = CVarLightTreeDistanceType.GetValueOnRenderThread();
+	PassParameters->LeafStartIndex = GTree.GetLeafStartIndex();
 	FGlobalIlluminationRGS::FPermutationDomain PermutationVector;
 	PermutationVector.Set<FGlobalIlluminationRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingGlobalIlluminationEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);
 	PermutationVector.Set<FGlobalIlluminationRGS::FEnableTransmissionDim>(CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread());
+	PermutationVector.Set<FGlobalIlluminationRGS::FLightSamplingTypeDim>((ELightSamplingType)CVarLightSamplingType.GetValueOnRenderThread());
 	TShaderMapRef<FGlobalIlluminationRGS> RayGenerationShader(GetGlobalShaderMap(FeatureLevel), PermutationVector);
 	ClearUnusedGraphResources(RayGenerationShader, PassParameters);
 
@@ -2200,10 +2295,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 			}
 		}
 	}
-
-	//distribute adaptive weight
-	//FDistributeAdaptiveWeightCS::FParameters* CSParameters = GraphBuilder.AllocParameters<FDistributeAdaptiveWeightCS::FParameters>();
-
+	GTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
 }
 #else
 {
@@ -2526,7 +2618,6 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 
 		View.ViewState->PrevFrameViewInfo.SampledGIHistory.ReservoirDimensions = ReservoirHistoryBufferDim;
 	}
-
 }
 
 

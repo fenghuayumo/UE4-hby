@@ -30,7 +30,7 @@ void DistributeAdaptiveSamples(in uint2 pixelCoord, float sumWeight)
 
     // if( adaptiveWeight < 1e-4) adaptiveWeight = 0;
 
-	//RWGlobalIlluminationUAV.GetDemension();
+	//CurrentRadianceTexture.GetDemension();
     // int adaptiveBudget = int(stepSpp - 1) * imgSize.x*imgSize.y;
     // int budgetPerTile = int(adaptiveBudget /(VarianceTileSize*VarianceTileSize) );
     float budgetPerTile = float(StepSpp); 
@@ -82,12 +82,13 @@ void DistributeAdaptiveWeightCS(
             SumWeight = 0;
         }
         GroupMemoryBarrierWithGroupSync();
+
         // float adaptiveWeight = RWSampleRecord[pixelCoord].w;
         // SumWeight += adaptiveWeight;
         // GroupMemoryBarrierWithGroupSync();
         //累加所有Tile的误差
-        uint oldValue;
-        InterlockedAdd(SumWeight, asuint(RWSampleRecord[pixelCoord].w), oldValue);
+        // uint oldValue;
+        // InterlockedAdd(SumWeight, asuint(RWSampleRecord[pixelCoord].w), oldValue);
 
 		uint2 csp = RWSampleSpp[pixelCoord].xy;
         uint currentSpp = csp.x; uint nextSpp = csp.y;

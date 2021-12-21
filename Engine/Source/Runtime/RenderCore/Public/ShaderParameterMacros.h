@@ -164,6 +164,20 @@ public:
 		return Buffer;
 	}
 
+	FORCEINLINE operator FRDGBuffer* () const
+	{
+		return Buffer;
+	}
+
+	FORCEINLINE bool operator==(const FRDGBufferAccess& RHS) const
+	{
+		return Buffer == RHS.Buffer && Access == RHS.Access;
+	}
+
+	FORCEINLINE bool operator!=(const FRDGBufferAccess& RHS) const
+	{
+		return Buffer != RHS.Buffer || Access != RHS.Access;
+	}
 private:
 	FRDGBuffer* Buffer = nullptr;
 	ERHIAccess  Access = ERHIAccess::Unknown;

@@ -158,7 +158,7 @@ TAutoConsoleVariable<int32> CVarPathTracingProgressDisplay(
 
 TAutoConsoleVariable<int32> CVarPathTracingLightGridResolution(
 	TEXT("r.PathTracing.LightGridResolution"),
-	256,
+	128,
 	TEXT("Controls the resolution of the 2D light grid used to cull irrelevant lights from lighting calculations (default = 256)\n"),
 	ECVF_RenderThreadSafe
 );
@@ -193,7 +193,7 @@ TAutoConsoleVariable<int32> CVarPathTracingDenoiser(
 
 TAutoConsoleVariable<bool> CVarPathTracingAdaptiveSamplingEnable(
 	TEXT("r.PathTracing.AdaptiveSampling"),
-	true,
+	false,
 	TEXT("Whether to use a adaptive sampling for global illumination (default = false)"),
 	ECVF_RenderThreadSafe);
 
@@ -452,18 +452,6 @@ class FPathTracingSkylightMISCompensationCS : public FGlobalShader
 };
 IMPLEMENT_SHADER_TYPE(, FPathTracingSkylightMISCompensationCS, TEXT("/Engine/Private/PathTracing/PathTracingSkylightMISCompensation.usf"), TEXT("PathTracingSkylightMISCompensationCS"), SF_Compute);
 
-// this struct holds a light grid for both building or rendering
-BEGIN_SHADER_PARAMETER_STRUCT(FPathTracingLightGrid, RENDERER_API)
-	SHADER_PARAMETER(uint32, SceneInfiniteLightCount)
-	SHADER_PARAMETER(FVector, SceneLightsBoundMin)
-	SHADER_PARAMETER(FVector, SceneLightsBoundMax)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, LightGrid)
-	SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, LightGridData)
-	SHADER_PARAMETER(unsigned, LightGridResolution)
-	SHADER_PARAMETER(unsigned, LightGridMaxCount)
-	SHADER_PARAMETER(int, LightGridAxis)
-END_SHADER_PARAMETER_STRUCT()
-
 class FPathTracingBuildLightGridCS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FPathTracingBuildLightGridCS)
@@ -543,11 +531,11 @@ class FPathTracingRG : public FGlobalShader
 		// Used by multi-GPU rendering
 		SHADER_PARAMETER(FIntVector, TileOffset)
 
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, CurrentRadianceTexture)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWSampleRecord)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint2>, RWSampleSpp)
-		SHADER_PARAMETER(int, AdaptiveThresholdSpp)
-		SHADER_PARAMETER(int, StepSpp)
+		//SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, CurrentRadianceTexture)
+		//SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWSampleRecord)
+		//SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint2>, RWSampleSpp)
+		//SHADER_PARAMETER(int, AdaptiveThresholdSpp)
+		//SHADER_PARAMETER(int, StepSpp)
 	END_SHADER_PARAMETER_STRUCT()
 };
 IMPLEMENT_GLOBAL_SHADER(FPathTracingRG, "/Engine/Private/PathTracing/PathTracing.usf", "PathTracingMainRG", SF_RayGen);
@@ -1365,18 +1353,18 @@ void FDeferredShadingSceneRenderer::RenderPathTracing(
 	FRDGTexture* RadianceTexture = nullptr;
 	FRDGTexture* AlbedoTexture = nullptr;
 	FRDGTexture* NormalTexture = nullptr;
-	FRDGTexture* CurrentRadianceTexture = nullptr;
-	FRDGTexture* SampleRecordTexture = nullptr;
-	FRDGTexture* SampleSppTexture = nullptr;
+	//FRDGTexture* CurrentRadianceTexture = nullptr;
+	//FRDGTexture* SampleRecordTexture = nullptr;
+	//FRDGTexture* SampleSppTexture = nullptr;
 	if (View.ViewState->PathTracingRadianceRT)
 	{
 		// we already have a valid radiance texture, re-use it
 		RadianceTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingRadianceRT, TEXT("PathTracer.Radiance"));
 		AlbedoTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingAlbedoRT, TEXT("PathTracer.Albedo"));
 		NormalTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingNormalRT, TEXT("PathTracer.Normal"));
-		CurrentRadianceTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingCurrentRadianceRT, TEXT("PathTracer.CurrentRadiance"));
-		SampleRecordTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingSampleRecordRT, TEXT("PathTracer.SampleRecord"));
-		SampleSppTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingSampleSppRT, TEXT("PathTracer.SampleSpp"));
+		//CurrentRadianceTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingCurrentRadianceRT, TEXT("PathTracer.CurrentRadiance"));
+		//SampleRecordTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingSampleRecordRT, TEXT("PathTracer.SampleRecord"));
+		//SampleSppTexture = GraphBuilder.RegisterExternalTexture(View.ViewState->PathTracingSampleSppRT, TEXT("PathTracer.SampleSpp"));
 	}
 	else
 	{
@@ -1389,18 +1377,18 @@ void FDeferredShadingSceneRenderer::RenderPathTracing(
 		RadianceTexture = GraphBuilder.CreateTexture(Desc, TEXT("PathTracer.Radiance"), ERDGTextureFlags::MultiFrame);
 		AlbedoTexture   = GraphBuilder.CreateTexture(Desc, TEXT("PathTracer.Albedo")  , ERDGTextureFlags::MultiFrame);
 		NormalTexture   = GraphBuilder.CreateTexture(Desc, TEXT("PathTracer.Normal")  , ERDGTextureFlags::MultiFrame);
-		CurrentRadianceTexture = GraphBuilder.CreateTexture(Desc, TEXT("PathTracer.CurrentRadiance"), ERDGTextureFlags::MultiFrame);
-		
-		int VarianceTileSize = CVarPathTracingVarianceTileSize.GetValueOnRenderThread();
-		FIntPoint VarianceResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), VarianceTileSize);
-		FRDGTextureDesc Desc1 = FRDGTextureDesc::Create2D(
-			VarianceResolution,
-			PF_A32B32G32R32F,
-			FClearValueBinding::None,
-			TexCreate_ShaderResource | TexCreate_UAV);
-		SampleRecordTexture = GraphBuilder.CreateTexture(Desc1, TEXT("PathTracer.SampleRecord"), ERDGTextureFlags::MultiFrame);
-		Desc1.Format = PF_R32G32_UINT;
-		SampleSppTexture = GraphBuilder.CreateTexture(Desc1, TEXT("PathTracer.SampleSpp"), ERDGTextureFlags::MultiFrame);
+		//CurrentRadianceTexture = GraphBuilder.CreateTexture(Desc, TEXT("PathTracer.CurrentRadiance"), ERDGTextureFlags::MultiFrame);
+		//
+		//int VarianceTileSize = CVarPathTracingVarianceTileSize.GetValueOnRenderThread();
+		//FIntPoint VarianceResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), VarianceTileSize);
+		//FRDGTextureDesc Desc1 = FRDGTextureDesc::Create2D(
+		//	VarianceResolution,
+		//	PF_A32B32G32R32F,
+		//	FClearValueBinding::None,
+		//	TexCreate_ShaderResource | TexCreate_UAV);
+		//SampleRecordTexture = GraphBuilder.CreateTexture(Desc1, TEXT("PathTracer.SampleRecord"), ERDGTextureFlags::MultiFrame);
+		//Desc1.Format = PF_R32G32_UINT;
+		//SampleSppTexture = GraphBuilder.CreateTexture(Desc1, TEXT("PathTracer.SampleSpp"), ERDGTextureFlags::MultiFrame);
 	}
 	bool NeedsMoreRays = PathTracingData.Iteration < MaxSPP;
 
@@ -1428,11 +1416,11 @@ void FDeferredShadingSceneRenderer::RenderPathTracing(
 		// TODO: in multi-gpu case, split image into tiles
 		PassParameters->TileOffset.X = 0;
 		PassParameters->TileOffset.Y = 0;
-		PassParameters->AdaptiveThresholdSpp = CVarPathTracingAdaptiveThreholdSpp.GetValueOnRenderThread();
-		PassParameters->StepSpp = CVarPathTracingStepSpp.GetValueOnRenderThread();
-		PassParameters->CurrentRadianceTexture = GraphBuilder.CreateUAV(CurrentRadianceTexture);
-		PassParameters->RWSampleRecord = GraphBuilder.CreateUAV(SampleRecordTexture);
-		PassParameters->RWSampleSpp = GraphBuilder.CreateUAV(SampleSppTexture);
+		//PassParameters->AdaptiveThresholdSpp = CVarPathTracingAdaptiveThreholdSpp.GetValueOnRenderThread();
+		//PassParameters->StepSpp = CVarPathTracingStepSpp.GetValueOnRenderThread();
+		//PassParameters->CurrentRadianceTexture = GraphBuilder.CreateUAV(CurrentRadianceTexture);
+		//PassParameters->RWSampleRecord = GraphBuilder.CreateUAV(SampleRecordTexture);
+		//PassParameters->RWSampleSpp = GraphBuilder.CreateUAV(SampleSppTexture);
 		FPathTracingRG::FPermutationDomain PermutationVector;
 		PermutationVector.Set<FPathTracingRG::FEnableAdaptiveDim>(CVarPathTracingAdaptiveSamplingEnable.GetValueOnRenderThread());
 		//PermutationVector.Set<FPathTracingRG::FVarianceTileSize>(CVarPathTracingVarianceTileSize.GetValueOnRenderThread());
@@ -1463,33 +1451,33 @@ void FDeferredShadingSceneRenderer::RenderPathTracing(
 			);
 		});
 
-		if (CVarPathTracingAdaptiveSamplingEnable.GetValueOnRenderThread())
-		{
+		//if (CVarPathTracingAdaptiveSamplingEnable.GetValueOnRenderThread())
+		//{
 
-			FPathTracingAdaptiveCS::FParameters* AdpPassParameters = GraphBuilder.AllocParameters<FPathTracingAdaptiveCS::FParameters>();
-			AdpPassParameters->AdaptiveThresholdSpp = CVarPathTracingAdaptiveThreholdSpp.GetValueOnRenderThread();
-			AdpPassParameters->StepSpp = CVarPathTracingStepSpp.GetValueOnRenderThread();
-			AdpPassParameters->CurrentRadianceTexture = GraphBuilder.CreateUAV(CurrentRadianceTexture);
-			AdpPassParameters->RWSampleRecord = GraphBuilder.CreateUAV(SampleRecordTexture);
-			AdpPassParameters->RWSampleSpp = GraphBuilder.CreateUAV(SampleSppTexture);
-			AdpPassParameters->Iteration = View.ViewState->PathTracingSampleIndex;
-			FPathTracingAdaptiveCS::FPermutationDomain ADPermutationVector;
-			//ADPermutationVector.Set<FPathTracingAdaptiveCS::FVarianceTileSize>(CVarPathTracingVarianceTileSize.GetValueOnRenderThread());
-			TShaderMapRef<FPathTracingAdaptiveCS> AdapativeCS(GetGlobalShaderMap(ERHIFeatureLevel::SM5), ADPermutationVector);
-			ClearUnusedGraphResources(AdapativeCS, AdpPassParameters);
-			FIntPoint VarianceDispatchSize = FIntPoint::DivideAndRoundUp(SampleRecordTexture->Desc.Extent, 16);
-			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Path Tracer Adapative Distribute Sample"), AdapativeCS,
-				AdpPassParameters, FIntVector(VarianceDispatchSize.X, VarianceDispatchSize.Y, 1));
-		}
+		//	FPathTracingAdaptiveCS::FParameters* AdpPassParameters = GraphBuilder.AllocParameters<FPathTracingAdaptiveCS::FParameters>();
+		//	AdpPassParameters->AdaptiveThresholdSpp = CVarPathTracingAdaptiveThreholdSpp.GetValueOnRenderThread();
+		//	AdpPassParameters->StepSpp = CVarPathTracingStepSpp.GetValueOnRenderThread();
+		//	AdpPassParameters->CurrentRadianceTexture = GraphBuilder.CreateUAV(CurrentRadianceTexture);
+		//	AdpPassParameters->RWSampleRecord = GraphBuilder.CreateUAV(SampleRecordTexture);
+		//	AdpPassParameters->RWSampleSpp = GraphBuilder.CreateUAV(SampleSppTexture);
+		//	AdpPassParameters->Iteration = View.ViewState->PathTracingSampleIndex;
+		//	FPathTracingAdaptiveCS::FPermutationDomain ADPermutationVector;
+		//	//ADPermutationVector.Set<FPathTracingAdaptiveCS::FVarianceTileSize>(CVarPathTracingVarianceTileSize.GetValueOnRenderThread());
+		//	TShaderMapRef<FPathTracingAdaptiveCS> AdapativeCS(GetGlobalShaderMap(ERHIFeatureLevel::SM5), ADPermutationVector);
+		//	ClearUnusedGraphResources(AdapativeCS, AdpPassParameters);
+		//	FIntPoint VarianceDispatchSize = FIntPoint::DivideAndRoundUp(SampleRecordTexture->Desc.Extent, 16);
+		//	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Path Tracer Adapative Distribute Sample"), AdapativeCS,
+		//		AdpPassParameters, FIntVector(VarianceDispatchSize.X, VarianceDispatchSize.Y, 1));
+		//}
 
 		// After we are done, make sure we remember our texture for next time so that we can accumulate samples across frames
 		GraphBuilder.QueueTextureExtraction(RadianceTexture, &View.ViewState->PathTracingRadianceRT);
 		GraphBuilder.QueueTextureExtraction(AlbedoTexture  , &View.ViewState->PathTracingAlbedoRT  );
 		GraphBuilder.QueueTextureExtraction(NormalTexture  , &View.ViewState->PathTracingNormalRT  );
 
-		GraphBuilder.QueueTextureExtraction(SampleSppTexture, &View.ViewState->PathTracingSampleSppRT);
-		GraphBuilder.QueueTextureExtraction(SampleRecordTexture, &View.ViewState->PathTracingSampleRecordRT);
-		GraphBuilder.QueueTextureExtraction(CurrentRadianceTexture, &View.ViewState->PathTracingCurrentRadianceRT);
+		//GraphBuilder.QueueTextureExtraction(SampleSppTexture, &View.ViewState->PathTracingSampleSppRT);
+		//GraphBuilder.QueueTextureExtraction(SampleRecordTexture, &View.ViewState->PathTracingSampleRecordRT);
+		//GraphBuilder.QueueTextureExtraction(CurrentRadianceTexture, &View.ViewState->PathTracingCurrentRadianceRT);
 
 	}
 

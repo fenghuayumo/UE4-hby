@@ -1,0 +1,223 @@
+#ifndef _LIGHT_TREE_SAMPLING_
+#define _LIGHT_TREE_SAMPLING_
+#include "LightTreeCommon.ush"
+
+inline float ErrorFunction(int nodeID, 
+    float3 p, 
+    float3 N, 
+    float3 V,
+	StructuredBuffer<FLightNode> NodesBuffer,
+    bool ApproximateCosineBound,
+    float ErrorLimit,
+    float SceneLightBoundRadius
+)
+{
+	FLightNode node = NodesBuffer[nodeID];
+
+	float dlen2 = SquaredDistanceToClosestPoint(p, node.BoundMin, node.BoundMax);
+	float SR2 = ErrorLimit * SceneLightBoundRadius;
+	SR2 *= SR2;
+	if (dlen2 < SR2) dlen2 = SR2; // bound the distance
+
+	float atten = 1.0 / dlen2;
+
+	if (ApproximateCosineBound)
+		atten *= GeomTermBoundApproximate(p, N, node.BoundMin, node.BoundMax);
+	else
+		atten *= GeomTermBound(p, N, node.BoundMin, node.BoundMax);
+#ifdef LIGHT_CONE
+	{
+		float3 nr_boundMin = 2 * p - node.BoundMax;
+		float3 nr_boundMax = 2 * p - node.BoundMin;
+		float cos0 = 1;
+		if (ApproximateCosineBound)
+			cos0 = GeomTermBoundApproximate(p, node.Cone.xyz, nr_boundMin, nr_boundMax);
+		else
+			cos0 = GeomTermBound(p, node.Cone.xyz, nr_boundMin, nr_boundMax);
+		atten *= max(0.f, cos(max(0.f, acos(cos0) - node.Cone.w)));
+	}
+#endif
+
+	float colorIntens = node.Intensity;
+
+	float res = atten * colorIntens;
+	return res;
+};
+
+
+bool SelectChildNode(
+    float3 WorldPos, 
+    float3 WorldNormal, 
+    inout float Prob0, 
+    int Child0, 
+    int Child1, 
+  	StructuredBuffer<FLightNode> NodesBuffer,
+    bool ApproximateCosineBound,
+    int  DistanceType)
+{
+	FLightNode c0 = NodesBuffer[Child0];
+	FLightNode c1 = NodesBuffer[Child1];
+	float c0_Intensity = c0.Intensity;
+	float c1_Intensity = c1.Intensity;
+
+	if (c0_Intensity == 0)
+	{
+		if (c1_Intensity == 0) return false;
+		Prob0 = 0;
+		return true;
+	}
+	else if (c1_Intensity == 0)
+	{
+		Prob0 = 1;
+		return true;
+	}
+
+	float3 c0_boundMin = c0.BoundMin;
+	float3 c0_boundMax = c0.BoundMax;
+	float3 c1_boundMin = c1.BoundMin;
+	float3 c1_boundMax = c1.BoundMax;
+
+	// Compute the weights
+	
+	float geom0 = 1;
+	float geom1 = 1;
+	if (ApproximateCosineBound)
+	{
+		geom0 = GeomTermBoundApproximate(WorldPos, WorldNormal, c0_boundMin, c0_boundMax);
+		geom1 = GeomTermBoundApproximate(WorldPos, WorldNormal, c1_boundMin, c1_boundMax);
+	}
+	else
+	{
+		geom0 = GeomTermBound(WorldPos, WorldNormal, c0_boundMin, c0_boundMax);
+		geom1 = GeomTermBound(WorldPos, WorldNormal, c1_boundMin, c1_boundMax);
+	}
+
+#ifdef LIGHT_CONE
+	float3 c0r_boundMin = 2 * WorldPos - c0_boundMax;
+	float3 c0r_boundMax = 2 * WorldPos - c0_boundMin;
+	float3 c1r_boundMin = 2 * WorldPos - c1_boundMax;
+	float3 c1r_boundMax = 2 * WorldPos - c1_boundMin;
+
+	float cos0 = 1;
+	float cos1 = 1;
+
+	if (ApproximateCosineBound)
+	{
+		cos0 = GeomTermBoundApproximate(WorldPos, c0.Cone.xyz, c0r_boundMin, c0r_boundMax);
+		cos1 = GeomTermBoundApproximate(WorldPos, c1.Cone.xyz, c1r_boundMin, c1r_boundMax);
+	}
+	else
+	{
+		cos0 = GeomTermBound(WorldPos, c0.Cone.xyz, c0r_boundMin, c0r_boundMax);
+		cos1 = GeomTermBound(WorldPos, c1.Cone.xyz, c1r_boundMin, c1r_boundMax);
+	}
+	geom0 *= max(0.f, cos(max(0.f, acos(cos0) - c0.Cone.w)));
+	geom1 *= max(0.f, cos(max(0.f, acos(cos1) - c1.Cone.w)));
+#endif
+
+	if (geom0 + geom1 == 0) return false;
+
+	if (geom0 == 0)
+	{
+		Prob0 = 0;
+		return true;
+	}
+	else if (geom1 == 0)
+	{
+		Prob0 = 1;
+		return true;
+	}
+
+	float intensGeom0 = c0_Intensity * geom0;
+	float intensGeom1 = c1_Intensity * geom1;
+
+	float l2_min0;
+	float l2_min1;
+	l2_min0 = SquaredDistanceToClosestPoint(WorldPos, c0_boundMin, c0_boundMax);
+	l2_min1 = SquaredDistanceToClosestPoint(WorldPos, c1_boundMin, c1_boundMax);
+
+#ifdef EXPLORE_DISTANCE_TYPE
+	if (DistanceType == 0)
+	{
+		if (l2_min0 < WidthSquared(c0_boundMin, c0_boundMax) || l2_min1 < WidthSquared(c1_boundMin, c1_boundMax))
+		{
+			Prob0 = intensGeom0 / (intensGeom0 + intensGeom1);
+		}
+		else
+		{
+			float w_max0 = normalizedWeights(l2_min0, l2_min1, intensGeom0, intensGeom1);
+			Prob0 = w_max0;	// closest point
+		}
+	}
+	else if (DistanceType == 1)
+	{
+		float3 l0 = 0.5*(c0_boundMin + c0_boundMax) - WorldPos;
+		float3 l1 = 0.5*(c1_boundMin + c1_boundMax) - WorldPos;
+		float w_max0 = normalizedWeights(max(0.001, dot(l0, l0)), max(0.001, dot(l1, l1)), intensGeom0, intensGeom1);
+		Prob0 = w_max0;	// closest point
+	}
+	else if (DistanceType == 2) //avg weight of minmax (used in the paper)
+	{
+#endif
+		float l2_max0 = SquaredDistanceToFarthestPoint(WorldPos, c0_boundMin, c0_boundMax);
+		float l2_max1 = SquaredDistanceToFarthestPoint(WorldPos, c1_boundMin, c1_boundMax);
+		float w_max0 = l2_min0 == 0 && l2_min1 == 0 ? intensGeom0 / (intensGeom0 + intensGeom1) : normalizedWeights(l2_min0, l2_min1, intensGeom0, intensGeom1);
+		float w_min0 = normalizedWeights(l2_max0, l2_max1, intensGeom0, intensGeom1);
+		Prob0 = 0.5 * (w_max0 + w_min0);
+#ifdef EXPLORE_DISTANCE_TYPE
+	}
+#endif
+	return true;
+};
+
+inline bool TraverseLightTree(
+    float3 WorldPos, 
+    float3 WorldNormal, 
+    int    NodeID,
+	StructuredBuffer<FLightNode> NodeBuffer,
+	int LeafStartIndex,
+    bool ApproximateCosineBound,
+    int  DistanceType,
+	float RandSample, 
+    out float OutPdf,
+    out int OutLightId
+   )
+{
+	bool deadBranch = false;
+    float Pdf = 1.0;
+	while (NodeID < LeafStartIndex) 
+    {
+		int lChildID = NodeID << 1;
+		int rChildID = lChildID + 1;
+		float prob0;
+
+		if (SelectChildNode(WorldPos, WorldNormal, prob0, lChildID, rChildID, NodeBuffer, ApproximateCosineBound,DistanceType )) 
+        {
+			if (RandSample < prob0) 
+            {
+				NodeID = lChildID;
+				RandSample /= prob0;
+				Pdf *= prob0;
+			}
+			else 
+            {
+				NodeID = rChildID;
+				RandSample = (RandSample - prob0) / (1 - prob0);
+				Pdf *= (1 - prob0);
+			}
+		}
+		else 
+        {
+			deadBranch = true;
+			break;
+		}
+	}
+    if( deadBranch )
+        OutLightId = -1;
+    else
+        OutLightId = NodeBuffer[NodeID].ID;
+    OutPdf = Pdf;
+	return deadBranch;
+}
+
+#endif

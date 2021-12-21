@@ -1,0 +1,86 @@
+#include "../Common.ush"
+#include "LightTreeCommon.ush"
+
+struct FVisualizeNodeVSToPS
+{
+	nointerpolation int level : LEVEL;
+};
+
+StructuredBuffer<FVizLightNode> VizNodes;
+float4x4 MVP;
+
+void ViszLightTreeVS(
+	in float4 InPosition : ATTRIBUTE0,
+    uint InstanceId : SV_InstanceID,
+    out FVisualizeNodeVSToPS Output,
+    out float4 OutPosition : SV_POSITION)
+{
+	FVizLightNode node = VizNodes[InstanceId];
+	float3 center =  0.5 * (node.BoundMin + node.BoundMax);
+	float3 dimension = 0.5 * (node.BoundMax - node.BoundMin);
+	float4x4 model = {
+		dimension.x, 0, 0, 0,
+		0, dimension.y, 0, 0,
+		0, 0, dimension.z, 0,
+		center.x, center.y, center.z, 1
+	};
+
+	// float4x4 model = {
+	// 	1.0, 0, 0, 0,
+	// 	0, 1.0, 0, 0,
+	// 	0, 0, 1.0, 0,
+	// 	0, 0, 0, 1
+	// };
+
+	OutPosition = mul(float4(InPosition.xyz, 1.0), model);
+	OutPosition = mul(OutPosition, MVP);
+	Output.level = node.Level;
+}
+
+
+
+int ShowLevel;
+
+// color coding
+static const float levelColor[32][3] = {
+{1,0.0,0.0},
+{1,0.375,0.0},
+{1,0.75,0.0},
+{0.875,1,0.0},
+{0.5,1,0.0},
+{0.125,1,0.0},
+{0.0,1,0.25},
+{0.0,1,0.625},
+{0.0,1.0,1},
+{0.0,0.625,1},
+{0.0,0.25,1},
+{0.125,0.0,1},
+{0.5,0.0,1},
+{0.875,0.0,1},
+{1,0.0,0.75},
+{1,0.0,0.375},
+{1,0.0,0.0},
+{1,0.0625,0.0625},
+{1,0.125,0.125},
+{1,0.1875,0.1875},
+{1,0.25,0.25},
+{1,0.3125,0.3125},
+{1,0.375,0.375},
+{1,0.4375,0.4375},
+{1,0.5,0.5},
+{1,0.5625,0.5625},
+{1,0.625,0.625},
+{1,0.6875,0.6875},
+{1,0.75,0.75},
+{1,0.8125,0.8125},
+{1,0.875,0.875},
+{1,0.9375,0.9375}
+};
+
+void ViszLightTreePS(  in FVisualizeNodeVSToPS Input, out float4 OutColor : SV_Target0)
+{
+	int level = Input.level;
+	if (level == -1 || (ShowLevel != -1 && ShowLevel != level)) discard;
+	OutColor = level >= 32 ? 1 : float4(levelColor[level], 1);
+	// OutColor = float4(levelColor[level], 1);
+}

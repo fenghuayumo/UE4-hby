@@ -14,10 +14,31 @@
 
 #include "RayTracingTimingCommon.ush"
 
-#include "../PathTracing/Light/PathTracingLightSampling.ush"
+#define EXPLORE_DISTANCE_TYPE
+#define LIGHT_GRID 1
+#define LIGHT_TREE 2
+#define LIGHT_CUT  3
+
+// #define LIGHT_SAMPLING_TYPE 1
+#ifndef LIGHT_SAMPLING_TYPE
+#define LIGHT_SAMPLING_TYPE 0
+#endif
+
+#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
+#define UNIFORM_LIGHT_SELECTION
+#endif
+#if LIGHT_SAMPLING_TYPE == LIGHT_GRID
+#define USE_PATH_TRACING_LIGHT_GRID 1
+#else
+#define USE_PATH_TRACING_LIGHT_GRID 0
+#endif
+
 #include "../PathTracing/Material/PathTracingMaterialSampling.ush"
 #include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
+#include "../PathTracing/Light/PathTracingLightGrid.ush"
+#include "../PathTracing/Light/PathTracingLightSampling.ush"
 
+#include "../LightCut/LightTreeSampling.ush"
 
 #define USE_PATHTRACING_MATERIALS 0
 
@@ -44,6 +65,18 @@ uint AccumulateEmissive;
 int AccumulateTime;
 RWTexture2D<uint> CumulativeTime;
 
+int DistanceType;
+int LeafStartIndex;
+
+int MaxCutNodes; 
+float ErrorLimit;
+int CutSharingSize;
+int InterleaveRate;
+int UseApproximateCosineBound;
+
+StructuredBuffer<int> LightCutBuffer;
+StructuredBuffer<FLightNode> NodesBuffer;
+
 void GenerateCosineNormalRay(
 	float3 WorldPosition,
 	float3 WorldNormal,
@@ -64,6 +97,49 @@ void GenerateCosineNormalRay(
 	RayTMin = 0.01;
 	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
 	RayPdf = Direction_Tangent.w;
+}
+
+bool SampleLightTree(
+	float3 RandSample,
+	float3 WorldPos,
+	float3 WorldNormal,
+	StructuredBuffer<FLightNode> LightNodes,
+	int LeafStartIndex,
+	int StartNodeID,
+	uint PrimitiveLightingChannelMask,
+	bool IsTransmissiveMaterial,
+	out int OutLightId,
+	out float3 OutDirection,
+	out float  OutDistance,
+	out float3 OutRadianceOverPdf,
+	out float OutPdf)
+{
+	// set default values in case sampling fails
+	OutLightId = -1;
+	OutDirection = 0;
+	OutDistance = 0;
+	OutRadianceOverPdf = 0;
+	OutPdf = 0;
+
+	if (SceneLightCount == 0)
+	{
+		// no lights in the scene
+		return false;
+	}
+	float LightPickPdf = 1.0;
+	bool deadBranch = TraverseLightTree(WorldPos, WorldNormal, StartNodeID, LightNodes, 
+					LeafStartIndex, UseApproximateCosineBound, DistanceType,
+					RandSample.x ,LightPickPdf,OutLightId );
+	if( deadBranch )
+		return false;
+
+	FLightSample Result = SampleLight(OutLightId, RandSample.yz, WorldPos, WorldNormal);
+	OutDirection = Result.Direction;
+	OutDistance = Result.Distance;
+	OutRadianceOverPdf = Result.RadianceOverPdf / LightPickPdf;
+	OutPdf = Result.Pdf * LightPickPdf;
+
+	return true;
 }
 
 RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
@@ -249,18 +325,35 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 				float NeePdf = 0.0;
 
 				float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
-
 				RayDesc LightRay;
-				if (SampleLight(RandSample3,
-								Ray.Origin,
-								Payload.WorldNormal,
-								Payload.PrimitiveLightingChannelMask,
-								ENABLE_TRANSMISSION,
-								LightId,
-								LightRay.Direction,
-								LightRay.TMax,
-								LightRadianceOverPdf,
-								NeePdf))
+			
+				#if LIGHT_SAMPLING_TYPE == LIGHT_TREE
+				bool bLit = SampleLightTree(RandSample3,
+							Ray.Origin,
+							Payload.WorldNormal,
+							NodesBuffer,
+							LeafStartIndex,
+							1,
+							Payload.PrimitiveLightingChannelMask,
+							ENABLE_TRANSMISSION,
+							LightId,
+							LightRay.Direction,
+							LightRay.TMax,
+							LightRadianceOverPdf,
+							NeePdf);
+				#else
+				bool bLit = SampleLight(RandSample3,
+							Ray.Origin,
+							Payload.WorldNormal,
+							Payload.PrimitiveLightingChannelMask,
+							ENABLE_TRANSMISSION,
+							LightId,
+							LightRay.Direction,
+							LightRay.TMax,
+							LightRadianceOverPdf,
+							NeePdf);
+				#endif
+				if (bLit)
 				{
 					LightRay.Origin = Ray.Origin;
 					LightRay.TMin = 0;

@@ -169,11 +169,20 @@ bool SampleLight(
 		// no lights in the scene
 		return false;
 	}
-
 	float LightPickingCdf[RAY_TRACING_LIGHT_COUNT_MAXIMUM];
+#if USE_PATH_TRACING_LIGHT_GRID
+	FLightLoopCount LightLoopCount = LightGridLookup(WorldPos);
+	float LightPickingCdfSum = 0;
+	for (uint Index = 0, Num = LightLoopCount.NumLights; Index < Num; ++Index)
+	{
+		uint LightIndex = GetLightId(Index, LightLoopCount);
+		LightPickingCdfSum += EstimateLight(LightIndex, WorldPos, WorldNormal, PrimitiveLightingChannelMask, IsTransmissiveMaterial);
+		LightPickingCdf[Index] = LightPickingCdfSum;
+	}
 
+#else
 	float LightPickingCdfSum = InitLightPickingCdf(WorldPos, WorldNormal, PrimitiveLightingChannelMask, IsTransmissiveMaterial, LightPickingCdf);
-
+#endif
 	if (LightPickingCdfSum == 0.0)
 	{
 		// light picking cdf is all 0
@@ -181,11 +190,14 @@ bool SampleLight(
 	}
 
 	float LightPickPdf = 0;
-
-	SelectLight(RandSample.x * LightPickingCdfSum, SceneLightCount, LightPickingCdf, OutLightId, LightPickPdf);
-
+#if USE_PATH_TRACING_LIGHT_GRID
+	SelectLight(RandSample.x * LightPickingCdfSum, LightLoopCount.NumLights, LightPickingCdf, OutLightId, LightPickPdf); 
 	LightPickPdf /= LightPickingCdfSum;
-
+	OutLightId = GetLightId(OutLightId, LightLoopCount);
+#else
+	SelectLight(RandSample.x * LightPickingCdfSum, SceneLightCount, LightPickingCdf, OutLightId, LightPickPdf);
+	LightPickPdf /= LightPickingCdfSum;
+#endif
 	FLightSample Result = SampleLight(OutLightId, RandSample.yz, WorldPos, WorldNormal);
 	OutDirection = Result.Direction;
 	OutDistance = Result.Distance;

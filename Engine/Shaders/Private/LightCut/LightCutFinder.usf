@@ -1,0 +1,121 @@
+
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "LightTreeSampling.ush"
+#include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
+StructuredBuffer<FLightNode> NodesBuffer;
+RWStructuredBuffer<int> LightCutBuffer;
+Texture2D<float4>   NormalTexture;
+Texture2D<float>    DepthTexture;
+SamplerState        PointClampSampler;
+SamplerState        LinearClampSampler;
+
+float4              ScaledViewSizeAndInvSize;
+
+int MaxCutNodes;
+int CutShareGroupSize;
+float ErrorLimit;
+int UseApproximateCosineBound;
+
+float  SceneLightBoundRadius;
+
+struct LightHeapData
+{
+	int NodeID;
+	float Error;
+};
+
+[numthreads(THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1)]
+void LightCutFindCS(uint3 DTid : SV_DispatchThreadID)
+{
+	int2 anchor = DTid.xy * CutShareGroupSize;
+	uint2 BufferSize = View.BufferSizeAndInvSize.xy;
+	if (anchor.x >= BufferSize.x || anchor.y >= BufferSize.y) return;
+
+	RandomSequence RandSequence;
+
+	int dispatchWidth = (BufferSize.x + CutShareGroupSize - 1) / CutShareGroupSize;
+	RandomSequence_Initialize(RandSequence, dispatchWidth * DTid.y + DTid.x, View.StateFrameIndex);
+	// RandSequence.Type = 0;
+
+	int2 realCutSharedGroupSize = int2(min(BufferSize.x - anchor.x, CutShareGroupSize),
+		min(BufferSize.y - anchor.y, CutShareGroupSize));
+
+	int offset = min(realCutSharedGroupSize.x * realCutSharedGroupSize.y - 1,
+		int(realCutSharedGroupSize.x * realCutSharedGroupSize.y * RandomSequence_GenerateSample1D(RandSequence)));
+	// randomize pivot pixel position
+	int offsetX = offset % realCutSharedGroupSize.x;
+	int offsetY = offset / realCutSharedGroupSize.x;
+
+	int2 PixelCoord = CutShareGroupSize * DTid.xy + int2(offsetX, offsetY);
+
+	// Get G-Buffer surface data
+	float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
+	float2 UV = (float2(PixelCoord) + 0.5) * InvBufferSize;
+    float2 ScreenUV = (float2(PixelCoord) + .5) * float2(ScaledViewSizeAndInvSize.zw);
+  // Calculate vector going through the center of appropriate GBuffer pixel
+    int2 GBufferNearestPixelIndex = int2(ScreenUV * View.ViewSizeAndInvSize.xy);
+    float2 GBufferNearestUV = (float2(GBufferNearestPixelIndex) + .5) * View.ViewSizeAndInvSize.zw;
+    float4 Position = float4(GBufferNearestUV * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    float3 InScreenVector = mul(float4(Position.xy, 1, 0), View.ScreenToTranslatedWorld).xyz;
+
+    // Get information about our pixel
+    float2 BufferUV = ScreenUV * View.ViewSizeAndInvSize.xy * View.BufferSizeAndInvSize.zw;
+    float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
+    float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+    float3 WorldPosition = InScreenVector * SceneDepth + View.WorldCameraOrigin;
+    float3 WorldNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, BufferUV, 0).xyz));
+    float3 CameraDirection = normalize(InScreenVector);
+
+	float3 V = -CameraDirection;
+
+	int numLights = 1;
+	LightHeapData heap[MAX_CUT_NODES + 1];
+	heap[1].NodeID = 1;
+	heap[1].Error = 1e27;
+	int maxId = 1;
+	int lightcutNodes[MAX_CUT_NODES];
+	lightcutNodes[0] = 1;
+	while (numLights < MaxCutNodes)
+	{
+		int id = maxId;
+		int NodeID = heap[id].NodeID;
+
+		int pChild = NodeID << 1;
+		int sChild = pChild + 1;
+
+		lightcutNodes[id - 1] = pChild;
+		heap[id].NodeID = pChild;
+		heap[id].Error = ErrorFunction(pChild, WorldPosition, WorldNormal, V, NodesBuffer,UseApproximateCosineBound, ErrorLimit,SceneLightBoundRadius);
+
+		// check bogus light
+		if (NodesBuffer[sChild].Intensity > 0)
+		{
+			numLights++;
+			lightcutNodes[numLights - 1] = sChild;
+			heap[numLights].NodeID = sChild;
+			heap[numLights].Error = ErrorFunction(sChild, WorldPosition, WorldNormal, V, NodesBuffer, UseApproximateCosineBound,ErrorLimit,SceneLightBoundRadius);
+		}
+
+		// find maxId
+		float maxError = -1e10;
+		for (int i = 1; i <= numLights; i++)
+		{
+			if (heap[i].Error > maxError)
+			{
+				maxError = heap[i].Error;
+				maxId = i;
+			}
+		}
+		if (maxError <= 0) break;
+	}
+
+	// write lightcut nodes
+	int startAddr = MAX_CUT_NODES * (DTid.y * ((BufferSize.x + CutShareGroupSize - 1) / CutShareGroupSize) + DTid.x);
+	for (int i = 0; i < MaxCutNodes; i++)
+	{
+		if (i < numLights) LightCutBuffer[startAddr + i] = lightcutNodes[i];
+		else LightCutBuffer[startAddr + i] = -1;
+	}
+}
