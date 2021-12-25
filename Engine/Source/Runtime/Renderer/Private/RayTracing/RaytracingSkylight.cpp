@@ -115,6 +115,13 @@ static TAutoConsoleVariable<int32> CVarRayTracingSkyLightTiming(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<int32> CVarRayTracingSkyLightMipMapTreeSampling(
+	TEXT("r.RayTracing.SkyLight.MipMapTreeSampling"),
+	0,
+	TEXT("Sampling Use Importance Explict MipmapData"),
+	ECVF_RenderThreadSafe
+);
+
 int32 GetRayTracingSkyLightDecoupleSampleGenerationCVarValue()
 {
 	return CVarRayTracingSkyLightDecoupleSampleGeneration.GetValueOnRenderThread();
@@ -167,13 +174,35 @@ bool SetupSkyLightParameters(
 	const bool bUseMISCompensation = true;
 	if (PrepareSkyTexture(GraphBuilder, Scene, View, bEnableSkylight, bUseMISCompensation, SkylightParameters))
 	{
-
 		SkyLightData->SamplesPerPixel = GetSkyLightSamplesPerPixel(Scene->SkyLight);
 		SkyLightData->MaxRayDistance = GRayTracingSkyLightMaxRayDistance;
 		SkyLightData->MaxNormalBias = GetRaytracingMaxNormalBias();
 		SkyLightData->bTransmission = Scene->SkyLight->bTransmission;
 		SkyLightData->MaxShadowThickness = GRayTracingSkyLightMaxShadowThickness;
+		SkyLightData->SamplingStopLevel = GRayTracingSkyLightSamplingStopLevel;
 		ensure(SkyLightData->SamplesPerPixel > 0);
+
+		SkyLightData->Color = FVector(Scene->SkyLight->GetEffectiveLightColor());
+		SkyLightData->Texture = Scene->SkyLight->ProcessedTexture->TextureRHI;
+		SkyLightData->TextureDimensions = FIntVector(Scene->SkyLight->ProcessedTexture->GetSizeX(), Scene->SkyLight->ProcessedTexture->GetSizeY(), 0);
+		SkyLightData->TextureSampler = Scene->SkyLight->ProcessedTexture->SamplerStateRHI;
+		SkyLightData->MipDimensions = Scene->SkyLight->ImportanceSamplingData->MipDimensions;
+
+		SkyLightData->MipTreePosX = Scene->SkyLight->ImportanceSamplingData->MipTreePosX.SRV;
+		SkyLightData->MipTreeNegX = Scene->SkyLight->ImportanceSamplingData->MipTreeNegX.SRV;
+		SkyLightData->MipTreePosY = Scene->SkyLight->ImportanceSamplingData->MipTreePosY.SRV;
+		SkyLightData->MipTreeNegY = Scene->SkyLight->ImportanceSamplingData->MipTreeNegY.SRV;
+		SkyLightData->MipTreePosZ = Scene->SkyLight->ImportanceSamplingData->MipTreePosZ.SRV;
+		SkyLightData->MipTreeNegZ = Scene->SkyLight->ImportanceSamplingData->MipTreeNegZ.SRV;
+
+		SkyLightData->MipTreePdfPosX = Scene->SkyLight->ImportanceSamplingData->MipTreePdfPosX.SRV;
+		SkyLightData->MipTreePdfNegX = Scene->SkyLight->ImportanceSamplingData->MipTreePdfNegX.SRV;
+		SkyLightData->MipTreePdfPosY = Scene->SkyLight->ImportanceSamplingData->MipTreePdfPosY.SRV;
+		SkyLightData->MipTreePdfNegY = Scene->SkyLight->ImportanceSamplingData->MipTreePdfNegY.SRV;
+		SkyLightData->MipTreePdfPosZ = Scene->SkyLight->ImportanceSamplingData->MipTreePdfPosZ.SRV;
+		SkyLightData->MipTreePdfNegZ = Scene->SkyLight->ImportanceSamplingData->MipTreePdfNegZ.SRV;
+		SkyLightData->SolidAnglePdf = Scene->SkyLight->ImportanceSamplingData->SolidAnglePdf.SRV;
+
 		return true;
 	}
 	else
@@ -183,6 +212,26 @@ bool SetupSkyLightParameters(
 		SkyLightData->MaxRayDistance = 0.0f;
 		SkyLightData->MaxNormalBias = 0.0f;
 		SkyLightData->MaxShadowThickness = 0.0f;
+
+		SkyLightData->Color = FVector(0.0);
+		SkyLightData->Texture = GBlackTextureCube->TextureRHI;
+		SkyLightData->TextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+		SkyLightData->MipDimensions = FIntVector(0);
+
+		SkyLightData->MipTreePosX = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreeNegX = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreePosY = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreeNegY = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreePosZ = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreeNegZ = GBlackTextureWithSRV->ShaderResourceViewRHI;
+
+		SkyLightData->MipTreePdfPosX = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreePdfNegX = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreePdfPosY = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreePdfNegY = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreePdfPosZ = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->MipTreePdfNegZ = GBlackTextureWithSRV->ShaderResourceViewRHI;
+		SkyLightData->SolidAnglePdf = GBlackTextureWithSRV->ShaderResourceViewRHI;
 		return false;
 	}
 }
@@ -246,13 +295,20 @@ class FRayTracingSkyLightRGS : public FGlobalShader
 	class FEnableMaterialsDim : SHADER_PERMUTATION_BOOL("ENABLE_MATERIALS");
 	class FDecoupleSampleGeneration : SHADER_PERMUTATION_BOOL("DECOUPLE_SAMPLE_GENERATION");
 	class FHairLighting : SHADER_PERMUTATION_INT("USE_HAIR_LIGHTING", 2);
-
-	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableMaterialsDim, FDecoupleSampleGeneration, FHairLighting>;
+	class FEnableMipMapTreeDim : SHADER_PERMUTATION_BOOL("USE_MIPMAP_TREE");
+	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableMaterialsDim, FDecoupleSampleGeneration, FHairLighting, FEnableMipMapTreeDim>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
 	}
+
+	//static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	//{
+	//	//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
+	//	OutEnvironment.SetDefine(TEXT("USE_MIPMAP_TREE"), 1);
+	//}
+
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, UpscaleFactor)
@@ -294,12 +350,16 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingSkyLight(const FViewInfo& V
 			{
 				for (int32 HairLighting = 0; HairLighting < 2; ++HairLighting)
 				{
-					PermutationVector.Set<FRayTracingSkyLightRGS::FEnableTwoSidedGeometryDim>(TwoSidedGeometryIndex != 0);
-					PermutationVector.Set<FRayTracingSkyLightRGS::FEnableMaterialsDim>(EnableMaterialsIndex != 0);
-					PermutationVector.Set<FRayTracingSkyLightRGS::FDecoupleSampleGeneration>(DecoupleSampleGeneration != 0);
-					PermutationVector.Set<FRayTracingSkyLightRGS::FHairLighting>(HairLighting);
-					TShaderMapRef<FRayTracingSkyLightRGS> RayGenerationShader(View.ShaderMap, PermutationVector);
-					OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
+					for (int32 EnableMipmapTree = 0; EnableMipmapTree < 2; ++EnableMipmapTree)
+					{
+						PermutationVector.Set<FRayTracingSkyLightRGS::FEnableTwoSidedGeometryDim>(TwoSidedGeometryIndex != 0);
+						PermutationVector.Set<FRayTracingSkyLightRGS::FEnableMaterialsDim>(EnableMaterialsIndex != 0);
+						PermutationVector.Set<FRayTracingSkyLightRGS::FDecoupleSampleGeneration>(DecoupleSampleGeneration != 0);
+						PermutationVector.Set<FRayTracingSkyLightRGS::FHairLighting>(HairLighting);
+						PermutationVector.Set<FRayTracingSkyLightRGS::FEnableMipMapTreeDim>(EnableMipmapTree != 0);
+						TShaderMapRef<FRayTracingSkyLightRGS> RayGenerationShader(View.ShaderMap, PermutationVector);
+						OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
+					}
 				}
 			}
 		}
@@ -504,6 +564,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingSkyLight(
 		PermutationVector.Set<FRayTracingSkyLightRGS::FEnableMaterialsDim>(CVarRayTracingSkyLightEnableMaterials.GetValueOnRenderThread() != 0);
 		PermutationVector.Set<FRayTracingSkyLightRGS::FDecoupleSampleGeneration>(CVarRayTracingSkyLightDecoupleSampleGeneration.GetValueOnRenderThread() != 0);
 		PermutationVector.Set<FRayTracingSkyLightRGS::FHairLighting>(bUseHairLighting ? 1 : 0);
+		PermutationVector.Set<FRayTracingSkyLightRGS::FEnableMipMapTreeDim>(CVarRayTracingSkyLightMipMapTreeSampling.GetValueOnRenderThread() != 0);
 		TShaderMapRef<FRayTracingSkyLightRGS> RayGenerationShader(GetGlobalShaderMap(FeatureLevel), PermutationVector);
 		ClearUnusedGraphResources(RayGenerationShader, PassParameters);
 

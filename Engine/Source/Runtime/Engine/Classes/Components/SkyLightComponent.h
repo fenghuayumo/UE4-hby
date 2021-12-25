@@ -10,6 +10,7 @@
 #include "RenderingThread.h"
 #include "Components/LightComponentBase.h"
 #include "Math/SHMath.h"
+#include "Rendering/SkyLightImportanceSampling.h"
 #include "SkyLightComponent.generated.h"
 
 class FSkyLightSceneProxy;
@@ -290,6 +291,11 @@ public:
 
 	const FTexture* GetProcessedSkyTexture() const { return ProcessedSkyTexture; }
 	FSHVectorRGB3 GetIrradianceEnvironmentMap() { return IrradianceEnvironmentMap; }
+
+#if RHI_RAYTRACING
+	const FSkyLightImportanceSamplingData* GetImportanceSamplingData() const { return ImportanceSamplingData; }
+#endif
+	void UpdateImportanceSamplingData();
 protected:
 
 #if WITH_EDITOR
@@ -341,6 +347,9 @@ protected:
 	void UpdateOcclusionRenderingStateFast();
 
 	friend class FSkyLightSceneProxy;
+#if RHI_RAYTRACING
+	TRefCountPtr<FSkyLightImportanceSamplingData> ImportanceSamplingData;
+#endif
 };
 
 
@@ -375,7 +384,10 @@ public:
 
 	// This has to be refcounted to keep it alive during the handoff without doing a deep copy
 	TRefCountPtr<FSkyTextureCubeResource> ProcessedSkyTexture;
-
+#if RHI_RAYTRACING
+	TRefCountPtr<FSkyLightImportanceSamplingData> ImportanceSamplingData;
+#endif
 	FSHVectorRGB3 IrradianceEnvironmentMap;
+
 };
 

@@ -599,7 +599,9 @@ void FScene::AddLight(USkyLightComponent* SkyLight)
 	NewSkyLightRenderState.Color = SkyLight->GetLightColor() * SkyLight->Intensity;
 	NewSkyLightRenderState.TextureDimensions = FIntPoint(SkyLight->GetProcessedSkyTexture()->GetSizeX(), SkyLight->GetProcessedSkyTexture()->GetSizeY());
 	NewSkyLightRenderState.IrradianceEnvironmentMap = SkyLight->GetIrradianceEnvironmentMap();
-
+#if RHI_RAYTRACING
+	NewSkyLightRenderState.ImportanceSamplingData = SkyLight->GetImportanceSamplingData();
+#endif
 	ENQUEUE_RENDER_COMMAND(AddLightRenderState)(
 		[&RenderState = RenderState, NewSkyLightRenderState = MoveTemp(NewSkyLightRenderState), ProcessedSkyTexture = SkyLight->GetProcessedSkyTexture()](FRHICommandListImmediate& RHICmdList) mutable
 	{

@@ -28,7 +28,7 @@
 #include "LightmapUniformShaderParameters.h"
 #include "DynamicBufferAllocator.h"
 #include "Rendering/SkyAtmosphereCommonData.h"
-
+#include "Rendering/SkyLightImportanceSampling.h"
 class FCanvas;
 class FLightMap;
 class FLightmapResourceCluster;
@@ -1113,7 +1113,9 @@ public:
 	uint32 CaptureCubeMapResolution;
 	FLinearColor LowerHemisphereColor;
 	bool bLowerHemisphereIsSolidColor;
-
+#if RHI_RAYTRACING
+	FSkyLightImportanceSamplingData* ImportanceSamplingData;
+#endif
 	bool IsMovable() { return bMovable; }
 
 	void SetLightColor(const FLinearColor& InColor)

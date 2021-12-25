@@ -7,6 +7,10 @@
 #pragma once
 
 #include "../MonteCarlo.ush"
+#include "SkyLightMipTreeCommon.ush"
+
+#define USE_MIP_PDF_TEXTURE 1
+#define USE_SOLID_ANGLE_TEXTURE 1
 
 // shader parameters for skylight integration
 Texture2D SkylightTexture;
@@ -30,12 +34,38 @@ float SkyLight_Estimate()
 // Returns: Radiance and Pdf for the specified direction
 float4 SkyLight_EvalLight(float3 Dir)
 {
+#if USE_MIPMAP_TREE
+	float4 Result = 0;
+	float3 Radiance = SkyLight.Color * TextureCubeSampleLevel(SkyLight.Texture, SkyLight.TextureSampler, Dir, 0).rgb;
+#else
 	// NOTE: assumes direction is normalized
 	float2 UV = InverseEquiAreaSphericalMapping(Dir.yzx);
 	float4 Result = SkylightTexture.SampleLevel(SkylightTextureSampler, UV, 0);
 	float3 Radiance = Result.xyz;
+#endif
+
 #if USE_HIERARCHICAL_IMPORTANCE_SAMPLING
+#if USE_MIPMAP_TREE
+	// Determine primary direction
+	//uint MipCount = Log2(SkyLight.MipDimensions.x);
+	uint MipCount = log2(SkyLight.MipDimensions.x);
+	uint2 TextureRes;
+	SkyLight.Texture.GetDimensions(TextureRes.x, TextureRes.y);
+	float3 LightDirection = Dir;
+	uint3 TextureCoord = GetTextureCubeCoordinate(LightDirection, TextureRes);
+	float2 TextureUV = TextureCoord.xy / (float2)TextureRes;
+	uint2 MipCoord = TextureUV * SkyLight.MipDimensions.xy;
+	float FacePdf = PdfFace(MipCount, TextureCoord.z);
+
+	uint StopLevel = min(SkyLight.SamplingStopLevel, MipCount);
+	float MipPdf = PdfMipTree(uint3(MipCoord, TextureCoord.z), StopLevel);
+
+	uint LinearIndex = BufferOffsetAtPixel(MipCoord, StopLevel, SkyLight.MipDimensions.xy);
+	float AreaPdf = SkyLight.SolidAnglePdf[LinearIndex];
+	float Pdf = FacePdf * MipPdf * AreaPdf;
+#else
 	float Pdf = Result.w > 0 ? Result.w / (4 * PI * SkylightPdf.Load(int3(0, 0, SkylightMipCount - 1))) : 0.0; 
+#endif
 #else
 	float Pdf = 1.0 / (4.0 * PI);
 #endif
@@ -51,6 +81,82 @@ struct FSkyLightSample {
 FSkyLightSample SkyLight_SampleLight(float2 RandSample)
 {
 #if USE_HIERARCHICAL_IMPORTANCE_SAMPLING
+
+#if USE_MIPMAP_TREE
+// Determine the appropriate face to use
+	//uint MipCount = Log2(SkyLight.MipDimensions.x);
+	uint MipCount = log2(SkyLight.MipDimensions.x);
+	float FacePdf = 0.0;
+	uint FaceIndex = SampleFace(MipCount, RandSample.x, FacePdf);
+
+	uint2 MipPixel = 0;
+	float MipPdf = 1.0;
+	uint StopLevel = min(SkyLight.SamplingStopLevel, MipCount);
+	float DecisionTreeSample = RandSample.y;
+	for (uint Index = 0; Index < MipCount - StopLevel; ++Index)
+	{
+		uint MipIndex = MipCount - Index - 1;
+		uint BufferOffset = BufferOffsetAtPixel(MipPixel, MipIndex, SkyLight.MipDimensions.xy);
+		uint4 BufferOffsets = uint4(BufferOffset, BufferOffset + 1, BufferOffset + 2, BufferOffset + 3);
+
+		float4 Cdf = SampleMipTree(FaceIndex, BufferOffsets);
+		Cdf.y += Cdf.x;
+		Cdf.z += Cdf.y;
+		Cdf.w += Cdf.z;
+		Cdf /= Cdf.w;
+
+		if (DecisionTreeSample < Cdf.x)
+		{
+			MipPdf *= Cdf.x;
+			DecisionTreeSample /= Cdf.x;
+		}
+		else if (DecisionTreeSample < Cdf.y)
+		{
+			MipPdf *= Cdf.y - Cdf.x;
+			MipPixel.x += 1;
+			DecisionTreeSample = (DecisionTreeSample - Cdf.x) / (Cdf.y - Cdf.x);
+		}
+		else if (DecisionTreeSample < Cdf.z)
+		{
+			MipPdf *= Cdf.z - Cdf.y;
+			MipPixel.y += 1;
+			DecisionTreeSample = (DecisionTreeSample - Cdf.y) / (Cdf.z - Cdf.y);
+		}
+		else // if (DecisionTreeSample < Cdf.w)
+		{
+			MipPdf *= Cdf.w - Cdf.z;
+			MipPixel += 1;
+			DecisionTreeSample = (DecisionTreeSample - Cdf.z) / (Cdf.w - Cdf.z);
+		}
+
+		MipPixel = uint2(MipPixel.x << 1, MipPixel.y << 1);
+	}
+	MipPixel = uint2(MipPixel.x >> 1, MipPixel.y >> 1);
+
+	// DEBUG: assert cached PDF is equivalent to re-evaluation
+	//MipPdf = PdfSkyLightOcclusionRay(WorldNormal, RayDirection);
+
+	float2 PixelOffset = RandSample; //RandSample.zw
+	float2 MipPixelUV = (MipPixel + PixelOffset) / float2(DimensionsAtLevel(SkyLight.MipDimensions.xy, StopLevel));
+
+	// Construct Cubemap coordinate
+	uint2 TextureDimensions;
+	SkyLight.Texture.GetDimensions(TextureDimensions.x, TextureDimensions.y);
+	float3 TexelCoord = float3(MipPixelUV * TextureDimensions, FaceIndex);
+
+	// Determine area pdf
+	uint LinearIndex = BufferOffsetAtPixel(MipPixel, StopLevel, SkyLight.MipDimensions.xy);
+	float AreaPdf = SkyLight.SolidAnglePdf[LinearIndex];
+
+	float3 RayDirection = normalize(GetTextureCubeVector(TexelCoord, TextureDimensions));
+	float RayPdf = FacePdf * MipPdf * AreaPdf;
+
+	FSkyLightSample Sample;
+	Sample.Direction = RayDirection;
+	Sample.Radiance = SkyLight.Color * TextureCubeSampleLevel(SkyLight.Texture, SkyLight.TextureSampler, RayDirection, 0).rgb;
+	Sample.Pdf = RayPdf;
+	return Sample;
+#else
 	float2 UV = RandSample;
 
 	int3 Pixel = int3(0, 0, SkylightMipCount - 2);
@@ -110,6 +216,7 @@ FSkyLightSample SkyLight_SampleLight(float2 RandSample)
 	Sample.Radiance = Radiance;
 	Sample.Pdf = OutPdf;
 	return Sample;
+#endif
 #else
 	FSkyLightSample Sample;
 

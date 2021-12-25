@@ -290,6 +290,7 @@ struct FSkyLightRenderState
 	int32 SkylightMipCount;
 	TRefCountPtr<IPooledRenderTarget> PathTracingSkylightTexture;
 	TRefCountPtr<IPooledRenderTarget> PathTracingSkylightPdf;
+	const FSkyLightImportanceSamplingData* ImportanceSamplingData;
 };
 
 struct FSkyLightBuildInfo
