@@ -14,7 +14,7 @@
 
 #include "RayTracingTimingCommon.ush"
 
-#define EXPLORE_DISTANCE_TYPE
+// #define EXPLORE_DISTANCE_TYPE
 #define LIGHT_GRID 1
 #define LIGHT_TREE 2
 #define LIGHT_CUT  3
