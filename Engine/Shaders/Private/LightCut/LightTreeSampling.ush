@@ -1,49 +1,6 @@
 #ifndef _LIGHT_TREE_SAMPLING_
 #define _LIGHT_TREE_SAMPLING_
-#include "LightTreeCommon.ush"
-
-inline float ErrorFunction(int nodeID, 
-    float3 p, 
-    float3 N, 
-    float3 V,
-	StructuredBuffer<FLightNode> NodesBuffer,
-    bool ApproximateCosineBound,
-    float ErrorLimit,
-    float SceneLightBoundRadius
-)
-{
-	FLightNode node = NodesBuffer[nodeID];
-
-	float dlen2 = SquaredDistanceToClosestPoint(p, node.BoundMin, node.BoundMax);
-	float SR2 = ErrorLimit * SceneLightBoundRadius;
-	SR2 *= SR2;
-	if (dlen2 < SR2) dlen2 = SR2; // bound the distance
-
-	float atten = 1.0 / dlen2;
-
-	if (ApproximateCosineBound)
-		atten *= GeomTermBoundApproximate(p, N, node.BoundMin, node.BoundMax);
-	else
-		atten *= GeomTermBound(p, N, node.BoundMin, node.BoundMax);
-#ifdef LIGHT_CONE
-	{
-		float3 nr_boundMin = 2 * p - node.BoundMax;
-		float3 nr_boundMax = 2 * p - node.BoundMin;
-		float cos0 = 1;
-		if (ApproximateCosineBound)
-			cos0 = GeomTermBoundApproximate(p, node.Cone.xyz, nr_boundMin, nr_boundMax);
-		else
-			cos0 = GeomTermBound(p, node.Cone.xyz, nr_boundMin, nr_boundMax);
-		atten *= max(0.f, cos(max(0.f, acos(cos0) - node.Cone.w)));
-	}
-#endif
-
-	float colorIntens = node.Intensity;
-
-	float res = atten * colorIntens;
-	return res;
-};
-
+#include "LightCutUtils.ush"
 
 bool SelectChildNode(
     float3 WorldPos, 
@@ -183,40 +140,56 @@ inline bool TraverseLightTree(
     out int OutLightId
    )
 {
+
+	// uint ScenefiniteLightCount = SceneLightCount - SceneInfiniteLightCount;
+	// float pInfinite = float(SceneInfiniteLightCount) /
+    //                       float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
 	bool deadBranch = false;
     float Pdf = 1.0;
-	while (NodeID < LeafStartIndex) 
-    {
-		int lChildID = NodeID << 1;
-		int rChildID = lChildID + 1;
-		float prob0;
+	// if (RandSample < pInfinite) 
+	// {
+	// 	// Sample infinite lights with uniform probability
+	// 	RandSample /= pInfinite;
+	// 	int index = min(int(floor(RandSample * SceneInfiniteLightCount)), SceneInfiniteLightCount - 1);
+	// 	OutPdf = pInfinite / SceneInfiniteLightCount;
+	// 	OutLightId = index;
+	// 	return deadBranch;
+	// }
+	// else
+	{
+		while (NodeID < LeafStartIndex) 
+		{
+			int lChildID = NodeID << 1;
+			int rChildID = lChildID + 1;
+			float prob0;
 
-		if (SelectChildNode(WorldPos, WorldNormal, prob0, lChildID, rChildID, NodeBuffer, ApproximateCosineBound,DistanceType )) 
-        {
-			if (RandSample < prob0) 
-            {
-				NodeID = lChildID;
-				RandSample /= prob0;
-				Pdf *= prob0;
+			if (SelectChildNode(WorldPos, WorldNormal, prob0, lChildID, rChildID, NodeBuffer, ApproximateCosineBound,DistanceType )) 
+			{
+				if (RandSample < prob0) 
+				{
+					NodeID = lChildID;
+					RandSample /= prob0;
+					Pdf *= prob0;
+				}
+				else 
+				{
+					NodeID = rChildID;
+					RandSample = (RandSample - prob0) / (1 - prob0);
+					Pdf *= (1 - prob0);
+				}
 			}
 			else 
-            {
-				NodeID = rChildID;
-				RandSample = (RandSample - prob0) / (1 - prob0);
-				Pdf *= (1 - prob0);
+			{
+				deadBranch = true;
+				break;
 			}
 		}
-		else 
-        {
-			deadBranch = true;
-			break;
-		}
+		if( deadBranch )
+			OutLightId = -1;
+		else
+			OutLightId = NodeBuffer[NodeID].ID + SceneInfiniteLightCount;
+		OutPdf = Pdf;
 	}
-    if( deadBranch )
-        OutLightId = -1;
-    else
-        OutLightId = NodeBuffer[NodeID].ID;
-    OutPdf = Pdf;
 	return deadBranch;
 }
 

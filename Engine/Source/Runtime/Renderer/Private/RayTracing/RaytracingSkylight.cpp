@@ -122,6 +122,40 @@ static TAutoConsoleVariable<int32> CVarRayTracingSkyLightMipMapTreeSampling(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<int32> CVarRayTracingSkyLightAdaptiveSampling(
+	TEXT("r.RayTracing.SkyLight.AdaptiveSampling"),
+	0,
+	TEXT("Adaptive Sampling for SkyLight"),
+	ECVF_RenderThreadSafe
+);
+
+TAutoConsoleVariable<int32> CVarSkyLightAdaptiveSamplingMinimumSamplesPerPixel(
+	TEXT("r.kyLight.AdaptiveSampling.MinimumSamplesPerPixel"),
+	16,
+	TEXT("Changes the minimum samples-per-pixel before applying adaptive sampling (default=16)\n"),
+	ECVF_RenderThreadSafe
+);
+
+TAutoConsoleVariable<int32> CVarSkyLightVarianceMapRebuildFrequency(
+	TEXT("r.SkyLight.VarianceMapRebuildFrequency"),
+	16,
+	TEXT("Sets the variance map rebuild frequency (default = every 16 iterations)"),
+	ECVF_RenderThreadSafe
+);
+
+TAutoConsoleVariable<bool> CVarSkyLightVisualizeVarianceMap(
+	TEXT("r.SkyLight.VisualizeVarianceMap"),
+	false,
+	TEXT("Visualize VarianceMipMap"),
+	ECVF_RenderThreadSafe
+);
+TAutoConsoleVariable<int32> CVarSkyLightVisualizeVarianceMapLevel(
+	TEXT("r.SkyLight.VisualizeVarianceMapLevel"),
+	2,
+	TEXT("Visualize VarianceMap Level"),
+	ECVF_RenderThreadSafe
+);
+
 int32 GetRayTracingSkyLightDecoupleSampleGenerationCVarValue()
 {
 	return CVarRayTracingSkyLightDecoupleSampleGeneration.GetValueOnRenderThread();
@@ -157,7 +191,7 @@ bool ShouldRenderRayTracingSkyLight(const FSkyLightSceneProxy* SkyLightSceneProx
 }
 
 IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FSkyLightData, "SkyLight");
-
+//IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FRayTracingAdaptiveSamplingData, "AdaptiveSamplingData");
 struct FSkyLightVisibilityRays
 {
 	FVector4 DirectionAndPdf;
@@ -303,13 +337,6 @@ class FRayTracingSkyLightRGS : public FGlobalShader
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
 	}
 
-	//static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	//{
-	//	//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
-	//	OutEnvironment.SetDefine(TEXT("USE_MIPMAP_TREE"), 1);
-	//}
-
-
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, UpscaleFactor)
 		SHADER_PARAMETER_SRV(RaytracingAccelerationStructure, TLAS)
@@ -333,6 +360,138 @@ class FRayTracingSkyLightRGS : public FGlobalShader
 
 IMPLEMENT_GLOBAL_SHADER(FRayTracingSkyLightRGS, "/Engine/Private/Raytracing/RaytracingSkylightRGS.usf", "SkyLightRGS", SF_RayGen);
 
+class FRayTracingSkyLightAdaptiveRGS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FRayTracingSkyLightAdaptiveRGS)
+	SHADER_USE_ROOT_PARAMETER_STRUCT(FRayTracingSkyLightAdaptiveRGS, FGlobalShader)
+
+	class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
+	class FEnableMaterialsDim : SHADER_PERMUTATION_BOOL("ENABLE_MATERIALS");
+	class FDecoupleSampleGeneration : SHADER_PERMUTATION_BOOL("DECOUPLE_SAMPLE_GENERATION");
+	class FHairLighting : SHADER_PERMUTATION_INT("USE_HAIR_LIGHTING", 2);
+	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableMaterialsDim, FDecoupleSampleGeneration, FHairLighting>;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, UpscaleFactor)
+		SHADER_PARAMETER_SRV(RaytracingAccelerationStructure, TLAS)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWSkyOcclusionMaskUAV)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, SampleCountRT)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, PixelPositionRT)
+
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
+		SHADER_PARAMETER_STRUCT_REF(FSkyLightData, SkyLightData)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FRayTracingAdaptiveSamplingData, AdaptiveSamplingData)
+
+		SHADER_PARAMETER_STRUCT_INCLUDE(FPathTracingSkylight, SkyLightParameters)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FVirtualVoxelParameters, VirtualVoxel)
+
+		SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureParameters, SceneTextures)
+		SHADER_PARAMETER_TEXTURE(Texture2D, SSProfilesTexture)
+		SHADER_PARAMETER_SAMPLER(SamplerState, TransmissionProfilesLinearSampler)
+		SHADER_PARAMETER(FIntPoint, TexViewSize)
+		END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FRayTracingSkyLightAdaptiveRGS, "/Engine/Private/Raytracing/RayTracingSkyLightAdaptiveSampling.usf", "SkyLightRGS", SF_RayGen);
+
+class FRayTracingSkyLightPathCompactionCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FRayTracingSkyLightPathCompactionCS)
+	SHADER_USE_PARAMETER_STRUCT(FRayTracingSkyLightPathCompactionCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE"), FComputeShaderUtils::kGolden2DGroupSize);
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, RadianceTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, SampleCountTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, PixelPositionTexture)
+
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RadianceSortedRedRT)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RadianceSortedGreenRT)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RadianceSortedBlueRT)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RadianceSortedAlphaRT)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, SampleCountSortedRT)
+		SHADER_PARAMETER(FIntPoint, TexViewSize)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FRayTracingSkyLightPathCompactionCS, "/Engine/Private/Raytracing/RayTracingCompaction.usf", "PathCompactionCS", SF_Compute);
+
+class FCompositeSkyLightAdaptiveCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FCompositeSkyLightAdaptiveCS)
+	SHADER_USE_PARAMETER_STRUCT(FCompositeSkyLightAdaptiveCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE"), FComputeShaderUtils::kGolden2DGroupSize);
+	}
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, RadianceRedTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, RadianceGreenTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, RadianceBlueTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, RadianceAlphaTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SampleCountTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, CumulativeRadianceTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint32>, CumulativeSampleCountTexture)
+		SHADER_PARAMETER(FIntPoint, TexViewSize)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FCompositeSkyLightAdaptiveCS, "/Engine/Private/RayTracing/RayTracingAdaptiveComPosite.usf", "PathCompositeCS", SF_Compute);
+
+
+class FRayTracingSkyLightVarianceTreeBuildCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FRayTracingSkyLightVarianceTreeBuildCS)
+	SHADER_USE_PARAMETER_STRUCT(FRayTracingSkyLightVarianceTreeBuildCS, FGlobalShader)
+
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE"), FComputeShaderUtils::kGolden2DGroupSize);
+	}
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, RadianceTexture)
+		SHADER_PARAMETER_SAMPLER(SamplerState, RadianceTextureSampler)
+		SHADER_PARAMETER(FIntPoint, ViewSize)
+		SHADER_PARAMETER(FIntVector, VarianceMapDimensions)
+		SHADER_PARAMETER(uint32, MipLevel)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float>, RWVarianceMipTree)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FRayTracingSkyLightVarianceTreeBuildCS, "/Engine/Private/Raytracing/SkyLightVarianceMipTreeCS.usf", "BuildVarianceMipTreeCS", SF_Compute);
+
 void FDeferredShadingSceneRenderer::PrepareRayTracingSkyLight(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
 {
 	if (!IsRayTracingSkyLightAllowed())
@@ -342,6 +501,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingSkyLight(const FViewInfo& V
 
 	// Declare all RayGen shaders that require material closest hit shaders to be bound
 	FRayTracingSkyLightRGS::FPermutationDomain PermutationVector;
+	FRayTracingSkyLightAdaptiveRGS::FPermutationDomain PermutationVector1;
 	for (uint32 TwoSidedGeometryIndex = 0; TwoSidedGeometryIndex < 2; ++TwoSidedGeometryIndex)
 	{
 		for (uint32 EnableMaterialsIndex = 0; EnableMaterialsIndex < 2; ++EnableMaterialsIndex)
@@ -360,10 +520,18 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingSkyLight(const FViewInfo& V
 						TShaderMapRef<FRayTracingSkyLightRGS> RayGenerationShader(View.ShaderMap, PermutationVector);
 						OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
 					}
+
+					PermutationVector1.Set<FRayTracingSkyLightAdaptiveRGS::FEnableTwoSidedGeometryDim>(TwoSidedGeometryIndex != 0);
+					PermutationVector1.Set<FRayTracingSkyLightAdaptiveRGS::FEnableMaterialsDim>(EnableMaterialsIndex != 0);
+					PermutationVector1.Set<FRayTracingSkyLightAdaptiveRGS::FDecoupleSampleGeneration>(DecoupleSampleGeneration != 0);
+					PermutationVector1.Set<FRayTracingSkyLightAdaptiveRGS::FHairLighting>(HairLighting);
+					TShaderMapRef<FRayTracingSkyLightAdaptiveRGS> RayGenerationShader(View.ShaderMap, PermutationVector1);
+					OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
 				}
 			}
 		}
 	}
+
 }
 
 class FGenerateSkyLightVisibilityRaysCS : public FGlobalShader
@@ -398,6 +566,32 @@ class FGenerateSkyLightVisibilityRaysCS : public FGlobalShader
 };
 
 IMPLEMENT_GLOBAL_SHADER(FGenerateSkyLightVisibilityRaysCS, "/Engine/Private/RayTracing/GenerateSkyLightVisibilityRaysCS.usf", "MainCS", SF_Compute);
+
+
+class FVisualizeVarianceMipTreeCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FVisualizeVarianceMipTreeCS)
+	SHADER_USE_PARAMETER_STRUCT(FVisualizeVarianceMipTreeCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE"), FComputeShaderUtils::kGolden2DGroupSize);
+	}
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(FIntVector, Dimensions)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<float>, MipTree)
+		SHADER_PARAMETER(uint32, MipLevel)
+		SHADER_PARAMETER(FIntPoint, TexViewSize)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, Output)
+	END_SHADER_PARAMETER_STRUCT()
+};
+IMPLEMENT_SHADER_TYPE(, FVisualizeVarianceMipTreeCS, TEXT("/Engine/Private/RayTracing/VisualizeVarianceMipTreeCS.usf"), TEXT("VisualizeMipTreeCS"), SF_Compute);
 
 static void GenerateSkyLightVisibilityRays(
 	FRDGBuilder& GraphBuilder,
@@ -440,6 +634,330 @@ static void GenerateSkyLightVisibilityRays(
 
 DECLARE_GPU_STAT_NAMED(RayTracingSkyLight, TEXT("Ray Tracing SkyLight"));
 
+void FDeferredShadingSceneRenderer::RenderRayTracingSkyLightProgressive(
+	FRDGBuilder& GraphBuilder,
+	FRDGTextureRef SceneColorTexture,
+	FRDGTextureRef& OutSkyLightTexture,
+	FRDGTextureRef& OutHitDistanceTexture,
+	const FHairStrandsRenderingData* HairDatas)
+{
+	FSkyLightSceneProxy* SkyLight = Scene->SkyLight;
+
+	// Fill Sky Light parameters
+	const bool bShouldRenderRayTracingSkyLight = ShouldRenderRayTracingSkyLight(SkyLight);
+	FPathTracingSkylight SkylightParameters;
+	FSkyLightData SkyLightData;
+	if (!SetupSkyLightParameters(GraphBuilder, Scene, Views[0], bShouldRenderRayTracingSkyLight, &SkylightParameters, &SkyLightData))
+	{
+		return;
+	}
+
+	RDG_EVENT_SCOPE(GraphBuilder, "RayTracingSkyLight");
+	RDG_GPU_STAT_SCOPE(GraphBuilder, RayTracingSkyLight);
+
+	check(SceneColorTexture);
+
+	float ResolutionFraction = 1.0f;
+	if (GRayTracingSkyLightDenoiser != 0)
+	{
+		ResolutionFraction = FMath::Clamp(CVarRayTracingSkyLightScreenPercentage.GetValueOnRenderThread() / 100.0f, 0.25f, 1.0f);
+	}
+
+	int32 UpscaleFactor = int32(1.0 / ResolutionFraction);
+	ResolutionFraction = 1.0f / UpscaleFactor;
+	FRayTracingAdaptiveSamplingData AdaptiveSamplingData;
+	FRDGTexture* RadianceSortedRed = nullptr;
+	FRDGTexture* RadianceSortedGreen = nullptr;
+	FRDGTexture* RadianceSortedBlue = nullptr;
+	FRDGTexture* RadianceSortedAlpha = nullptr;
+	FRDGTexture* SampleCountSorted = nullptr;
+	FRDGTexture* CumulativeSampleCount = nullptr;
+	FRDGTexture* SampleCount = nullptr;
+	FRDGTexture* PixelPositionTexture = nullptr;
+	FRDGTexture* RadianceTexture = nullptr;
+	FRDGBufferRef	VarianceMipTree = nullptr;
+	FIntVector		VarianceMipTreeDimensions;
+
+	FIntPoint TexSize = Views[0].ViewRect.Size() / UpscaleFactor;
+	uint32 MipLevelCount = FMath::Min(FMath::CeilLogTwo(TexSize.X), FMath::CeilLogTwo(TexSize.Y));
+	VarianceMipTreeDimensions = FIntVector(1 << MipLevelCount, 1 << MipLevelCount, 1);
+	uint32 NumElements = VarianceMipTreeDimensions.X * VarianceMipTreeDimensions.Y;
+
+	FRDGTextureDesc Desc = SceneColorTexture->Desc;
+	Desc.Reset();
+	Desc.Format = PF_FloatRGBA;
+	Desc.Flags |= TexCreate_UAV;
+	Desc.Extent /= UpscaleFactor;
+	RadianceTexture = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.RadianceTexture"));
+	Desc.Format = PF_G16R16;
+	OutHitDistanceTexture = GraphBuilder.CreateTexture(Desc, TEXT("RayTracingSkyLightHitDistance"), ERDGTextureFlags::MultiFrame);
+	for (uint32 MipLevel = 1; MipLevel <= MipLevelCount; ++MipLevel)
+	{
+		NumElements += (VarianceMipTreeDimensions.X >> MipLevel) * (VarianceMipTreeDimensions.Y >> MipLevel);
+	}
+
+	if (Views.Num() > 0 && Views[0].ViewState->RayTracingSkyLightRadianceRT)
+	{
+		OutSkyLightTexture = GraphBuilder.RegisterExternalTexture(Views[0].ViewState->RayTracingSkyLightRadianceRT, TEXT("RayTracingSkylight"));
+		CumulativeSampleCount = GraphBuilder.RegisterExternalTexture(Views[0].ViewState->RayTracingSkyLightSampleCountRT, TEXT("CumulativeSkylightSampleCount"));
+	}
+	else
+	{
+		Desc.Format = PF_FloatRGBA;
+		OutSkyLightTexture = GraphBuilder.CreateTexture(Desc, TEXT("RayTracingSkylight"), ERDGTextureFlags::MultiFrame);
+		Desc.Format = PF_R32_UINT;
+		CumulativeSampleCount = GraphBuilder.CreateTexture(Desc, TEXT("CumulativeSkylightSampleCount"), ERDGTextureFlags::MultiFrame);
+	}
+
+	Desc.Reset();
+	Desc.Format = PF_R32_UINT;
+	Desc.Flags |= TexCreate_UAV;
+	Desc.Extent /= UpscaleFactor;
+	RadianceSortedRed = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.RadianceSortedRed"));
+	RadianceSortedGreen = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.RadianceSortedGreen"));
+	RadianceSortedBlue = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.RadianceSortedBlue"));
+	RadianceSortedAlpha = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.RadianceSortedAlpha"));
+	SampleCountSorted = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.SampleCountSorted"));
+	SampleCount = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.SampleCount"));
+	PixelPositionTexture = GraphBuilder.CreateTexture(Desc, TEXT("SkyLight.PixelPosition"));
+
+	if (Views[0].ViewState->RayTracingSkyLightVarianceMipTree)
+	{
+		VarianceMipTree = GraphBuilder.RegisterExternalBuffer(Views[0].ViewState->RayTracingSkyLightVarianceMipTree, TEXT("VarianceMipTree"));
+	}
+	else
+	{
+		VarianceMipTree = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(float), NumElements), TEXT("VarianceMipTree"), ERDGBufferFlags::MultiFrame);
+	}
+
+	const FRDGTextureDesc& SceneColorDesc = SceneColorTexture->Desc;
+	FRDGTextureUAV* SkyLightkUAV = GraphBuilder.CreateUAV(OutSkyLightTexture);
+
+	// Fill Scene Texture parameters
+	FSceneTextureParameters SceneTextures = GetSceneTextureParameters(GraphBuilder);
+
+	FRHITexture* SubsurfaceProfileTexture = GBlackTexture->TextureRHI;
+	if (IPooledRenderTarget* SubsurfaceProfileRT = GetSubsufaceProfileTexture_RT(GraphBuilder.RHICmdList))
+	{
+		SubsurfaceProfileTexture = SubsurfaceProfileRT->GetShaderResourceRHI();
+	}
+
+	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
+	int ViewIndex = 0;
+	static uint32 Iteration = 0;
+
+	float EmptyData[1] = { 0.0 };
+	auto DummyBuffer = CreateVertexBuffer(GraphBuilder, TEXT("GPU DummyBuffer"), FRDGBufferDesc::CreateBufferDesc(sizeof(float), 1), EmptyData, sizeof(EmptyData));
+	for (FViewInfo& View : Views)
+	{
+		RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
+		FSceneViewState* SceneViewState = (FSceneViewState*)View.State;
+		const uint32 MinSample = CVarSkyLightAdaptiveSamplingMinimumSamplesPerPixel.GetValueOnRenderThread();
+		{
+			FRayTracingSkyLightAdaptiveRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FRayTracingSkyLightAdaptiveRGS::FParameters>();
+			PassParameters->RWSkyOcclusionMaskUAV = GraphBuilder.CreateUAV(RadianceTexture);
+			PassParameters->PixelPositionRT = GraphBuilder.CreateUAV(PixelPositionTexture);
+			PassParameters->SampleCountRT = GraphBuilder.CreateUAV(SampleCount);
+
+			PassParameters->SkyLightParameters = SkylightParameters;
+			PassParameters->SkyLightData = CreateUniformBufferImmediate(SkyLightData, EUniformBufferUsage::UniformBuffer_SingleDraw);
+
+			PassParameters->SSProfilesTexture = SubsurfaceProfileTexture;
+			PassParameters->TransmissionProfilesLinearSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+			PassParameters->SceneTextures = SceneTextures;
+			PassParameters->UpscaleFactor = UpscaleFactor;
+			PassParameters->TexViewSize = TexSize;
+
+			if (VarianceMipTree && (Iteration > MinSample))
+			{
+				PassParameters->AdaptiveSamplingData.RandomSeq = 0;
+				PassParameters->AdaptiveSamplingData.Iteration = Iteration;
+				PassParameters->AdaptiveSamplingData.TemporalSeed = 0;
+				PassParameters->AdaptiveSamplingData.VarianceDimensions = VarianceMipTreeDimensions;
+				PassParameters->AdaptiveSamplingData.VarianceMipTree = GraphBuilder.CreateSRV(VarianceMipTree, PF_R32_FLOAT);
+				PassParameters->AdaptiveSamplingData.MinimumSamplesPerPixel = CVarSkyLightAdaptiveSamplingMinimumSamplesPerPixel.GetValueOnRenderThread();
+			}
+			else
+			{
+				PassParameters->AdaptiveSamplingData.RandomSeq = 0;
+				PassParameters->AdaptiveSamplingData.Iteration = Iteration;
+				PassParameters->AdaptiveSamplingData.TemporalSeed = 0;
+				PassParameters->AdaptiveSamplingData.VarianceDimensions = FIntVector(0);
+
+				PassParameters->AdaptiveSamplingData.VarianceMipTree = GraphBuilder.CreateSRV(DummyBuffer, PF_R32_FLOAT);
+				PassParameters->AdaptiveSamplingData.MinimumSamplesPerPixel = CVarSkyLightAdaptiveSamplingMinimumSamplesPerPixel.GetValueOnRenderThread();
+			}
+
+			PassParameters->TLAS = View.RayTracingScene.RayTracingSceneRHI->GetShaderResourceView();
+			PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+			const bool bUseHairLighting =
+				HairDatas && ViewIndex < HairDatas->MacroGroupsPerViews.Views.Num() &&
+				HairDatas->MacroGroupsPerViews.Views[ViewIndex].VirtualVoxelResources.IsValid() &&
+				CVarRayTracingSkyLightEnableHairVoxel.GetValueOnRenderThread() > 0;
+			if (bUseHairLighting)
+			{
+				PassParameters->VirtualVoxel = HairDatas->MacroGroupsPerViews.Views[ViewIndex].VirtualVoxelResources.UniformBuffer;
+			}
+
+			FRayTracingSkyLightAdaptiveRGS::FPermutationDomain PermutationVector;
+			PermutationVector.Set<FRayTracingSkyLightAdaptiveRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingSkyLightEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);
+			PermutationVector.Set<FRayTracingSkyLightAdaptiveRGS::FEnableMaterialsDim>(CVarRayTracingSkyLightEnableMaterials.GetValueOnRenderThread() != 0);
+			PermutationVector.Set<FRayTracingSkyLightAdaptiveRGS::FDecoupleSampleGeneration>(CVarRayTracingSkyLightDecoupleSampleGeneration.GetValueOnRenderThread() != 0);
+			PermutationVector.Set<FRayTracingSkyLightAdaptiveRGS::FHairLighting>(bUseHairLighting ? 1 : 0);
+			TShaderMapRef<FRayTracingSkyLightAdaptiveRGS> RayGenerationShader(GetGlobalShaderMap(FeatureLevel), PermutationVector);
+			ClearUnusedGraphResources(RayGenerationShader, PassParameters);
+
+			FIntPoint RayTracingResolution = View.ViewRect.Size() / UpscaleFactor;
+			GraphBuilder.AddPass(
+				RDG_EVENT_NAME("SkyLightRayTracing %dx%d", RayTracingResolution.X, RayTracingResolution.Y),
+				PassParameters,
+				ERDGPassFlags::Compute,
+				[PassParameters, this, &View, RayGenerationShader, RayTracingResolution](FRHICommandList& RHICmdList)
+				{
+					FRayTracingShaderBindingsWriter GlobalResources;
+					SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters);
+
+					FRayTracingPipelineState* Pipeline = View.RayTracingMaterialPipeline;
+					if (CVarRayTracingSkyLightEnableMaterials.GetValueOnRenderThread() == 0)
+					{
+						// Declare default pipeline
+						FRayTracingPipelineStateInitializer Initializer;
+						Initializer.MaxPayloadSizeInBytes = 64; // sizeof(FPackedMaterialClosestHitPayload)
+						FRHIRayTracingShader* RayGenShaderTable[] = { RayGenerationShader.GetRayTracingShader() };
+						Initializer.SetRayGenShaderTable(RayGenShaderTable);
+
+						FRHIRayTracingShader* HitGroupTable[] = { View.ShaderMap->GetShader<FOpaqueShadowHitGroup>().GetRayTracingShader() };
+						Initializer.SetHitGroupTable(HitGroupTable);
+						Initializer.bAllowHitGroupIndexing = false; // Use the same hit shader for all geometry in the scene by disabling SBT indexing.
+
+						Pipeline = PipelineStateCache::GetAndOrCreateRayTracingPipelineState(RHICmdList, Initializer);
+					}
+
+					FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
+					RHICmdList.RayTraceDispatch(Pipeline, RayGenerationShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, RayTracingResolution.X, RayTracingResolution.Y);
+				});
+		}
+		{
+			auto RadianceSortedAlphaUAV = GraphBuilder.CreateUAV(RadianceSortedAlpha);
+			auto RadianceSortedRedUAV = GraphBuilder.CreateUAV(RadianceSortedRed);
+			auto RadianceSortedGreenUAV = GraphBuilder.CreateUAV(RadianceSortedGreen);
+			auto RadianceSortedBlueUAV = GraphBuilder.CreateUAV(RadianceSortedBlue);
+			auto SampleCountSortedUAV = GraphBuilder.CreateUAV(SampleCountSorted);
+
+			uint32 balck[4] = { 0 };
+			AddClearUAVPass(GraphBuilder, RadianceSortedAlphaUAV, balck);
+			AddClearUAVPass(GraphBuilder, RadianceSortedRedUAV, balck);
+			AddClearUAVPass(GraphBuilder, RadianceSortedGreenUAV, balck);
+			AddClearUAVPass(GraphBuilder, RadianceSortedBlueUAV, balck);
+			AddClearUAVPass(GraphBuilder, SampleCountSortedUAV, balck);
+
+			TShaderMapRef<FRayTracingSkyLightPathCompactionCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+			FRayTracingSkyLightPathCompactionCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FRayTracingSkyLightPathCompactionCS::FParameters>();
+			PassParameters->RadianceSortedAlphaRT = RadianceSortedAlphaUAV;
+			PassParameters->RadianceSortedRedRT = RadianceSortedRedUAV;
+			PassParameters->RadianceSortedGreenRT = RadianceSortedGreenUAV;
+			PassParameters->RadianceSortedBlueRT = RadianceSortedBlueUAV;
+			PassParameters->SampleCountSortedRT = SampleCountSortedUAV;
+
+			PassParameters->RadianceTexture = RadianceTexture;
+			PassParameters->PixelPositionTexture = PixelPositionTexture;
+			PassParameters->SampleCountTexture = SampleCount;
+			PassParameters->TexViewSize = TexSize;
+			FIntPoint ComputeResolution = TexSize;
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("SkyLightCompaction"),
+				ComputeShader,
+				PassParameters,
+				FComputeShaderUtils::GetGroupCount(ComputeResolution, FComputeShaderUtils::kGolden2DGroupSize));
+		}
+
+		{
+			TShaderMapRef<FCompositeSkyLightAdaptiveCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+			FCompositeSkyLightAdaptiveCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FCompositeSkyLightAdaptiveCS::FParameters>();
+			PassParameters->CumulativeRadianceTexture = SkyLightkUAV;
+			PassParameters->CumulativeSampleCountTexture = GraphBuilder.CreateUAV(CumulativeSampleCount);
+
+			PassParameters->RadianceAlphaTexture = RadianceSortedAlpha;
+			PassParameters->RadianceGreenTexture = RadianceSortedGreen;
+			PassParameters->RadianceRedTexture = RadianceSortedRed;
+			PassParameters->RadianceBlueTexture = RadianceSortedBlue;
+			PassParameters->SampleCountTexture = SampleCountSorted;
+			PassParameters->TexViewSize = TexSize;
+			FIntPoint ComputeResolution = TexSize;
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("SkyLightAdaptiveComposite"),
+				ComputeShader,
+				PassParameters,
+				FComputeShaderUtils::GetGroupCount(ComputeResolution, FComputeShaderUtils::kGolden2DGroupSize));
+		}
+		if (Iteration % CVarSkyLightVarianceMapRebuildFrequency.GetValueOnRenderThread() == 0)
+		{
+			//Variance Build
+			FIntPoint ComputeResolution = View.ViewRect.Size() / UpscaleFactor;
+			for (uint32 MipLevel = 0; MipLevel <= MipLevelCount; ++MipLevel)
+			{
+				TShaderMapRef<FRayTracingSkyLightVarianceTreeBuildCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+				FRayTracingSkyLightVarianceTreeBuildCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FRayTracingSkyLightVarianceTreeBuildCS::FParameters>();
+				PassParameters->RadianceTexture = OutSkyLightTexture;
+				PassParameters->RWVarianceMipTree = GraphBuilder.CreateUAV(VarianceMipTree, PF_R32_FLOAT);
+				PassParameters->MipLevel = MipLevel;
+				PassParameters->VarianceMapDimensions = VarianceMipTreeDimensions;
+				PassParameters->RadianceTextureSampler = TStaticSamplerState<SF_Bilinear>::GetRHI();
+				PassParameters->ViewSize = TexSize;
+				FIntVector MipLevelDimensions = FIntVector(VarianceMipTreeDimensions.X >> MipLevel, VarianceMipTreeDimensions.Y >> MipLevel, 1);
+				FIntVector NumGroups = FIntVector::DivideAndRoundUp(MipLevelDimensions, FComputeShaderUtils::kGolden2DGroupSize);
+				FComputeShaderUtils::AddPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("RayTracingSkyLightVarianceTreeBuildCS %d", MipLevel),
+					ComputeShader,
+					PassParameters,
+					NumGroups);
+
+			}
+		}
+
+		if (CVarSkyLightVisualizeVarianceMap.GetValueOnRenderThread() && (Iteration > MinSample))
+		{
+			FVisualizeVarianceMipTreeCS::FParameters* VisualizeParameters = GraphBuilder.AllocParameters<FVisualizeVarianceMipTreeCS::FParameters>();
+
+			VisualizeParameters->Dimensions = VarianceMipTreeDimensions;
+			//VisualizeParameters->RenderTargets[0] = FRenderTargetBinding(SceneColorTexture, ERenderTargetLoadAction::EClear);
+			Desc.Format = PF_R32_FLOAT;
+			auto DebugVis = GraphBuilder.CreateTexture(Desc, TEXT("MipMapTree"));
+			VisualizeParameters->Output = GraphBuilder.CreateUAV(DebugVis);
+			VisualizeParameters->TexViewSize = TexSize;
+			VisualizeParameters->MipTree = GraphBuilder.CreateSRV(VarianceMipTree, PF_R32_FLOAT);
+			VisualizeParameters->MipLevel = CVarSkyLightVisualizeVarianceMapLevel.GetValueOnRenderThread();
+			FScreenPassTextureViewport Viewport(SceneColorTexture, View.ViewRect);
+
+			TShaderMapRef<FVisualizeVarianceMipTreeCS> ComputeShader(View.ShaderMap);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("VisualizeVarianceTreeCS"),
+				ComputeShader,
+				VisualizeParameters,
+				FComputeShaderUtils::GetGroupCount(TexSize, FComputeShaderUtils::kGolden2DGroupSize));
+			//AddDrawScreenPass(
+			//	GraphBuilder,
+			//	RDG_EVENT_NAME("Path Tracer Display (%d x %d)", View.ViewRect.Size().X, View.ViewRect.Size().Y),
+			//	View,
+			//	Viewport,
+			//	Viewport,
+			//	PixelShader,
+			//	VisualizeParameters
+			//);
+
+		}
+		GraphBuilder.QueueTextureExtraction(OutSkyLightTexture, &View.ViewState->RayTracingSkyLightRadianceRT);
+		GraphBuilder.QueueTextureExtraction(CumulativeSampleCount, &View.ViewState->RayTracingSkyLightSampleCountRT);
+		GraphBuilder.QueueBufferExtraction(VarianceMipTree, &View.ViewState->RayTracingSkyLightVarianceMipTree);
+		Iteration++;
+	}
+
+}
+
 void FDeferredShadingSceneRenderer::RenderRayTracingSkyLight(
 	FRDGBuilder& GraphBuilder,
 	FRDGTextureRef SceneColorTexture,
@@ -447,6 +965,11 @@ void FDeferredShadingSceneRenderer::RenderRayTracingSkyLight(
 	FRDGTextureRef& OutHitDistanceTexture,
 	const FHairStrandsRenderingData* HairDatas)
 {
+	if (CVarRayTracingSkyLightAdaptiveSampling.GetValueOnRenderThread())
+	{
+		return RenderRayTracingSkyLightProgressive(GraphBuilder, SceneColorTexture, OutSkyLightTexture, OutHitDistanceTexture, HairDatas);
+	}
+
 	FSkyLightSceneProxy* SkyLight = Scene->SkyLight;
 	
 	// Fill Sky Light parameters
@@ -471,8 +994,6 @@ void FDeferredShadingSceneRenderer::RenderRayTracingSkyLight(
 
 	int32 UpscaleFactor = int32(1.0 / ResolutionFraction);
 	ResolutionFraction = 1.0f / UpscaleFactor;
-
-
 	{
 		FRDGTextureDesc Desc = SceneColorTexture->Desc;
 		Desc.Reset();
@@ -513,8 +1034,8 @@ void FDeferredShadingSceneRenderer::RenderRayTracingSkyLight(
 	}
 
 	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
-
 	int32 ViewIndex = 0;
+
 	for (FViewInfo& View : Views)
 	{
 		RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);

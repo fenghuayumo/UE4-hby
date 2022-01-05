@@ -2,8 +2,9 @@
 #include "../Common.ush"
 
 #include "LightTreeCommon.ush"
-#include "/Engine/Shared/RayTracingTypes.h"
-#include "/Engine/Shared/PathTracingDefinitions.h"
+// #include "/Engine/Shared/RayTracingTypes.h"
+// #include "/Engine/Shared/PathTracingDefinitions.h"
+#include "../PathTracing/Light/PathTracingLightCommon.ush"
 // #define LIGHT_CUT_THREAD_BLOCK_SIZE 512
 
 #if GEN_MORTONCODE
@@ -17,20 +18,18 @@ inline uint3 BitExpansion(uint3 x)
 	return x;
 }
 
-uint SceneLightCount;
-StructuredBuffer<FPathTracingLight> SceneLights;
 RWByteAddressBuffer keyIndexList;
 int QuantLevels;
 float3 SceneLightBoundsMin;
 float3 SceneLightDimension;
-
+uint SceneInfiniteLightCount;
 [numthreads(LIGHT_CUT_THREAD_BLOCK_SIZE, 1, 1)]
 void GenMortonCode(uint3 DTid : SV_DispatchThreadID)
 {
-	if (DTid.x < SceneLightCount)
+	if (DTid.x < (SceneLightCount - SceneInfiniteLightCount) )
 	{
 		//normalize position to [0,1]
-		float3 normPos = (SceneLights[DTid.x].Position.xyz - SceneLightBoundsMin) / SceneLightDimension;
+		float3 normPos = (SceneLights[DTid.x + SceneInfiniteLightCount].Position.xyz - SceneLightBoundsMin) / SceneLightDimension;
 		uint3 quantPos = min(max(0, uint3(normPos * QuantLevels)), QuantLevels - 1);
 		quantPos = BitExpansion(quantPos);
 		uint mortonCode = quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
@@ -51,11 +50,9 @@ void GenMortonCode(uint3 DTid : SV_DispatchThreadID)
 
 int LevelLightCount;
 int LevelsNumber;
-uint SceneLightCount;
-StructuredBuffer<FPathTracingLight> SceneLights;
 ByteAddressBuffer keyIndexList;
 RWStructuredBuffer<FLightNode> LightNodes;
-
+uint SceneInfiniteLightCount;
 [numthreads(LIGHT_CUT_THREAD_BLOCK_SIZE, 1, 1)]
 void GenerateLevelZeroFromLights(uint3 DTid : SV_DispatchThreadID)
 {
@@ -66,28 +63,33 @@ void GenerateLevelZeroFromLights(uint3 DTid : SV_DispatchThreadID)
 		FLightNode node;
 		int nodeArr = (1 << (LevelsNumber - 1)) + levelNodeId;
 
-		if (levelNodeId < SceneLightCount)
+		if (levelNodeId < (SceneLightCount - SceneInfiniteLightCount) )
 		{
 			uint2 KeyIndexPair = keyIndexList.Load2(8 * levelNodeId);
-			int index = KeyIndexPair.x;
+			int index = KeyIndexPair.x + SceneInfiniteLightCount;
 			float3 lightPos = SceneLights[index].Position.xyz;
 			float3 lightN = SceneLights[index].Normal.xyz;
 			float3 lightColor = SceneLights[index].Color.xyz;
-			node.ID = index;
+			node.ID = KeyIndexPair.x ;
 
 			float3 boundMin = 1e10;
 			float3 boundMax = -1e10;
 			node.Intensity = GetColorIntensity(lightColor.xyz);
 
-			if (node.Intensity > 0) //real light
+			// if( IsEnvironmentLight(index) || IsDirectionalLight(index) )
+			// {
+			// 	node.BoundMin = SceneLightBoundsMin;
+            //     node.BoundMax = SceneLightBoundsMax;
+			// }
+			//if (node.Intensity > 0) //real light
 			{
                 node.BoundMin = SceneLights[index].BoundMin;
                 node.BoundMax = SceneLights[index].BoundMax;
 			}
-            else
-            {
-                node.BoundMin = node.BoundMax = boundMin;
-            }
+            // else
+            // {
+            //     node.BoundMin = node.BoundMax = boundMin;
+            // }
 
 #ifdef LIGHT_CONE
 			if (node.Intensity > 0)

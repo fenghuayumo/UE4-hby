@@ -57,7 +57,7 @@ TAutoConsoleVariable<int> CVarCutSharing(
 
 TAutoConsoleVariable<int> CVarMaxCutNodes(
 	TEXT("r.LightCut.MaxCutNodes"),
-	32,
+	8,
 	TEXT("Set Max Light Cut Nodes)"),
 	ECVF_RenderThreadSafe
 );
@@ -65,12 +65,12 @@ TAutoConsoleVariable<int> CVarMaxCutNodes(
 TAutoConsoleVariable<float> CVarErrorLimit(
 	TEXT("r.LightCut.ErrorLimit"),
 	0.001f,
-	TEXT("Use ApproximateCosineBound)"),
+	TEXT("Set Error Limit)"),
 	ECVF_RenderThreadSafe
 );
 
 TAutoConsoleVariable<int> CVarInterleaveRate(
-	TEXT("r.UseApproximateCosineBound"),
+	TEXT("r.LightCut.InterleaveRate"),
 	1,
 	TEXT("Set Interleave Rate)"),
 	ECVF_RenderThreadSafe
@@ -189,6 +189,7 @@ class FGenerateMortonCodeCS : public FGlobalShader
 
 		SHADER_PARAMETER(FVector, SceneLightBoundsMin)
 		SHADER_PARAMETER(FVector, SceneLightDimension)
+		SHADER_PARAMETER(uint32, SceneInfiniteLightCount)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -221,6 +222,7 @@ class FGenerateLevelZeroCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FPathTracingLight>, SceneLights)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, keyIndexList)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FLightNode>, LightNodes)
+		SHADER_PARAMETER(uint32, SceneInfiniteLightCount)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -347,21 +349,23 @@ void LightTree::Init(int _numLights, int _quantizationLevels)
 {
 	NumLights = _numLights;
 	QuantizationLevels = _quantizationLevels;
-
+	NumFiniteLights = NumLights - SceneInfiniteLightCount;
 	int numBboxGroups = (RAY_TRACING_LIGHT_COUNT_MAXIMUM + 1023) / 1024;
 
 	// compute nearest power of two
-	NumTreeLevels = CalculateTreeLevels(NumLights);
+	
+	NumTreeLevels = CalculateTreeLevels(NumFiniteLights);
 	NumTreeLights = 1 << (NumTreeLevels - 1);//the light number of the leaf level 
 }
 
-void LightTree::Build(FRDGBuilder& GraphBuilder, int lightCounts, const FVector& SceneLightBoundMin, const FVector& SceneLightBoundMax, FRDGBufferSRV* LightsSRV, int frameId)
+void LightTree::Build(FRDGBuilder& GraphBuilder, int lightCounts,int InfiniteLightCount, const FVector& SceneLightBoundMin, const FVector& SceneLightBoundMax, FRDGBufferSRV* LightsSRV, int frameId)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, LightTreeBuild);
 	RDG_EVENT_SCOPE(GraphBuilder, "Build Ligh Tree");
 
 	bEnableNodeViz = CVarVizLightNodeEnable.GetValueOnRenderThread();
 
+	SceneInfiniteLightCount = InfiniteLightCount;
 	Init(lightCounts, 1024);
 
 	uint32 numStorageNodes = 2 * NumTreeLights;
@@ -372,13 +376,13 @@ void LightTree::Build(FRDGBuilder& GraphBuilder, int lightCounts, const FVector&
 		LightNodesBuffer = GraphBuilder.CreateBuffer(BufferDesc, TEXT("LightNodesBuffer")/*, ERDGBufferFlags::MultiFrame*/);
 		BLASViZBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(FVizLightNode), FMath::Max(numStorageNodes, 1u)), TEXT("Viz Nodes"));
 		IndexKeyList = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(uint64), FMath::Max(NumTreeLights, 1u)), TEXT("GPU Sort List"));
-		uint32_t ListCount[1] = { NumLights };
+		uint32_t ListCount[1] = { NumFiniteLights };
 		ListCounter = CreateVertexBuffer(GraphBuilder, TEXT("GPU List Counter"), FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), 1), ListCount, sizeof(ListCount));
 	}
 	
 	Sort(GraphBuilder, SceneLightBoundMin, SceneLightBoundMax, LightsSRV);
 	// fill level zero
-	GenerateLevelZero(GraphBuilder, LightsSRV);
+	GenerateLevelZero(GraphBuilder, SceneLightBoundMin, SceneLightBoundMax, LightsSRV);
 	GenerateInternalLevels(GraphBuilder, 4);
 	if (bEnableNodeViz)
 	{
@@ -403,17 +407,21 @@ void LightTree::Sort(FRDGBuilder& GraphBuilder,
 	PassParameters->SceneLights = LightsSRV;
 	PassParameters->SceneLightDimension = SceneLightBoundMax - SceneLightBoundMin;
 	PassParameters->SceneLightBoundsMin = SceneLightBoundMin;
+	PassParameters->SceneInfiniteLightCount = SceneInfiniteLightCount;
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,
 		RDG_EVENT_NAME("GenerateMortonCode"),
 		ComputeShader,
 		PassParameters,
-		FComputeShaderUtils::GetGroupCount(NumLights, FGenerateMortonCodeCS::GetThreadBlockSize()));
+		FComputeShaderUtils::GetGroupCount(NumFiniteLights, FGenerateMortonCodeCS::GetThreadBlockSize()));
 
 	FBitonicSortUtils::Sort(GraphBuilder, IndexKeyList, ListCounter, 0, false, true);
 }
 
-void LightTree::GenerateLevelZero(FRDGBuilder& GraphBuilder, FRDGBufferSRV* LightsSRV)
+void LightTree::GenerateLevelZero(FRDGBuilder& GraphBuilder,
+	const FVector& SceneLightBoundMin, 
+	const FVector& SceneLightBoundMax, 
+	FRDGBufferSRV* LightsSRV)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, LightTreeGenerateLevelZero);
 	RDG_EVENT_SCOPE(GraphBuilder, "GenerateLevelZero");
@@ -425,6 +433,7 @@ void LightTree::GenerateLevelZero(FRDGBuilder& GraphBuilder, FRDGBufferSRV* Ligh
 	PassParameters->SceneLightCount = NumLights;
 	PassParameters->SceneLights = LightsSRV;
 	PassParameters->LightNodes = GraphBuilder.CreateUAV(LightNodesBuffer);
+	PassParameters->SceneInfiniteLightCount = SceneInfiniteLightCount;
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,
 		RDG_EVENT_NAME("GenerateLevelZero"),
@@ -498,7 +507,7 @@ void LightTree::FindLightCuts(
 	FIntPoint DispatchResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), CutBlockSize);
 	TShaderMapRef<FFindLightCutsCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
 	FFindLightCutsCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FFindLightCutsCS::FParameters>();
-	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 2 * MAX_CUT_NODES * ((View.ViewRect.Size().X + 7) / 8) * ((View.ViewRect.Size().Y + 7) / 8)), TEXT("Light cut buffer"));
+	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32),  MAX_CUT_NODES * ((View.ViewRect.Size().X + 7) / 8) * ((View.ViewRect.Size().Y + 7) / 8)), TEXT("Light cut buffer"));
 	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(LightNodesBuffer);
 	PassParameters->LightCutBuffer = GraphBuilder.CreateUAV(LightCutBuffer);
 	PassParameters->MaxCutNodes = CVarMaxCutNodes.GetValueOnRenderThread();

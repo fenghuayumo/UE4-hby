@@ -781,6 +781,14 @@ private:
 		FRDGTextureRef& OutHitDistanceTexture,
 		const FHairStrandsRenderingData* HairDatas);
 
+
+	void RenderRayTracingSkyLightProgressive(
+		FRDGBuilder& GraphBuilder,
+		FRDGTextureRef SceneColorTexture,
+		FRDGTextureRef& OutSkyLightTexture,
+		FRDGTextureRef& OutHitDistanceTexture,
+		const FHairStrandsRenderingData* HairDatas);
+
 	void RenderRayTracingPrimaryRaysView(
 		FRDGBuilder& GraphBuilder,
 		const FViewInfo& View,

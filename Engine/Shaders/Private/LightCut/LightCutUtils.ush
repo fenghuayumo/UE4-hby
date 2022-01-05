@@ -1,0 +1,47 @@
+#ifndef _LIGHT_CUT_UTILS_
+#define _LIGHT_CUT_UTILS_
+#include "LightTreeCommon.ush"
+
+inline float ErrorFunction(int nodeID, 
+    float3 p, 
+    float3 N, 
+    float3 V,
+	StructuredBuffer<FLightNode> NodesBuffer,
+    bool ApproximateCosineBound,
+    float ErrorLimit,
+    float SceneLightBoundRadius
+)
+{
+	FLightNode node = NodesBuffer[nodeID];
+
+	float dlen2 = SquaredDistanceToClosestPoint(p, node.BoundMin, node.BoundMax);
+	float SR2 = ErrorLimit * SceneLightBoundRadius;
+	SR2 *= SR2;
+	if (dlen2 < SR2) dlen2 = SR2; // bound the distance
+
+	float atten = 1.0 / dlen2;
+
+	if (ApproximateCosineBound)
+		atten *= GeomTermBoundApproximate(p, N, node.BoundMin, node.BoundMax);
+	else
+		atten *= GeomTermBound(p, N, node.BoundMin, node.BoundMax);
+#ifdef LIGHT_CONE
+	{
+		float3 nr_boundMin = 2 * p - node.BoundMax;
+		float3 nr_boundMax = 2 * p - node.BoundMin;
+		float cos0 = 1;
+		if (ApproximateCosineBound)
+			cos0 = GeomTermBoundApproximate(p, node.Cone.xyz, nr_boundMin, nr_boundMax);
+		else
+			cos0 = GeomTermBound(p, node.Cone.xyz, nr_boundMin, nr_boundMax);
+		atten *= max(0.f, cos(max(0.f, acos(cos0) - node.Cone.w)));
+	}
+#endif
+
+	float colorIntens = node.Intensity;
+
+	float res = atten * colorIntens;
+	return res;
+};
+
+#endif

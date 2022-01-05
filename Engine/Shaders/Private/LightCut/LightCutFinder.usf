@@ -2,7 +2,7 @@
 
 #include "/Engine/Public/Platform.ush"
 #include "/Engine/Private/DeferredShadingCommon.ush"
-#include "LightTreeSampling.ush"
+#include "LightCutUtils.ush"
 #include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
 StructuredBuffer<FLightNode> NodesBuffer;
 RWStructuredBuffer<int> LightCutBuffer;

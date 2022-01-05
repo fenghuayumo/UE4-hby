@@ -6,10 +6,9 @@
 
 #include "/Engine/Shared/PathTracingDefinitions.h"
 
-
+uint SceneInfiniteLightCount;
 #if USE_PATH_TRACING_LIGHT_GRID
 // extra shader parameters that must be defined when using the light grid
-uint SceneInfiniteLightCount;
 float3 SceneLightsBoundMin;
 float3 SceneLightsBoundMax;
 Texture2D<uint> LightGrid;

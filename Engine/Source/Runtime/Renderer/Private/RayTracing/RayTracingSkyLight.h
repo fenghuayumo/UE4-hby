@@ -47,6 +47,16 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSkyLightVisibilityRaysData, )
 	SHADER_PARAMETER(FIntVector, SkyLightVisibilityRaysDimensions)
 END_SHADER_PARAMETER_STRUCT()
 
+
+BEGIN_SHADER_PARAMETER_STRUCT(FRayTracingAdaptiveSamplingData, )
+SHADER_PARAMETER(uint32, RandomSeq)
+SHADER_PARAMETER(uint32, MinimumSamplesPerPixel)
+SHADER_PARAMETER(uint32, Iteration)
+SHADER_PARAMETER(uint32, TemporalSeed)
+SHADER_PARAMETER(FIntVector, VarianceDimensions)
+SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<float>, VarianceMipTree)
+END_SHADER_PARAMETER_STRUCT()
+
 #if RHI_RAYTRACING
 
 int32 GetRayTracingSkyLightDecoupleSampleGenerationCVarValue();

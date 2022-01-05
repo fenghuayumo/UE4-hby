@@ -1,0 +1,57 @@
+#include "../Common.ush"
+#include "../PostProcessCommon.ush"
+
+Texture2D<float4>	RadianceTexture;
+Texture2D<uint>		SampleCountTexture;
+Texture2D<uint>		PixelPositionTexture;
+
+RWTexture2D<uint>	RadianceSortedRedRT;
+RWTexture2D<uint>	RadianceSortedGreenRT;
+RWTexture2D<uint>	RadianceSortedBlueRT;
+RWTexture2D<uint>	RadianceSortedAlphaRT;
+RWTexture2D<uint>	SampleCountSortedRT;
+
+uint2 TexViewSize;
+// uint UpscaleFactor;
+
+// uint2 GetPixelCoord(uint2 DispatchThreadId, uint UpscaleFactor)
+// {
+// 	uint UpscaleFactorPow2 = UpscaleFactor * UpscaleFactor;
+
+// 	// TODO(Denoiser): find a way to not interfer with TAA's jittering.
+// 	uint SubPixelId = View.StateFrameIndex & (UpscaleFactorPow2 - 1);
+
+// 	return DispatchThreadId * UpscaleFactor + uint2(SubPixelId & (UpscaleFactor - 1), SubPixelId / UpscaleFactor);
+// }
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void PathCompactionCS(
+	uint3 DispatchThreadId : SV_DispatchThreadID
+)
+{
+	uint2 PixelCoord = DispatchThreadId;
+	if (PixelCoord.x >= TexViewSize.x || PixelCoord.y >= TexViewSize.y)
+		return;
+
+	uint3 GridCoordinate = DispatchThreadId;
+	uint LinearIndex = PixelPositionTexture.Load(GridCoordinate);
+	uint2 BufferSize = TexViewSize.xy;
+	uint2 Pixel = uint2(LinearIndex % BufferSize.x, LinearIndex / BufferSize.x);
+	// uint2 Pixel = PixelCoord;
+	// Pack in uint render targets to utilize atomic instructions.
+	float4 Radiance = RadianceTexture.Load(GridCoordinate);
+	InterlockedAdd(RadianceSortedRedRT[Pixel], asuint(Radiance.r));
+	InterlockedAdd(RadianceSortedGreenRT[Pixel], asuint(Radiance.g));
+	InterlockedAdd(RadianceSortedBlueRT[Pixel], asuint(Radiance.b));
+	InterlockedAdd(RadianceSortedAlphaRT[Pixel], asuint(Radiance.a));
+
+	InterlockedAdd(SampleCountSortedRT[Pixel], SampleCountTexture.Load(GridCoordinate));
+	
+	// RadianceSortedRedRT[Pixel] =  asuint(Radiance.r);
+	// RadianceSortedGreenRT[Pixel] =  asuint(Radiance.g);
+	// RadianceSortedBlueRT[Pixel] =  asuint(Radiance.b);
+	// RadianceSortedAlphaRT[Pixel] =  asuint(Radiance.a);
+
+	// SampleCountSortedRT[Pixel] =  SampleCountTexture.Load(GridCoordinate);
+
+}

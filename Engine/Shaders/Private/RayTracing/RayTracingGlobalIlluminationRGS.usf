@@ -18,13 +18,14 @@
 #define LIGHT_GRID 1
 #define LIGHT_TREE 2
 #define LIGHT_CUT  3
+#define LIGHT_UNIFROM 4
 
 // #define LIGHT_SAMPLING_TYPE 1
 #ifndef LIGHT_SAMPLING_TYPE
 #define LIGHT_SAMPLING_TYPE 0
 #endif
 
-#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
+#if LIGHT_SAMPLING_TYPE == LIGHT_UNIFROM
 #define UNIFORM_LIGHT_SELECTION
 #endif
 #if LIGHT_SAMPLING_TYPE == LIGHT_GRID
@@ -68,11 +69,12 @@ RWTexture2D<uint> CumulativeTime;
 int DistanceType;
 int LeafStartIndex;
 
-int MaxCutNodes; 
+int MaxCutNodes;
+int CutShareGroupSize;
 float ErrorLimit;
-int CutSharingSize;
-int InterleaveRate;
 int UseApproximateCosineBound;
+int InterleaveRate;
+
 
 StructuredBuffer<int> LightCutBuffer;
 StructuredBuffer<FLightNode> NodesBuffer;
@@ -127,9 +129,116 @@ bool SampleLightTree(
 		return false;
 	}
 	float LightPickPdf = 1.0;
-	bool deadBranch = TraverseLightTree(WorldPos, WorldNormal, StartNodeID, LightNodes, 
-					LeafStartIndex, UseApproximateCosineBound, DistanceType,
-					RandSample.x ,LightPickPdf,OutLightId );
+	bool deadBranch = false;
+	float pInfinite = float(SceneInfiniteLightCount) /
+                          float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
+	if (RandSample.x < pInfinite) 
+	{
+		// Sample infinite lights with uniform probability
+		RandSample.x /= pInfinite;
+		int index = min(int(floor(RandSample.x * SceneInfiniteLightCount)), SceneInfiniteLightCount - 1);
+		LightPickPdf = pInfinite / SceneInfiniteLightCount;
+		OutLightId = index;
+	}
+	else
+	{
+		deadBranch = TraverseLightTree(WorldPos, WorldNormal, StartNodeID, LightNodes, 
+				LeafStartIndex, UseApproximateCosineBound, DistanceType,
+				RandSample.x ,LightPickPdf,OutLightId );
+		LightPickPdf *= 1- pInfinite;
+	}
+	if( deadBranch )
+		return false;
+
+	FLightSample Result = SampleLight(OutLightId, RandSample.yz, WorldPos, WorldNormal);
+	OutDirection = Result.Direction;
+	OutDistance = Result.Distance;
+	OutRadianceOverPdf = Result.RadianceOverPdf / LightPickPdf;
+	OutPdf = Result.Pdf * LightPickPdf;
+
+	return true;
+}
+
+bool SampleInfiniteLight(
+	float3 RandSample,
+	float3 WorldPos,
+	float3 WorldNormal,
+	uint PrimitiveLightingChannelMask,
+	bool IsTransmissiveMaterial,
+	out int OutLightId,
+	out float3 OutDirection,
+	out float  OutDistance,
+	out float3 OutRadianceOverPdf,
+	out float OutPdf
+)
+{
+	if( SceneInfiniteLightCount > 0)
+	{
+		float LightPickPdf = 1.0;
+		int index = min(int(floor(RandSample.x * SceneInfiniteLightCount)), SceneInfiniteLightCount - 1);
+		LightPickPdf = 1.0 / SceneInfiniteLightCount;
+		OutLightId = index;
+
+			
+		FLightSample Result = SampleLight(OutLightId, RandSample.yz, WorldPos, WorldNormal);
+		OutDirection = Result.Direction;
+		OutDistance = Result.Distance;
+		OutRadianceOverPdf = Result.RadianceOverPdf / LightPickPdf;
+		OutPdf = Result.Pdf * LightPickPdf;
+
+		return true;
+	}
+	return false;
+}
+
+bool SampleLightCut(
+	float3 RandSample,
+	float3 WorldPos,
+	float3 WorldNormal,
+	StructuredBuffer<FLightNode> LightNodes,
+	int LeafStartIndex,
+	int StartNodeID,
+	uint PrimitiveLightingChannelMask,
+	bool IsTransmissiveMaterial,
+	out int OutLightId,
+	out float3 OutDirection,
+	out float  OutDistance,
+	out float3 OutRadianceOverPdf,
+	out float OutPdf)
+{
+	// set default values in case sampling fails
+	OutLightId = -1;
+	OutDirection = 0;
+	OutDistance = 0;
+	OutRadianceOverPdf = 0;
+	OutPdf = 0;
+
+	if (SceneLightCount == 0)
+	{
+		// no lights in the scene
+		return false;
+	}
+	float LightPickPdf = 1.0;
+	bool deadBranch = false;
+	float pInfinite = float(SceneInfiniteLightCount) /
+                          float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
+	if (RandSample.x < pInfinite) 
+	{
+		// Sample infinite lights with uniform probability
+		RandSample.x /= pInfinite;
+		int index = min(int(floor(RandSample.x * SceneInfiniteLightCount)), SceneInfiniteLightCount - 1);
+		LightPickPdf = pInfinite / SceneInfiniteLightCount;
+		OutLightId = index;
+		int invSplitFactor = ceil(float(MaxCutNodes) / (InterleaveRate * InterleaveRate));
+		LightPickPdf *= invSplitFactor;
+	}
+	else
+	{
+		deadBranch = TraverseLightTree(WorldPos, WorldNormal, StartNodeID, LightNodes, 
+				LeafStartIndex, UseApproximateCosineBound, DistanceType,
+				RandSample.x ,LightPickPdf,OutLightId );
+		LightPickPdf *= 1- pInfinite;
+	}
 	if( deadBranch )
 		return false;
 
@@ -314,11 +423,20 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 			{
 				Irradiance += Payload.Radiance;
 			}
+#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
+			uint2 BufferSize = View.BufferSizeAndInvSize.xy;
+			int startAddr =  MAX_CUT_NODES * ( (PixelCoord.y / CutShareGroupSize) * ((BufferSize.x + CutShareGroupSize - 1) / CutShareGroupSize) + PixelCoord.x / CutShareGroupSize );
 
+			int numPass = ceil(float(MaxCutNodes) / (InterleaveRate * InterleaveRate));
+			float SplitFactor = 1.0;
+			for(uint NeeTrial = 0; NeeTrial < numPass; ++NeeTrial)
+			{
+#else
 			// Perform next-event estimation
 			float SplitFactor = 1.0 / NextEventEstimationSamples;
 			for (uint NeeTrial = 0; NeeTrial < NextEventEstimationSamples; ++NeeTrial)
 			{
+#endif
 				// Light selection
 				int LightId;
 				float3 LightRadianceOverPdf = 0;
@@ -341,6 +459,56 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 							LightRay.TMax,
 							LightRadianceOverPdf,
 							NeePdf);
+				#elif LIGHT_SAMPLING_TYPE == LIGHT_CUT
+				bool bLit = false;
+				if( CutShareGroupSize > 0)
+				{
+					int cutNodeId = NeeTrial;
+
+					int startId = 0;
+					int endId = MaxCutNodes;
+
+					if (InterleaveRate > 1)
+					{
+						int interleaveGroupSize = InterleaveRate * InterleaveRate;
+						int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (PixelCoord.y % InterleaveRate) + (PixelCoord.x % InterleaveRate)) % interleaveGroupSize;
+
+						float ratio = float(MaxCutNodes) / interleaveGroupSize;
+						startId = int(interleaveSamplingId * ratio);  
+						endId = interleaveSamplingId == interleaveGroupSize - 1 ? MaxCutNodes : int((interleaveSamplingId + 1) * ratio);
+
+						if (startId + NeeTrial >= endId) break;
+						else
+						{
+							cutNodeId = startId + NeeTrial;
+						}
+					}
+					else
+					{
+						if (cutNodeId >= MaxCutNodes) break;
+					}
+					int cutID = cutNodeId + startAddr;
+					int nodeID = LightCutBuffer[cutID];
+					if (nodeID < 0) break;
+					bLit = SampleLightCut(RandSample3,
+							Ray.Origin,
+							Payload.WorldNormal,
+							NodesBuffer,
+							LeafStartIndex,
+							nodeID,
+							Payload.PrimitiveLightingChannelMask,
+							ENABLE_TRANSMISSION,
+							LightId,
+							LightRay.Direction,
+							LightRay.TMax,
+							LightRadianceOverPdf,
+							NeePdf);	
+					NeePdf /= ( InterleaveRate * InterleaveRate);
+				}
+				// else
+				// {
+
+				// }
 				#else
 				bool bLit = SampleLight(RandSample3,
 							Ray.Origin,

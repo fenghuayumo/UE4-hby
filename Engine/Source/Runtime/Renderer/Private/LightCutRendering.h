@@ -39,6 +39,7 @@ public:
 
 	void Build(FRDGBuilder& GraphBuilder, 
 		int lightCounts,
+		int SceneInfiniteLightCount,
 		const FVector& SceneLightBoundMin,
 		const FVector& SceneLightBoundMax,
 		FRDGBufferSRV* LightsSRV,
@@ -49,7 +50,10 @@ public:
 		const FVector& SceneLightBoundMax,
 		FRDGBufferSRV* LightsSRV);
 
-	void GenerateLevelZero(FRDGBuilder& GraphBuilder, FRDGBufferSRV* LightsSRV);
+	void GenerateLevelZero(FRDGBuilder& GraphBuilder,
+		const FVector& SceneLightBoundMin,
+		const FVector& SceneLightBoundMax,
+		 FRDGBufferSRV* LightsSRV);
 
 	void GenerateInternalLevels(FRDGBuilder& GraphBuilder, int levelGroupSize);
 	void GenerateMultipleLevels(FRDGBuilder& GraphBuilder, int srcLevel, int dstLevelStart, int dstLevelEnd);
@@ -77,6 +81,8 @@ public:
 	uint32_t QuantizationLevels;
 	uint32_t NumTreeLevels;
 	uint32_t NumTreeLights;
+	uint32_t SceneInfiniteLightCount;
+	uint32_t NumFiniteLights;
 	bool bEnableNodeViz = false;
 
 public:

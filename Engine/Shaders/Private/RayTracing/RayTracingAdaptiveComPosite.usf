@@ -1,0 +1,92 @@
+#include "../Common.ush"
+
+Texture2D<uint> RadianceRedTexture;
+Texture2D<uint> RadianceGreenTexture;
+Texture2D<uint> RadianceBlueTexture;
+Texture2D<uint> RadianceAlphaTexture;
+Texture2D<uint> SampleCountTexture;
+
+RWTexture2D<float4> CumulativeRadianceTexture;
+RWTexture2D<uint> CumulativeSampleCountTexture;
+
+uint2 TexViewSize;
+// TODO: Make C1 continuous
+float TonemapGammaAndHDR(float Value)
+{
+	if (Value > 1.0)
+	{
+		Value = log(Value);
+	}
+	else
+	{
+		Value = pow(Value, 2.2);
+	}
+	return Value;
+}
+
+float NoTonemap(float Value)
+{
+	return Value;
+}
+
+float Tonemap(float Value)
+{
+	return TonemapGammaAndHDR(Value);
+}
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void PathCompositeCS(
+	uint3 DispatchThreadId : SV_DispatchThreadID
+)
+{
+	// float2 UV = DispatchThreadId.xy / 
+	// uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
+	// float2 BufferSize = View.BufferSizeAndInvSize.xy;
+	// int3 TexCoord = int3(DispatchThreadId, 0);
+	uint2 PixelCoord =  DispatchThreadId.xy;
+	if (PixelCoord.x >= TexViewSize.x || PixelCoord.y >= TexViewSize.y)
+		return;
+
+	float RadianceRed = asfloat(RadianceRedTexture[PixelCoord]);
+	float RadianceGreen = asfloat(RadianceGreenTexture[PixelCoord]);
+	float RadianceBlue = asfloat(RadianceBlueTexture[PixelCoord]);
+	float RadianceAlpha = asfloat(RadianceAlphaTexture[PixelCoord]);
+	float4 Radiance = float4(RadianceRed, RadianceGreen, RadianceBlue, RadianceAlpha);
+	float SampleCount = SampleCountTexture[PixelCoord];
+
+	float4 CumulativeRadiance = CumulativeRadianceTexture[PixelCoord];
+	float CumulativeSampleCount = CumulativeSampleCountTexture[PixelCoord];
+
+	float CumulativeVariance = CumulativeRadiance.a;
+
+	uint OutCumulativeSampleCount = CumulativeSampleCount + SampleCount;
+	float4 OutCumulativeRadiance;
+	OutCumulativeRadiance.rgb = (CumulativeRadiance.rgb * CumulativeSampleCount + Radiance.rgb) / OutCumulativeSampleCount;
+
+	float OutVariance = 0;
+	if (OutCumulativeSampleCount > 1 && OutCumulativeSampleCount < 4096)
+	{
+#if 0
+		// Per-sample variance
+		float IrradianceY = Tonemap(Luminance(Radiance));
+		float DeviationSquared = IrradianceY - Tonemap(Luminance(OutCumulativeRadiance));
+#else
+		// Variance of the mean
+		float IrradianceY = Luminance(CumulativeRadiance);
+		float DeviationSquared = IrradianceY - Luminance(OutCumulativeRadiance);
+#endif
+		DeviationSquared *= DeviationSquared;
+		OutVariance = DeviationSquared;
+		if (CumulativeSampleCount > 0)
+		{
+			OutVariance += CumulativeVariance * (CumulativeSampleCount - 1);
+		}
+		OutVariance /= OutCumulativeSampleCount - 1;
+	}
+	OutCumulativeRadiance.a = OutVariance;
+	// OutColor = float4(OutCumulativeRadiance.rgb * View.PreExposure, 1.0);
+
+	CumulativeRadianceTexture[PixelCoord] = OutCumulativeRadiance;
+	CumulativeSampleCountTexture[PixelCoord] = OutCumulativeSampleCount;
+
+}

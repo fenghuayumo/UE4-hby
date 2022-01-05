@@ -422,7 +422,8 @@ static TAutoConsoleVariable<int> CVarLightSamplingType(
 	TEXT(" 0:	BrtuteForce \n")
 	TEXT(" 1:	LightGrid \n")
 	TEXT(" 2:	LightTree \n")
-	TEXT(" 3:	LightCut"),
+	TEXT(" 3:	LightCut \n")
+	TEXT(" 4:	Uniform"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int> CVarLightTreeDistanceType(
@@ -712,6 +713,7 @@ enum class ELightSamplingType
 	LIGHT_GRID = 1,
 	LIGHT_TREE = 2,
 	LIGHT_CUT = 3,
+	Light_UNIFORM = 4,
 	MAX,
 };
 class FGlobalIlluminationRGS : public FGlobalShader
@@ -1504,7 +1506,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIllumination(const FV
 	// Declare all RayGen shaders that require material closest hit shaders to be bound
 	for (int EnableTwoSidedGeometry = 0; EnableTwoSidedGeometry < 2; ++EnableTwoSidedGeometry)
 	{
-		for(uint32 i= 0; i < 4;i++)
+		for(uint32 i= 0; i < (uint32)(ELightSamplingType::MAX);i++)
 		{
 			FGlobalIlluminationRGS::FPermutationDomain PermutationVector;
 			PermutationVector.Set<FGlobalIlluminationRGS::FEnableTwoSidedGeometryDim>(EnableTwoSidedGeometry == 1);
@@ -2188,7 +2190,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters,
 		&PassParameters->LightGridParameters);
 
-	GTree.Build(GraphBuilder, PassParameters->SceneLightCount, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax, PassParameters->SceneLights, View.ViewState->FrameIndex);
+	GTree.Build(GraphBuilder, PassParameters->SceneLightCount, PassParameters->LightGridParameters.SceneInfiniteLightCount,PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax, PassParameters->SceneLights, View.ViewState->FrameIndex);
 
 	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax);
 

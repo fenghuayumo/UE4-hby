@@ -946,6 +946,11 @@ public:
 	FSamplerStateRHIRef MaterialTextureBilinearClampedSamplerCache;
 
 #if RHI_RAYTRACING
+	//Ray Tracing SkyLight
+	TRefCountPtr<IPooledRenderTarget> RayTracingSkyLightRadianceRT;
+	TRefCountPtr<IPooledRenderTarget> RayTracingSkyLightSampleCountRT;
+	TRefCountPtr<FRDGPooledBuffer>	RayTracingSkyLightVarianceMipTree;
+
 	// Invalidates cached results related to the path tracer so accumulated rendering can start over
 	void PathTracingInvalidate();
 
@@ -953,9 +958,6 @@ public:
 	TRefCountPtr<IPooledRenderTarget> PathTracingRadianceRT;
 	TRefCountPtr<IPooledRenderTarget> PathTracingAlbedoRT;
 	TRefCountPtr<IPooledRenderTarget> PathTracingNormalRT;
-	TRefCountPtr<IPooledRenderTarget> PathTracingCurrentRadianceRT;
-	TRefCountPtr<IPooledRenderTarget> PathTracingSampleRecordRT;
-	TRefCountPtr<IPooledRenderTarget> PathTracingSampleSppRT;
 	TRefCountPtr<IPooledRenderTarget> PathTracingRadianceDenoisedRT;
 	// Keep track of the rectangle of pixels the Radiance texture is valid for so that path tracing can restart if this changes
 	FIntRect PathTracingRect;
