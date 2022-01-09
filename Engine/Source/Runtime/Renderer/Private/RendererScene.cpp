@@ -1889,6 +1889,33 @@ void FScene::RemoveTestGIVolume(UTestGIComponent* TestGI)
 	//}
 }
 
+
+void FScene::AddMeshLight(FMeshLightProxy* meshLight)
+{
+		// Send a command to the rendering thread to remove the primitive from the scene.
+	FScene* Scene = this;
+	ENQUEUE_RENDER_COMMAND(FAddMeshLightProxyCommand)(
+		[Scene, meshLight](FRHICommandList&)
+		{
+			Scene->EmissiveLightProxies.Add(meshLight);
+		});
+}
+
+void FScene::RemoveMeshLight(FMeshLightProxy* meshLight)
+{
+	FScene* Scene = this;
+	ENQUEUE_RENDER_COMMAND(FRemoveMeshLightProxyCommand)(
+		[Scene, meshLight](FRHICommandList&)
+		{
+			Scene->EmissiveLightProxies.Remove(meshLight);
+			//if (meshLight)
+			{
+				delete meshLight;
+				//meshLight = nullptr;
+			}
+		});
+}
+
 void FScene::AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component)
 {
 	TestGIProxies.Add(Component);
@@ -4464,6 +4491,8 @@ public:
 	virtual void AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override {}
 
 	virtual void RemoveTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override {}
+	virtual	void AddMeshLight(FMeshLightProxy* meshLight) override {}
+	virtual	void RemoveMeshLight(FMeshLightProxy* meshLight) override {}
 	virtual void AddTestGIVolume(UTestGIComponent* TestGI) override {}
 	virtual void RemoveTestGIVolume(UTestGIComponent* TestGI) override {}
 	virtual void AddPrimitive(UPrimitiveComponent* Primitive) override {}

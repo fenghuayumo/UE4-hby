@@ -23,6 +23,19 @@ struct FVizLightNode
 	int32	Index;
 };
 
+struct MeshLightInstanceTriangle
+{
+	int32 IndexOffset;
+	int32 InstanceID;
+};
+
+struct MeshLightInstance
+{
+	FMatrix 	Transform;
+	FVector 	Emission;
+	float 		Padding0;
+};
+
 #else
 struct FLightNode
 {
@@ -41,6 +54,19 @@ struct FVizLightNode
 	int	Level;
 	float3  BoundMax;
 	int	Index;
+};
+
+struct MeshLightInstanceTriangle
+{
+	int IndexOffset;
+	int InstanceID;
+};
+
+struct MeshLightInstance
+{
+	float4x4 	Transform;
+	float3 		Emission;
+	float 		Padding0;
 };
 
 #endif

@@ -1,0 +1,51 @@
+#include "../Common.ush"
+
+#include "LightTreeCommon.ush"
+// #include "/Engine/Shared/RayTracingTypes.h"
+// #include "/Engine/Shared/PathTracingDefinitions.h"
+#include "../PathTracing/Light/PathTracingLightCommon.ush"
+
+uint NumTriangleLights;
+RWStructuredBuffer<FLightNode> LightNodes;
+StructuredBuffer<float3>       PostionBuffer;
+StructuredBuffer<uint>         MeshLightIndexBuffer;
+StructuredBuffer<MeshLightInstanceTriangle>    MeshLightInstancePrimitiveBuffer;
+StructuredBuffer<MeshLightInstance>   MeshLightInstanceBuffer;
+
+[numthreads(LIGHT_CUT_THREAD_BLOCK_SIZE, 1, 1)]
+void GenerateLeafNode(uint3 DTid : SV_DispatchThreadID)
+{
+    uint triId = DTid.x;
+    if( triId < NumTriangleLights)
+    {
+        MeshLightInstanceTriangle prim = MeshLightInstancePrimitiveBuffer[triId];
+        float4x4 transform = MeshLightInstanceBuffer[prim.InstanceID].Transform;
+
+		uint v0 = MeshLightIndexBuffer[prim.IndexOffset];
+		uint v1 = MeshLightIndexBuffer[prim.IndexOffset + 1];
+		uint v2 = MeshLightIndexBuffer[prim.IndexOffset + 2];
+
+        const float3 p0 = mul(PositionBuffer[v0], transform);
+        const float3 p1 = mul(PositionBuffer[v1], transform);
+        const float3 p2 = mul(PositionBuffer[v2], transform);
+        
+        float  Emission = MeshLightInstanceBuffer[prim.InstanceID].Emission;
+        
+        float  Intensity = transform[1][1] * GetColorIntensity(Emission);
+        float3 boundMin = p0;
+		float3 boundMax = p0;
+
+		boundMin = min(boundMin, p1);
+		boundMin = min(boundMin, p2);
+		boundMax = max(boundMax, p1);
+		boundMax = max(boundMax, p2);
+
+		FLightNode node;
+		node.BoundMin = boundMin;
+		node.BoundMax = boundMax;
+		node.Intensity = power;
+		node.ID = triId;
+        LightNodes[triId] = node;
+    }
+
+}

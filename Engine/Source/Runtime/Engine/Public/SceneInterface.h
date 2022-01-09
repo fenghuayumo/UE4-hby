@@ -35,6 +35,7 @@ class UTextureCube;
 class FViewInfo;
 class FSceneRenderer;
 class FTestGIVolumeSceneProxy;
+struct FMeshLightProxy;
 
 enum EBasePassDrawListType
 {
@@ -55,7 +56,8 @@ public:
 	{}
 
 	// FSceneInterface interface
-
+	virtual	void AddMeshLight(FMeshLightProxy* meshLight)  = 0 ;
+	virtual	void RemoveMeshLight(FMeshLightProxy* meshLight) = 0;
 	virtual void AddTestGIVolume(UTestGIComponent* TestGI)  = 0;
 	virtual void RemoveTestGIVolume(UTestGIComponent* TestGI)  = 0;
 	virtual void AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) = 0;

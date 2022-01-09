@@ -85,7 +85,7 @@ class FRHIGPUBufferReadback;
 class FRHIGPUTextureReadback;
 class FRuntimeVirtualTextureSceneProxy;
 class FTestGIVolumeSceneProxy;
-
+struct FMeshLightProxy;
 /** Holds information about a single primitive's occlusion. */
 class FPrimitiveOcclusionHistory
 {
@@ -2505,6 +2505,8 @@ public:
 	/** Packed array of runtime virtual texture lod info. */
 	TArray<FPrimitiveVirtualTextureLodInfo> PrimitiveVirtualTextureLod;
 
+	/*MeshLight*/
+	TArray<FMeshLightProxy*>			EmissiveLightProxies;
 	/*GI Volume*/
 	TSet<FTestGIVolumeSceneProxy*>	TestGIProxies;
 
@@ -2766,7 +2768,11 @@ public:
 	virtual void AddTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override;
 
 	virtual void RemoveTestGIVolumeSceneProxy_RenderThread(FTestGIVolumeSceneProxy* Component) override;
+	//virtual void AddMeshLightProxy_RenderThread(FMeshLightProxy* Component) override;
+	//virtual void RemoveMeshLightProxy_RenderThread(FMeshLightProxy* Component) override;
 
+	virtual	void AddMeshLight(FMeshLightProxy* meshLight) override;
+	virtual	void RemoveMeshLight(FMeshLightProxy* meshLight) override;
 	virtual void AddTestGIVolume(UTestGIComponent* TestGI) override;
 	virtual void RemoveTestGIVolume(UTestGIComponent* TestGI) override;
 	virtual void AddPrimitive(UPrimitiveComponent* Primitive) override;

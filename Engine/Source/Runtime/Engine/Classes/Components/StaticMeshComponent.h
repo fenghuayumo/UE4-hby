@@ -32,6 +32,17 @@ struct FNavigableGeometryExport;
 struct FNavigationRelevantData;
 struct FStaticLightingPrimitiveInfo;
 
+
+struct FMeshLightProxy
+{
+public:
+	TArray<FVector>		Positions;
+	TArray<FVector>		Normals;
+	TArray<uint32_t>	IndexList;
+	FMatrix				Transform;
+	FVector				Emission;
+};
+
 /** Cached vertex information at the time the mesh was painted. */
 USTRUCT()
 struct FPaintedVertex
@@ -446,13 +457,14 @@ public:
 #endif
 	//~ End USceneComponent Interface
 
-
+	TArray<FMeshLightProxy*> MeshLightProxies;
 
 	//~ Begin UActorComponent Interface.
 protected: 
 	virtual void OnRegister() override;
 	virtual void OnUnregister() override;
 	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
+	virtual	void DestroyRenderState_Concurrent() override;
 	virtual void OnCreatePhysicsState() override;
 	virtual void OnDestroyPhysicsState() override;
 public:

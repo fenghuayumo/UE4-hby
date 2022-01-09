@@ -23,6 +23,7 @@
 #define PATHTRACING_LIGHT_POINT								(2 << 6)
 #define PATHTRACING_LIGHT_SPOT								(3 << 6)
 #define PATHTRACING_LIGHT_RECT								(4 << 6)
+#define PATHTRACING_LIGHT_MESH                              (5 << 6)
 #define PATHTRACER_FLAG_CAST_SHADOW_MASK 					(1 << 9)
 
 // Constants for the path tracer light grid

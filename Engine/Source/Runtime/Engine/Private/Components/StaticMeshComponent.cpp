@@ -599,6 +599,66 @@ void UStaticMeshComponent::CreateRenderState_Concurrent(FRegisterComponentContex
 {
 	LLM_SCOPE(ELLMTag::StaticMesh);
 	Super::CreateRenderState_Concurrent(Context);
+
+	if (GetStaticMesh() && GetStaticMesh()->GetRenderData())
+	{
+		FStaticMeshLODResources& LODResources = GetStaticMesh()->GetRenderData()->LODResources[0];
+		//uint32 Idx = 0;
+		for (int32 SectionIndex = 0; SectionIndex < LODResources.Sections.Num(); SectionIndex++)
+		{
+			// Get the material for each element at the current lod index
+			auto& section = LODResources.Sections[SectionIndex];
+			int32 MaterialIndex = section.MaterialIndex;
+			auto material = GetMaterial(MaterialIndex);
+		
+			if (material && material->GetMaterial()->HasEmissiveColorConnected())
+			{
+				float intensity = 0.0;
+				FLinearColor emissive;
+				material->GetScalarParameterValue(FName("EmissiveStrength"), intensity);
+				material->GetVectorParameterValue(FName("EmissiveColor"), emissive);
+				if (intensity > 0)
+				{
+					auto MeshLightProxy = new FMeshLightProxy();
+		/*			for (uint32 VertID = section.MinVertexIndex; VertID <= section.MaxVertexIndex; VertID++)
+					{
+						const auto Pos = LODResources.VertexBuffers.PositionVertexBuffer.VertexPosition(VertID);
+						MeshLightProxy->Positions.Add(Pos);
+					}*/
+					MeshLightProxy->Positions.Insert((FVector*)LODResources.VertexBuffers.PositionVertexBuffer.GetVertexData(), LODResources.VertexBuffers.PositionVertexBuffer.GetNumVertices(), 0);
+					for (uint32 Index = 0; Index < section.NumTriangles * 3; Index++)
+					{
+						uint32	idx = LODResources.IndexBuffer.GetIndex(section.FirstIndex + Index);
+						MeshLightProxy->IndexList.Add(idx );
+					}
+					//Idx += MeshLightProxy->IndexList.Num();
+					
+					MeshLightProxy->Emission = FVector(emissive.R, emissive.G, emissive.B) * intensity;
+					MeshLightProxy->Transform = GetComponentTransform().ToMatrixWithScale();
+					MeshLightProxies.Add(MeshLightProxy);
+					if (GetWorld())
+					{
+						GetWorld()->Scene->AddMeshLight(MeshLightProxy);
+					}
+				}
+			}
+		}
+	}
+
+}
+
+
+void UStaticMeshComponent::DestroyRenderState_Concurrent()
+{
+	for (int index = 0; index < MeshLightProxies.Num(); index++)
+	{
+		if (GetWorld())
+		{
+			GetWorld()->Scene->RemoveMeshLight(MeshLightProxies[index]);
+		}
+		MeshLightProxies.RemoveAt(index);
+	}
+	Super::DestroyRenderState_Concurrent();
 }
 
 void UStaticMeshComponent::OnCreatePhysicsState()
