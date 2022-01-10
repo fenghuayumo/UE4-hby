@@ -23,10 +23,13 @@ int QuantLevels;
 float3 SceneLightBoundsMin;
 float3 SceneLightDimension;
 uint SceneInfiniteLightCount;
-[numthreads(LIGHT_CUT_THREAD_BLOCK_SIZE, 1, 1)]
+// StructuredBuffer<FLightNode> LeafNodes;
+// uint NumTriangleLights;
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
 void GenMortonCode(uint3 DTid : SV_DispatchThreadID)
 {
-	if (DTid.x < (SceneLightCount - SceneInfiniteLightCount) )
+	uint FiniteLightCount = SceneLightCount - SceneInfiniteLightCount;
+	if (DTid.x < (FiniteLightCount) )
 	{
 		//normalize position to [0,1]
 		float3 normPos = (SceneLights[DTid.x + SceneInfiniteLightCount].Position.xyz - SceneLightBoundsMin) / SceneLightDimension;
@@ -37,10 +40,6 @@ void GenMortonCode(uint3 DTid : SV_DispatchThreadID)
 		uint2 KeyIndexPair = uint2(DTid.x, mortonCode);
 		keyIndexList.Store2(8 * DTid.x, KeyIndexPair);
 	}
-	// else
-	// {
-	// 	keyIndexList.Store2(8 * DTid.x, uint2(DTid.x, 0));
-	// }
 }
 
 #endif
@@ -53,7 +52,7 @@ int LevelsNumber;
 ByteAddressBuffer keyIndexList;
 RWStructuredBuffer<FLightNode> LightNodes;
 uint SceneInfiniteLightCount;
-[numthreads(LIGHT_CUT_THREAD_BLOCK_SIZE, 1, 1)]
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
 void GenerateLevelZeroFromLights(uint3 DTid : SV_DispatchThreadID)
 {
 	int levelNodeId = DTid.x;
@@ -123,7 +122,7 @@ int NumDstLevelsLights;
 
 RWStructuredBuffer<FLightNode> LightNodes;
 
-[numthreads(LIGHT_CUT_THREAD_BLOCK_SIZE, 1, 1)]
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
 void GenerateLevelsFromsLevelZero( uint3 DTid : SV_DispatchThreadID )
 {
 	int nodeId = DTid.x;

@@ -5,14 +5,79 @@
 // #include "/Engine/Shared/PathTracingDefinitions.h"
 #include "../PathTracing/Light/PathTracingLightCommon.ush"
 
+#if GEN_MORTONCODE
+StructuredBuffer<FLightNode> LeafNodes;
+RWByteAddressBuffer keyIndexList;
+
+float3 SceneLightBoundsMin;
+float3 SceneLightDimension;
 uint NumTriangleLights;
+int QuantLevels;
+uint3 BitExpansion(uint3 x)
+{
+	//https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
+	x = (x | x << 16) & 0x30000ff;
+	x = (x | x << 8) & 0x300f00f;
+	x = (x | x << 4) & 0x30c30c3;
+	x = (x | x << 2) & 0x9249249;
+	return x;
+}
+
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
+void GenMortonCode(uint3 DTid : SV_DispatchThreadID)
+{
+	if (DTid.x < NumTriangleLights)
+	{
+		FLightNode node = LeafNodes[DTid.x];
+		//normalize position to [0,1]
+		float3 boundCenter = 0.5 * (node.BoundMin + node.BoundMax);
+		float3 normPos = (boundCenter - SceneLightBoundsMin) / SceneLightDimension;
+		uint3 quantPos = min(max(0, uint3(normPos * QuantLevels)), QuantLevels - 1);
+		quantPos = BitExpansion(quantPos);
+		uint mortonCode = quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
+		uint2 KeyIndexPair = uint2(DTid.x, mortonCode);
+		keyIndexList.Store2(8 * DTid.x, KeyIndexPair);
+	}
+}
+
+#endif
+
+#if REORDER_LIGHT
+
+StructuredBuffer<FLightNode> LeafNodes;
+ByteAddressBuffer keyIndexList;
 RWStructuredBuffer<FLightNode> LightNodes;
-StructuredBuffer<float3>       PostionBuffer;
+
+int NumTriLights;
+int LeafOffset;
+int NumLeafs;
+
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
+void ReoderLightByKeyCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (DTid.x < NumTriLights)
+	{
+		uint2 KeyIndexPair = keyIndexList.Load2(8 * DTid.x);
+		int index = KeyIndexPair.x;
+		LightNodes[LeafOffset + DTid.x] = LeafNodes[index];
+	}
+	else if (DTid.x < NumLeafs)
+	{
+		LightNodes[LeafOffset + DTid.x].Intensity = 0;
+	}
+}
+
+#endif
+
+#if GEN_LEVEL_ZERO
+uint NumTriangleLights;
+RWStructuredBuffer<FLightNode> LeafNodes;
+StructuredBuffer<float3>       MeshLightVertexBuffer;
 StructuredBuffer<uint>         MeshLightIndexBuffer;
 StructuredBuffer<MeshLightInstanceTriangle>    MeshLightInstancePrimitiveBuffer;
 StructuredBuffer<MeshLightInstance>   MeshLightInstanceBuffer;
 
-[numthreads(LIGHT_CUT_THREAD_BLOCK_SIZE, 1, 1)]
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
 void GenerateLeafNode(uint3 DTid : SV_DispatchThreadID)
 {
     uint triId = DTid.x;
@@ -21,17 +86,22 @@ void GenerateLeafNode(uint3 DTid : SV_DispatchThreadID)
         MeshLightInstanceTriangle prim = MeshLightInstancePrimitiveBuffer[triId];
         float4x4 transform = MeshLightInstanceBuffer[prim.InstanceID].Transform;
 
-		uint v0 = MeshLightIndexBuffer[prim.IndexOffset];
-		uint v1 = MeshLightIndexBuffer[prim.IndexOffset + 1];
-		uint v2 = MeshLightIndexBuffer[prim.IndexOffset + 2];
+		// uint v0 = MeshLightIndexBuffer[prim.IndexOffset];
+		// uint v1 = MeshLightIndexBuffer[prim.IndexOffset + 1];
+		// uint v2 = MeshLightIndexBuffer[prim.IndexOffset + 2];
 
-        const float3 p0 = mul(PositionBuffer[v0], transform);
-        const float3 p1 = mul(PositionBuffer[v1], transform);
-        const float3 p2 = mul(PositionBuffer[v2], transform);
+        uint v0 = MeshLightIndexBuffer[3 * triId];
+		uint v1 = MeshLightIndexBuffer[3 * triId + 1];
+		uint v2 = MeshLightIndexBuffer[3 * triId + 2];
+
+        const float3 p0 = mul(float4(MeshLightVertexBuffer[v0],1.0), transform).xyz;
+        const float3 p1 = mul(float4(MeshLightVertexBuffer[v1],1.0), transform).xyz;
+        const float3 p2 = mul(float4(MeshLightVertexBuffer[v2],1.0), transform).xyz;
         
-        float  Emission = MeshLightInstanceBuffer[prim.InstanceID].Emission;
-        
-        float  Intensity = transform[1][1] * GetColorIntensity(Emission);
+        float3  Emission = MeshLightInstanceBuffer[prim.InstanceID].Emission;
+    	float3 LightN = cross(p2 - p0,p1 - p0);
+	    float Area = 0.5 * length(LightN);
+        float  Intensity = Area * GetColorIntensity(Emission);
         float3 boundMin = p0;
 		float3 boundMax = p0;
 
@@ -43,9 +113,44 @@ void GenerateLeafNode(uint3 DTid : SV_DispatchThreadID)
 		FLightNode node;
 		node.BoundMin = boundMin;
 		node.BoundMax = boundMax;
-		node.Intensity = power;
+		node.Intensity = Intensity;
 		node.ID = triId;
-        LightNodes[triId] = node;
+        LeafNodes[triId] = node;
     }
 
 }
+#endif
+
+// #if GEN_LEVEL_UP
+// int SrcLevel;
+// int DstLevel;
+// int NumDstLevelLights;
+// int NumLevels;
+// RWStructuredBuffer<FLightNode> LightNodes;
+// [numthreads(THREAD_BLOCK_SIZE, 1, 1)]
+// void GenerateInternalNode(uint3 DTid : SV_DispatchThreadID)
+// {
+//     int levelNodeId = DTid.x;
+// 	if (levelNodeId < NumDstLevelLights)
+// 	{
+// 		int dstNodeArr = (1 << (NumLevels - DstLevel - 1)) + levelNodeId;
+// 		int startNodeId = dstNodeArr << (DstLevel - SrcLevel);
+// 		int endNodeId = startNodeId + (1 << (DstLevel - SrcLevel));
+
+// 		FLightNode node = LightNodes[startNodeId];
+
+// 		for (int nodeId = startNodeId + 1; nodeId < endNodeId; nodeId++)
+// 		{
+// 			FLightNode srcNode = LightNodes[nodeId];
+// 			if (srcNode.Intensity > 0) //actual light
+// 			{
+// 				node.Intensity += srcNode.Intensity;
+// 				node.BoundMin = min(srcNode.BoundMin, node.BoundMin);
+// 				node.BoundMax = max(srcNode.BoundMax, node.BoundMax);
+// 			}
+// 		}
+
+// 		LightNodes[dstNodeArr] = node;
+// 	}
+// }
+// #endif

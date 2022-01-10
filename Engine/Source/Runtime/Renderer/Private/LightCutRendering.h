@@ -9,7 +9,8 @@ class FRDGPooledBuffer;
 class FRDGBuffer;
 using FRDGBufferRef = FRDGBuffer*;
 class FRDGBufferSRV;
-
+//class FShaderResourceViewRHI;
+//using FShaderResourceViewRHIRef = FShaderResourceViewRHI*;
 BEGIN_SHADER_PARAMETER_STRUCT(FLightCutCommonParameter,)
 SHADER_PARAMETER(int, MaxCutNodes)
 SHADER_PARAMETER(int, CutShareGroupSize)
@@ -42,8 +43,7 @@ public:
 		int SceneInfiniteLightCount,
 		const FVector& SceneLightBoundMin,
 		const FVector& SceneLightBoundMax,
-		FRDGBufferSRV* LightsSRV,
-		int frameId);
+		FRDGBufferSRV* LightsSRV);
 
 	void Sort(FRDGBuilder& GraphBuilder, 
 		const FVector& SceneLightBoundMin,
@@ -55,7 +55,7 @@ public:
 		const FVector& SceneLightBoundMax,
 		 FRDGBufferSRV* LightsSRV);
 
-	void GenerateInternalLevels(FRDGBuilder& GraphBuilder, int levelGroupSize);
+	void GenerateInternalLevels(FRDGBuilder& GraphBuilder);
 	void GenerateMultipleLevels(FRDGBuilder& GraphBuilder, int srcLevel, int dstLevelStart, int dstLevelEnd);
 
 	void FindLightCuts(
@@ -71,7 +71,7 @@ public:
 		FRDGBuilder& GraphBuilder, 
 		int showLevel);
 
-	void BuildVizNodes(FRDGBuilder& GraphBuilder, int numNodes, bool needLevelIds);
+	void BuildVizNodes(FRDGBuilder& GraphBuilder, int numNodes);
 
 	void VisualizeNodesLevel(const FScene& Scene,
 		const FViewInfo& View, 
@@ -87,6 +87,74 @@ public:
 
 public:
 	FRDGBufferRef	LightNodesBuffer, BLASViZBuffer, IndexKeyList, ListCounter, LightCutBuffer;
+};
+
+class MeshLightTree
+{
+public:
+
+	int GetLeafStartIndex()
+	{
+		return 1 << (NumTreeLevels - 1);
+	};
+
+	inline int CalculateTreeLevels(uint32_t numLights)
+	{
+		if (numLights == 1)
+			return 2;
+		return FMath::CeilLogTwo(numLights) + 1;
+	}
+
+	void Build(FRDGBuilder& GraphBuilder,
+		int TriLightCount,
+		const FVector& SceneLightBoundMin,
+		const FVector& SceneLightBoundMax,
+		FShaderResourceViewRHIRef MeshLightIndexBuffer,
+		FShaderResourceViewRHIRef MeshLightVertexBuffer,
+		FShaderResourceViewRHIRef MeshLightInstanceBuffer,
+		FShaderResourceViewRHIRef MeshLightInstancePrimitiveBuffer);
+
+	void Sort(FRDGBuilder& GraphBuilder,
+		const FVector& SceneLightBoundMin,
+		const FVector& SceneLightBoundMax);
+
+	void GenerateLeafNodes(FRDGBuilder& GraphBuilder, 
+		FShaderResourceViewRHIRef MeshLightIndexBuffer,
+		FShaderResourceViewRHIRef MeshLightVertexBuffer,
+		FShaderResourceViewRHIRef MeshLightInstanceBuffer,
+		FShaderResourceViewRHIRef MeshLightInstancePrimitiveBuffer);
+
+	void GenerateInternalNodes(FRDGBuilder& GraphBuilder);
+	void GenerateMultipleLevels(FRDGBuilder& GraphBuilder, int srcLevel, int dstLevelStart, int dstLevelEnd);
+
+	void FindLightCuts(
+		const FScene& Scene,
+		const FViewInfo& View,
+		FRDGBuilder& GraphBuilder,
+		const FVector& LightBoundMin,
+		const FVector& LightBoundMax);
+
+	void VisualizeNodes(
+		const FScene& Scene,
+		const FViewInfo& View,
+		FRDGBuilder& GraphBuilder,
+		int showLevel);
+
+	void BuildVizNodes(FRDGBuilder& GraphBuilder, int numNodes);
+
+	void VisualizeNodesLevel(const FScene& Scene,
+		const FViewInfo& View,
+		FRDGBuilder& GraphBuilder);
+
+	uint32_t NumTriLights;
+	uint32_t QuantizationLevels;
+	uint32_t NumTreeLevels;
+	uint32_t NumTreeLights;
+	bool bEnableNodeViz = false;
+
+public:
+	FRDGBufferRef	LightNodesBuffer, BLASViZBuffer, IndexKeyList, ListCounter, LightCutBuffer;
+	FRDGBufferRef	LeafNodesBuffer;
 };
 
 extern TAutoConsoleVariable<int>& GetCVarInterleaveRate();

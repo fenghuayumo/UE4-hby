@@ -776,6 +776,8 @@ class FGlobalIlluminationRGS : public FGlobalShader
 		SHADER_PARAMETER(uint32, LeafStartIndex)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, NodesBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, LightCutBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, MeshLightNodesBuffer)
+		SHADER_PARAMETER(uint32, MeshLightLeafStartIndex)
 		SHADER_PARAMETER_SRV(StructuredBuffer<FVector>, MeshLightVertexBuffer)
 		SHADER_PARAMETER_SRV(StructuredBuffer<uint32>, MeshLightIndexBuffer)
 		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
@@ -2145,6 +2147,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationFinalGathe
 }
 #endif
 LightTree GTree;
+MeshLightTree	MeshTree;
 void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce(
 	FRDGBuilder& GraphBuilder,
 	FSceneTextureParameters& SceneTextures,
@@ -2200,6 +2203,10 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	TArray<MeshLightInstance>	meshLights;
 	uint32 InstID = 0, indexOffset = 0;
 	uint32 VertexOffset = 0;
+	const float Inf = std::numeric_limits<float>::infinity();
+	FBox MeshLightBounds;
+	MeshLightBounds.Min = FVector(-Inf, -Inf, -Inf);
+	MeshLightBounds.Max = FVector(Inf, Inf, Inf);
 	for (const auto& lightProxy : Scene->EmissiveLightProxies)
 	{
 		MeshLightInstance lightInstance; lightInstance.Transform = lightProxy->Transform;
@@ -2208,6 +2215,8 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 
 		//Positions.Insert(lightProxy->Positions, VertexOffset);
 		//IndexList.Insert(lightProxy->IndexList, indexOffset);
+		
+		MeshLightBounds += lightProxy->Bounds;
 
 		for (const auto& p : lightProxy->Positions)
 		{
@@ -2286,7 +2295,16 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	}
 	PassParameters->NumLightTriangles = meshLightTriangles.Num();
 
-	GTree.Build(GraphBuilder, PassParameters->SceneLightCount, PassParameters->LightGridParameters.SceneInfiniteLightCount,PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax, PassParameters->SceneLights, View.ViewState->FrameIndex);
+	GTree.Build(GraphBuilder, PassParameters->SceneLightCount, PassParameters->LightGridParameters.SceneInfiniteLightCount,PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax, PassParameters->SceneLights);
+	
+	MeshTree.Build(GraphBuilder, 
+		meshLightTriangles.Num(),
+		MeshLightBounds.Min , 
+		MeshLightBounds.Max,
+		PassParameters->MeshLightIndexBuffer,
+		PassParameters->MeshLightVertexBuffer,
+		PassParameters->MeshLightInstanceBuffer,
+		PassParameters->MeshLightInstancePrimitiveBuffer);
 
 	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax);
 
@@ -2329,6 +2347,8 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(GTree.LightNodesBuffer);
 	PassParameters->DistanceType = CVarLightTreeDistanceType.GetValueOnRenderThread();
 	PassParameters->LeafStartIndex = GTree.GetLeafStartIndex();
+	PassParameters->MeshLightLeafStartIndex = MeshTree.GetLeafStartIndex();
+	PassParameters->MeshLightNodesBuffer = GraphBuilder.CreateSRV(MeshTree.LightNodesBuffer);
 	FGlobalIlluminationRGS::FPermutationDomain PermutationVector;
 	PermutationVector.Set<FGlobalIlluminationRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingGlobalIlluminationEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);
 	PermutationVector.Set<FGlobalIlluminationRGS::FEnableTransmissionDim>(CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread());
@@ -2393,7 +2413,8 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 			}
 		}
 	}
-	GTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
+	//GTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
+	MeshTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
 }
 #else
 {

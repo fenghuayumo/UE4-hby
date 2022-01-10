@@ -41,6 +41,7 @@ public:
 	TArray<uint32_t>	IndexList;
 	FMatrix				Transform;
 	FVector				Emission;
+	FBox				Bounds;
 };
 
 /** Cached vertex information at the time the mesh was painted. */

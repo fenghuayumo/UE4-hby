@@ -6,7 +6,6 @@ StructuredBuffer<FLightNode> LightNodes;
 StructuredBuffer<uint2> NodeBLASId;
 
 int NumNodes;
-int NeedLevelIds; 
 
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
 void BuildVisNodeCS( uint3 DTid : SV_DispatchThreadID )
@@ -17,7 +16,7 @@ void BuildVisNodeCS( uint3 DTid : SV_DispatchThreadID )
 
 		int nodeID = DTid.x;
         vn.Index = -1;
-        if (!NeedLevelIds) vn.Level = uintLog2(DTid.x);
+        vn.Level = uintLog2(DTid.x);
 
 		FLightNode node = LightNodes[nodeID];
 		if (node.Intensity == 0)

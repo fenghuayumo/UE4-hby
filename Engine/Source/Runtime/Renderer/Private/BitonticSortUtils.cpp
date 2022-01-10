@@ -197,13 +197,14 @@ void FBitonicSortUtils::Sort(FRDGBuilder& GraphBuilder,
 	 //indirect dispatches will be skipped over with thread counts of 0.
 	for (uint32_t k = 4096; k <= AlignedMaxNumElements; k *= 2)
 	{
-		FBitonicOutterSortCS::FPermutationDomain PermutationVector;
-		PermutationVector.Set<FBitonicSortBitDim>(ElementSizeBytes == 8);
-		auto OutterComputeShader = GetGlobalShaderMap(ERHIFeatureLevel::SM5)->GetShader<FBitonicOutterSortCS>(PermutationVector);
-		//TShaderMapRef<FBitonicOutterSortCS> OutterComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
-		FBitonicOutterSortCS::FParameters* OutPassParameters = GraphBuilder.AllocParameters<FBitonicOutterSortCS::FParameters>();
 		for (uint32_t j = k / 2; j >= 2048; j /= 2)
 		{
+			FBitonicOutterSortCS::FPermutationDomain PermutationVector;
+			PermutationVector.Set<FBitonicSortBitDim>(ElementSizeBytes == 8);
+			auto OutterComputeShader = GetGlobalShaderMap(ERHIFeatureLevel::SM5)->GetShader<FBitonicOutterSortCS>(PermutationVector);
+			//TShaderMapRef<FBitonicOutterSortCS> OutterComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+			FBitonicOutterSortCS::FParameters* OutPassParameters = GraphBuilder.AllocParameters<FBitonicOutterSortCS::FParameters>();
+
 			OutPassParameters->SortCommonParameters = CommonParameters;
 			OutPassParameters->g_SortBuffer = GraphBuilder.CreateUAV(KeyIndexList, EPixelFormat::PF_R8_UINT);
 			OutPassParameters->k = k;

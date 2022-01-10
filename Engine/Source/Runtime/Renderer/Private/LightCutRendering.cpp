@@ -172,7 +172,7 @@ class FGenerateMortonCodeCS : public FGlobalShader
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 		//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
-		OutEnvironment.SetDefine(TEXT("LIGHT_CUT_THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
 		OutEnvironment.SetDefine(TEXT("GEN_MORTONCODE"), 1);
 	}
 
@@ -208,7 +208,7 @@ class FGenerateLevelZeroCS : public FGlobalShader
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 		//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
-		OutEnvironment.SetDefine(TEXT("LIGHT_CUT_THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
 		OutEnvironment.SetDefine(TEXT("GEN_LEVEL_ZERO"), 1);
 	}
 	static uint32 GetThreadBlockSize() 
@@ -241,7 +241,7 @@ class FGenerateLevelUpCS : public FGlobalShader
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 		//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
-		OutEnvironment.SetDefine(TEXT("LIGHT_CUT_THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
 		OutEnvironment.SetDefine(TEXT("GEN_LEVEL_UP"), 1);
 	}
 	static uint32 GetThreadBlockSize() 
@@ -257,6 +257,110 @@ class FGenerateLevelUpCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FLightNode>, LightNodes)
 	END_SHADER_PARAMETER_STRUCT()
 };
+
+
+class FGenerateMeshLightMortonCodeCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FGenerateMeshLightMortonCodeCS)
+	SHADER_USE_PARAMETER_STRUCT(FGenerateMeshLightMortonCodeCS, FGlobalShader)
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+		OutEnvironment.SetDefine(TEXT("GEN_MORTONCODE"), 1);
+	}
+
+	static uint32 GetThreadBlockSize()
+	{
+		return 512;
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, LeafNodes)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, keyIndexList)
+		SHADER_PARAMETER(FVector, SceneLightBoundsMin)
+		SHADER_PARAMETER(FVector, SceneLightDimension)
+		SHADER_PARAMETER(uint32, NumTriangleLights)
+		SHADER_PARAMETER(int, QuantLevels)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+class FReorderLightByKeyCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FReorderLightByKeyCS)
+	SHADER_USE_PARAMETER_STRUCT(FReorderLightByKeyCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+		OutEnvironment.SetDefine(TEXT("REORDER_LIGHT"), 1);
+	}
+
+	static uint32 GetThreadBlockSize()
+	{
+		return 512;
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, LeafNodes)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, keyIndexList)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FLightNode>, LightNodes)
+		SHADER_PARAMETER(int, NumTriLights)
+		SHADER_PARAMETER(int, LeafOffset)
+		SHADER_PARAMETER(int, NumLeafs)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+class FGenerateLevelMeshLightLeafNodesCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FGenerateLevelMeshLightLeafNodesCS)
+	SHADER_USE_PARAMETER_STRUCT(FGenerateLevelMeshLightLeafNodesCS, FGlobalShader)
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+		OutEnvironment.SetDefine(TEXT("GEN_LEVEL_ZERO"), 1);
+	}
+	static uint32 GetThreadBlockSize()
+	{
+		return 512;
+	}
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+
+		SHADER_PARAMETER(uint32, NumTriangleLights)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FLightNode>, LeafNodes)
+		SHADER_PARAMETER_SRV(StructuredBuffer<float3>, MeshLightVertexBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<uint>, MeshLightIndexBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstance>, MeshLightInstanceBuffer)
+
+	END_SHADER_PARAMETER_STRUCT()
+};
+
 
 class FBuildVizNodeCS : public FGlobalShader
 {
@@ -284,7 +388,6 @@ class FBuildVizNodeCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, LightNodes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector2<uint32>>, NodeBLASId)
 		SHADER_PARAMETER(int, NumNodes)
-		SHADER_PARAMETER(int, NeedLevelIds)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -337,6 +440,10 @@ IMPLEMENT_GLOBAL_SHADER(FBuildVizNodeCS, "/Engine/Private/LightCut/BuildVisNode.
 IMPLEMENT_GLOBAL_SHADER(FVisualizeNodeShaderVS, "/Engine/Private/LightCut/VisualizeLightNode.usf", "ViszLightTreeVS", SF_Vertex);
 IMPLEMENT_GLOBAL_SHADER(FVisualizeNodeShaderPS, "/Engine/Private/LightCut/VisualizeLightNode.usf", "ViszLightTreePS", SF_Pixel);
 
+IMPLEMENT_GLOBAL_SHADER(FGenerateMeshLightMortonCodeCS, "/Engine/Private/LightCut/GenerateMeshLightNode.usf", "GenMortonCode", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FGenerateLevelMeshLightLeafNodesCS, "/Engine/Private/LightCut/GenerateMeshLightNode.usf", "GenerateLeafNode", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FReorderLightByKeyCS, "/Engine/Private/LightCut/GenerateMeshLightNode.usf", "ReoderLightByKeyCS", SF_Compute);
+
 
 DECLARE_GPU_STAT_NAMED(LightTreeBuild, TEXT("Light Tree Build"));
 DECLARE_GPU_STAT_NAMED(MortonCodeSort, TEXT("MortonCodeSort"));
@@ -345,12 +452,15 @@ DECLARE_GPU_STAT_NAMED(LightTreeGenerateInternalLevels, TEXT("GenerateInternalLe
 DECLARE_GPU_STAT_NAMED(LightNode_Visualizations, TEXT("LightNode Visualizations"));
 DECLARE_GPU_STAT_NAMED(LightCutsFinder, TEXT("Find LightCuts"));
 
+DECLARE_GPU_STAT_NAMED(MeshLightMortonCodeSort, TEXT("MeshLightMortonCodeSort"));
+DECLARE_GPU_STAT_NAMED(MeshLightTreeGenerateLeafeNodes, TEXT("MeshLightGenerateLeafeNodes"));
+DECLARE_GPU_STAT_NAMED(MeshLightTreeGenerateInternalNodes, TEXT("MeshLightGenerateInternalNodes"));
+
 void LightTree::Init(int _numLights, int _quantizationLevels)
 {
 	NumLights = _numLights;
 	QuantizationLevels = _quantizationLevels;
 	NumFiniteLights = NumLights - SceneInfiniteLightCount;
-	int numBboxGroups = (RAY_TRACING_LIGHT_COUNT_MAXIMUM + 1023) / 1024;
 
 	// compute nearest power of two
 	
@@ -358,7 +468,7 @@ void LightTree::Init(int _numLights, int _quantizationLevels)
 	NumTreeLights = 1 << (NumTreeLevels - 1);//the light number of the leaf level 
 }
 
-void LightTree::Build(FRDGBuilder& GraphBuilder, int lightCounts,int InfiniteLightCount, const FVector& SceneLightBoundMin, const FVector& SceneLightBoundMax, FRDGBufferSRV* LightsSRV, int frameId)
+void LightTree::Build(FRDGBuilder& GraphBuilder, int lightCounts,int InfiniteLightCount, const FVector& SceneLightBoundMin, const FVector& SceneLightBoundMax, FRDGBufferSRV* LightsSRV)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, LightTreeBuild);
 	RDG_EVENT_SCOPE(GraphBuilder, "Build Ligh Tree");
@@ -383,10 +493,10 @@ void LightTree::Build(FRDGBuilder& GraphBuilder, int lightCounts,int InfiniteLig
 	Sort(GraphBuilder, SceneLightBoundMin, SceneLightBoundMax, LightsSRV);
 	// fill level zero
 	GenerateLevelZero(GraphBuilder, SceneLightBoundMin, SceneLightBoundMax, LightsSRV);
-	GenerateInternalLevels(GraphBuilder, 4);
+	GenerateInternalLevels(GraphBuilder);
 	if (bEnableNodeViz)
 	{
-		BuildVizNodes(GraphBuilder,2 * NumTreeLights, false);
+		BuildVizNodes(GraphBuilder,2 * NumTreeLights);
 	}
 }
 
@@ -442,7 +552,7 @@ void LightTree::GenerateLevelZero(FRDGBuilder& GraphBuilder,
 		FComputeShaderUtils::GetGroupCount(NumTreeLights, FGenerateLevelZeroCS::GetThreadBlockSize()));
 }
 
-void LightTree::GenerateInternalLevels(FRDGBuilder& GraphBuilder, int levelGroupSize)
+void LightTree::GenerateInternalLevels(FRDGBuilder& GraphBuilder)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, LightTreeGenerateInternalLevels);
 	RDG_EVENT_SCOPE(GraphBuilder, "GenerateInternalLevels");
@@ -532,17 +642,16 @@ void LightTree::FindLightCuts(
 		FComputeShaderUtils::GetGroupCount(DispatchResolution, FFindLightCutsCS::GetThreadBlockSize()));
 }
 
-void LightTree::BuildVizNodes(FRDGBuilder& GraphBuilder, int numNodes, bool needLevelIds)
+void LightTree::BuildVizNodes(FRDGBuilder& GraphBuilder, int numNodes)
 {
 	TShaderMapRef<FBuildVizNodeCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
 	FBuildVizNodeCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FBuildVizNodeCS::FParameters>();
 	PassParameters->NumNodes = numNodes;
-	PassParameters->NeedLevelIds = needLevelIds;
 	PassParameters->VizNodes = GraphBuilder.CreateUAV(BLASViZBuffer);
 	PassParameters->LightNodes = GraphBuilder.CreateSRV(LightNodesBuffer);
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,
-		RDG_EVENT_NAME("GenerateLevelZero"),
+		RDG_EVENT_NAME("BuildVizNodes"),
 		ComputeShader,
 		PassParameters,
 		FComputeShaderUtils::GetGroupCount(numNodes, FBuildVizNodeCS::GetThreadBlockSize()));
@@ -552,6 +661,196 @@ void LightTree::VisualizeNodesLevel(
 	const FScene& Scene,
 	const FViewInfo& View,
 	FRDGBuilder& GraphBuilder)
+{
+	if (bEnableNodeViz)
+	{
+		auto level = CVarVizLightTreeLevel.GetValueOnRenderThread();
+		VisualizeNodes(Scene, View, GraphBuilder, level);
+	}
+}
+
+
+void MeshLightTree::Build(FRDGBuilder& GraphBuilder, 
+	int TriLightCount,
+	const FVector& SceneLightBoundMin,
+	const FVector& SceneLightBoundMax,
+	FShaderResourceViewRHIRef MeshLightIndexBuffer,
+	FShaderResourceViewRHIRef MeshLightVertexBuffer,
+	FShaderResourceViewRHIRef MeshLightInstanceBuffer,
+	FShaderResourceViewRHIRef MeshLightInstancePrimitiveBuffer)
+{
+	//RDG_GPU_STAT_SCOPE(GraphBuilder, LightTreeBuild);
+	//RDG_EVENT_SCOPE(GraphBuilder, "Build Ligh Tree");
+
+	bEnableNodeViz = CVarVizLightNodeEnable.GetValueOnRenderThread();
+	NumTriLights = TriLightCount;
+	QuantizationLevels = 1024;
+
+	// compute nearest power of two
+	NumTreeLevels = CalculateTreeLevels(NumTriLights);
+	NumTreeLights = 1 << (NumTreeLevels - 1);//the light number of the leaf level 
+
+	uint32 numStorageNodes = 2 * NumTreeLights;
+
+	{
+		size_t DataSize = sizeof(FLightNode) * FMath::Max(numStorageNodes, 1u);
+		FRDGBufferDesc BufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FLightNode), FMath::Max(numStorageNodes, 1u));
+		LightNodesBuffer = GraphBuilder.CreateBuffer(BufferDesc, TEXT("MeshLightNodesBuffer")/*, ERDGBufferFlags::MultiFrame*/);
+
+		LeafNodesBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(FLightNode), FMath::Max(NumTriLights, 1u)), TEXT("LeafNodesBuffer")/*, ERDGBufferFlags::MultiFrame*/);
+		BLASViZBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(FVizLightNode), FMath::Max(numStorageNodes, 1u)), TEXT("Mesh Light Viz Nodes"));
+		IndexKeyList = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(uint64), FMath::Max(NumTriLights, 1u)), TEXT("MeshLight GPU Sort List"));
+		uint32_t ListCount[1] = { NumTriLights };
+		ListCounter = CreateVertexBuffer(GraphBuilder, TEXT("MeshLight GPU List Counter"), FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), 1), ListCount, sizeof(ListCount));
+	}
+
+	// fill level zero
+	GenerateLeafNodes(GraphBuilder, 
+		MeshLightIndexBuffer, 
+		MeshLightVertexBuffer,
+		MeshLightInstanceBuffer,
+		MeshLightInstancePrimitiveBuffer);
+
+	Sort(GraphBuilder, SceneLightBoundMin, SceneLightBoundMax);
+
+	GenerateInternalNodes(GraphBuilder);
+	if (bEnableNodeViz)
+	{
+		BuildVizNodes(GraphBuilder, 2 * NumTreeLights);
+	}
+}
+
+void MeshLightTree::Sort(FRDGBuilder& GraphBuilder, 
+	const FVector& SceneLightBoundMin, 
+	const FVector& SceneLightBoundMax)
+{
+	RDG_GPU_STAT_SCOPE(GraphBuilder, MeshLightMortonCodeSort);
+	RDG_EVENT_SCOPE(GraphBuilder, "MeshLightMortonCodeSort");
+
+	//Generate Morton Code
+	TShaderMapRef<FGenerateMeshLightMortonCodeCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+	FGenerateMeshLightMortonCodeCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGenerateMeshLightMortonCodeCS::FParameters>();
+	PassParameters->LeafNodes = GraphBuilder.CreateSRV(LeafNodesBuffer);
+	PassParameters->keyIndexList = GraphBuilder.CreateUAV(IndexKeyList, EPixelFormat::PF_R8_UINT);
+	PassParameters->SceneLightDimension = SceneLightBoundMax - SceneLightBoundMin;
+	PassParameters->SceneLightBoundsMin = SceneLightBoundMin;
+	PassParameters->QuantLevels = QuantizationLevels;
+	PassParameters->NumTriangleLights = NumTriLights;
+
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("MeshLightGenerateMortonCode"),
+		ComputeShader,
+		PassParameters,
+		FComputeShaderUtils::GetGroupCount(NumTriLights, FGenerateMeshLightMortonCodeCS::GetThreadBlockSize()));
+
+	FBitonicSortUtils::Sort(GraphBuilder, IndexKeyList, ListCounter, 0, false, true);
+
+	TShaderMapRef<FReorderLightByKeyCS> ReorderComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+	uint32 NumLeafs = 1 << (NumTreeLevels - 1);
+	FReorderLightByKeyCS::FParameters* ReoderPassParameters = GraphBuilder.AllocParameters<FReorderLightByKeyCS::FParameters>();
+	ReoderPassParameters->LeafNodes = GraphBuilder.CreateSRV(LeafNodesBuffer);
+	ReoderPassParameters->keyIndexList = GraphBuilder.CreateSRV(IndexKeyList, EPixelFormat::PF_R8_UINT);
+	ReoderPassParameters->NumTriLights = NumTriLights;
+	ReoderPassParameters->LeafOffset = GetLeafStartIndex();
+	ReoderPassParameters->LightNodes = GraphBuilder.CreateUAV(LightNodesBuffer);
+	ReoderPassParameters->NumLeafs = NumLeafs;
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("ReorderLightByKeyCS"),
+		ReorderComputeShader,
+		ReoderPassParameters,
+		FComputeShaderUtils::GetGroupCount(NumLeafs, FReorderLightByKeyCS::GetThreadBlockSize()));
+
+}
+
+void MeshLightTree::GenerateLeafNodes(FRDGBuilder& GraphBuilder, 
+	FShaderResourceViewRHIRef MeshLightIndexBuffer,
+	FShaderResourceViewRHIRef MeshLightVertexBuffer,
+	FShaderResourceViewRHIRef MeshLightInstanceBuffer,
+	FShaderResourceViewRHIRef MeshLightInstancePrimitiveBuffer)
+{
+	RDG_GPU_STAT_SCOPE(GraphBuilder, MeshLightTreeGenerateLeafeNodes);
+	RDG_EVENT_SCOPE(GraphBuilder, "MeshLightGenerateLeafNodes");
+	TShaderMapRef<FGenerateLevelMeshLightLeafNodesCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+	FGenerateLevelMeshLightLeafNodesCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGenerateLevelMeshLightLeafNodesCS::FParameters>();
+	PassParameters->NumTriangleLights = NumTriLights;
+	PassParameters->LeafNodes = GraphBuilder.CreateUAV(LeafNodesBuffer);
+	PassParameters->MeshLightIndexBuffer = MeshLightIndexBuffer;
+	PassParameters->MeshLightVertexBuffer = MeshLightVertexBuffer;
+	PassParameters->MeshLightInstanceBuffer = MeshLightInstanceBuffer;
+	PassParameters->MeshLightInstancePrimitiveBuffer = MeshLightInstancePrimitiveBuffer;
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("MeshLightGenerateLeafNodes"),
+		ComputeShader,
+		PassParameters,
+		FComputeShaderUtils::GetGroupCount(NumTriLights, FGenerateLevelMeshLightLeafNodesCS::GetThreadBlockSize()));
+}
+
+void MeshLightTree::GenerateInternalNodes(FRDGBuilder& GraphBuilder)
+{
+	RDG_GPU_STAT_SCOPE(GraphBuilder, MeshLightTreeGenerateInternalNodes);
+	RDG_EVENT_SCOPE(GraphBuilder, "MeshLightGenerateInternalNodes");
+	{
+		const int maxWorkLoad = 2048;
+		int srcLevel = 0;
+		for (uint32 dstLevelStart = 1; dstLevelStart < NumTreeLevels; )
+		{
+			uint32 dstLevelEnd;
+			int workLoad = 0;
+			for (dstLevelEnd = dstLevelStart + 1; dstLevelEnd < NumTreeLevels; dstLevelEnd++)
+			{
+				workLoad += 1 << (NumTreeLevels - 1 - srcLevel);
+				if (workLoad > maxWorkLoad) break;
+			}
+			GenerateMultipleLevels(GraphBuilder, srcLevel, dstLevelStart, dstLevelEnd);
+
+			srcLevel = dstLevelEnd - 1;
+			dstLevelStart = dstLevelEnd;
+		}
+	}
+}
+
+void MeshLightTree::GenerateMultipleLevels(FRDGBuilder& GraphBuilder, int srcLevel, int dstLevelStart, int dstLevelEnd)
+{
+	TShaderMapRef<FGenerateLevelUpCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+	FGenerateLevelUpCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGenerateLevelUpCS::FParameters>();
+	PassParameters->SrcLevel = srcLevel;
+	PassParameters->DstLevelStart = dstLevelStart;
+	PassParameters->DstLevelEnd = dstLevelEnd;
+	PassParameters->NumLevels = NumTreeLevels;
+	PassParameters->NumDstLevelsLights = (1 << (NumTreeLevels - dstLevelStart)) - (1 << (NumTreeLevels - dstLevelEnd));
+	PassParameters->LightNodes = GraphBuilder.CreateUAV(LightNodesBuffer);
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("MeshLightGenerateMultipleLevels"),
+		ComputeShader,
+		PassParameters,
+		FComputeShaderUtils::GetGroupCount(PassParameters->NumDstLevelsLights, FGenerateLevelUpCS::GetThreadBlockSize()));
+}
+
+void MeshLightTree::FindLightCuts(const FScene& Scene, const FViewInfo& View, FRDGBuilder& GraphBuilder, const FVector& LightBoundMin, const FVector& LightBoundMax)
+{
+
+}
+
+void MeshLightTree::BuildVizNodes(FRDGBuilder& GraphBuilder, int numNodes)
+{
+	TShaderMapRef<FBuildVizNodeCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+	FBuildVizNodeCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FBuildVizNodeCS::FParameters>();
+	PassParameters->NumNodes = numNodes;
+	PassParameters->VizNodes = GraphBuilder.CreateUAV(BLASViZBuffer);
+	PassParameters->LightNodes = GraphBuilder.CreateSRV(LightNodesBuffer);
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("BuildVizNodes"),
+		ComputeShader,
+		PassParameters,
+		FComputeShaderUtils::GetGroupCount(numNodes, FBuildVizNodeCS::GetThreadBlockSize()));
+}
+
+void MeshLightTree::VisualizeNodesLevel(const FScene& Scene, const FViewInfo& View, FRDGBuilder& GraphBuilder)
 {
 	if (bEnableNodeViz)
 	{
@@ -783,6 +1082,69 @@ void LightTree::VisualizeNodes(
 			RHICmdList.SetStreamSource(0, GVizNodeVertexBuffer.VertexBufferRHI, 0); 
 			RHICmdList.DrawPrimitive(0, GVizNodeVertexBuffer.GetVertexCount() / 2, NumInstances);
 	/*		RHICmdList.DrawIndexedPrimitive(GVizNodeIndexBuffer.IndexBufferRHI, 0, 0, GVizNodeVertexBuffer.GetVertexCount(), 0, GVizNodeIndexBuffer.GetIndexCount() / 3, NumInstances);*/
+		}
+	);
+}
+
+void MeshLightTree::VisualizeNodes(const FScene& Scene, const FViewInfo& View, FRDGBuilder& GraphBuilder, int showLevel)
+{
+	RDG_GPU_STAT_SCOPE(GraphBuilder, LightNode_Visualizations);
+	RDG_EVENT_SCOPE(GraphBuilder, "LightNode Visualizations");
+
+	FIntRect ViewRect = View.ViewRect;
+	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
+	FRDGTextureRef SceneColorTexture = GraphBuilder.RegisterExternalTexture(SceneContext.GetSceneColor());
+	FRDGTextureRef SceneDepthTexture = GraphBuilder.RegisterExternalTexture(SceneContext.SceneDepthZ);
+
+	// Get the shader permutation
+	FVisualizeNodeShaderVS::FPermutationDomain PermutationVectorVS;
+	FVisualizeNodeShaderPS::FPermutationDomain PermutationVectorPS;
+
+	FGlobalShaderMap* GlobalShaderMap = GetGlobalShaderMap(ERHIFeatureLevel::SM5);
+	TShaderMapRef<FVisualizeNodeShaderVS> VertexShader(GlobalShaderMap, PermutationVectorVS);
+	TShaderMapRef<FVisualizeNodeShaderPS> PixelShader(GlobalShaderMap, PermutationVectorPS);
+
+	// Set shader pass parameters
+	FVisualizeShaderParameters DefaultPassParameters;
+	FVisualizeShaderParameters* PassParameters = GraphBuilder.AllocParameters<FVisualizeShaderParameters>();
+	*PassParameters = DefaultPassParameters;
+
+	PassParameters->ShowLevel = showLevel - 1;
+	PassParameters->MVP = View.ViewMatrices.GetViewProjectionMatrix();
+	PassParameters->VizNodes = GraphBuilder.CreateSRV(BLASViZBuffer);
+	PassParameters->RenderTargets[0] = FRenderTargetBinding(SceneColorTexture, ERenderTargetLoadAction::ELoad);
+	PassParameters->RenderTargets.DepthStencil = FDepthStencilBinding(SceneDepthTexture, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ENoAction, FExclusiveDepthStencil::DepthWrite_StencilNop);
+
+	uint32 NumInstances = uint32(BLASViZBuffer->Desc.NumElements);
+
+	GraphBuilder.AddPass(
+		Forward<FRDGEventName>(RDG_EVENT_NAME("Visualize Nodes")),
+		PassParameters,
+		ERDGPassFlags::Raster,
+		[PassParameters, GlobalShaderMap, VertexShader, PixelShader, ViewRect, NumInstances](FRHICommandList& RHICmdList)
+		{
+			RHICmdList.SetViewport(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, ViewRect.Max.X, ViewRect.Max.Y, 1.0f);
+
+			FGraphicsPipelineStateInitializer GraphicsPSOInit;
+			RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+
+			GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Wireframe, CM_CCW>::GetRHI();
+			GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<true, CF_DepthNearOrEqual>::GetRHI();
+			GraphicsPSOInit.BlendState = TStaticBlendStateWriteMask<CW_RGB, CW_RGBA>::GetRHI();
+
+			GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GVisualizeNodeVertexDeclaration.VertexDeclarationRHI;
+			GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
+			GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
+			GraphicsPSOInit.PrimitiveType = PT_LineList;
+
+			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+
+			SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), *PassParameters);
+			SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
+
+			RHICmdList.SetStreamSource(0, GVizNodeVertexBuffer.VertexBufferRHI, 0);
+			RHICmdList.DrawPrimitive(0, GVizNodeVertexBuffer.GetVertexCount() / 2, NumInstances);
+			/*		RHICmdList.DrawIndexedPrimitive(GVizNodeIndexBuffer.IndexBufferRHI, 0, 0, GVizNodeVertexBuffer.GetVertexCount(), 0, GVizNodeIndexBuffer.GetIndexCount() / 3, NumInstances);*/
 		}
 	);
 }
