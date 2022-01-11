@@ -776,6 +776,7 @@ class FGlobalIlluminationRGS : public FGlobalShader
 		SHADER_PARAMETER(uint32, LeafStartIndex)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, NodesBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, LightCutBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, MeshLightCutBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, MeshLightNodesBuffer)
 		SHADER_PARAMETER(uint32, MeshLightLeafStartIndex)
 		SHADER_PARAMETER_SRV(StructuredBuffer<FVector>, MeshLightVertexBuffer)
@@ -2205,38 +2206,44 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	uint32 VertexOffset = 0;
 	const float Inf = std::numeric_limits<float>::infinity();
 	FBox MeshLightBounds;
-	MeshLightBounds.Min = FVector(-Inf, -Inf, -Inf);
-	MeshLightBounds.Max = FVector(Inf, Inf, Inf);
-	for (const auto& lightProxy : Scene->EmissiveLightProxies)
+	MeshLightBounds.Max = FVector(-Inf, -Inf, -Inf);
+	MeshLightBounds.Min = FVector(Inf, Inf, Inf);
+	FEmissiveLightMesh* CurrentEMesh = nullptr;
+	for (auto LightProxIndex = 0; LightProxIndex < Scene->EmissiveLightProxies.Num(); LightProxIndex++)
 	{
-		MeshLightInstance lightInstance; lightInstance.Transform = lightProxy->Transform;
+		const auto& lightProxy = Scene->EmissiveLightProxies[LightProxIndex];
+		MeshLightInstance lightInstance; 
+		lightInstance.Transform = lightProxy->Transform;
 		lightInstance.Emission = lightProxy->Emission;
 		meshLights.Add(lightInstance);
-
-		//Positions.Insert(lightProxy->Positions, VertexOffset);
-		//IndexList.Insert(lightProxy->IndexList, indexOffset);
 		
 		MeshLightBounds += lightProxy->Bounds;
-
-		for (const auto& p : lightProxy->Positions)
+		if (CurrentEMesh != lightProxy->EmissiveMesh)
 		{
-			Positions.Add(p);
+			CurrentEMesh = lightProxy->EmissiveMesh;
+			for (const auto& p : CurrentEMesh->Positions)
+			{
+				Positions.Add(p);
+			}
+			for (int32 idx = 0; idx < CurrentEMesh->IndexList.Num(); idx++)
+			{
+				auto idx0 = CurrentEMesh->IndexList[idx] + VertexOffset;
+				IndexList.Add(idx0);
+			}
+
 		}
-		for (int32 i = 0; i < lightProxy->IndexList.Num() / 3; i++)
+		for (int32 i = 0; i < CurrentEMesh->IndexList.Num() / 3; i++)
 		{
 			MeshLightInstanceTriangle tri;
 			tri.IndexOffset = i * 3 + indexOffset;
 			tri.InstanceID = InstID;
 			meshLightTriangles.Add(tri);
-			auto idx0 = lightProxy->IndexList[i * 3] + VertexOffset;
-			auto idx1 = lightProxy->IndexList[i*3+1] + VertexOffset;
-			auto idx2 = lightProxy->IndexList[i*3+2] + VertexOffset;
-			IndexList.Add(idx0);
-			IndexList.Add(idx1);
-			IndexList.Add(idx2);
 		}
-		indexOffset += lightProxy->IndexList.Num();
-		VertexOffset += lightProxy->Positions.Num();
+		if (LightProxIndex < (Scene->EmissiveLightProxies.Num()-1)  && CurrentEMesh != Scene->EmissiveLightProxies[LightProxIndex+1]->EmissiveMesh)
+		{
+			indexOffset += CurrentEMesh->IndexList.Num();
+			VertexOffset += CurrentEMesh->Positions.Num();
+		}
 		InstID++;
 	}
 
@@ -2307,6 +2314,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 		PassParameters->MeshLightInstancePrimitiveBuffer);
 
 	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax);
+	MeshTree.FindLightCuts(*Scene, View, GraphBuilder, MeshLightBounds.Min, MeshLightBounds.Max);
 
 	PassParameters->SceneTextures = SceneTextures;
 	PassParameters->AccumulateEmissive = FMath::Clamp(CVarRayTracingGlobalIlluminationAccumulateEmissive.GetValueOnRenderThread(), 0, 1);
@@ -2348,6 +2356,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	PassParameters->DistanceType = CVarLightTreeDistanceType.GetValueOnRenderThread();
 	PassParameters->LeafStartIndex = GTree.GetLeafStartIndex();
 	PassParameters->MeshLightLeafStartIndex = MeshTree.GetLeafStartIndex();
+	PassParameters->MeshLightCutBuffer = GraphBuilder.CreateSRV(MeshTree.LightCutBuffer);
 	PassParameters->MeshLightNodesBuffer = GraphBuilder.CreateSRV(MeshTree.LightNodesBuffer);
 	FGlobalIlluminationRGS::FPermutationDomain PermutationVector;
 	PermutationVector.Set<FGlobalIlluminationRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingGlobalIlluminationEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);

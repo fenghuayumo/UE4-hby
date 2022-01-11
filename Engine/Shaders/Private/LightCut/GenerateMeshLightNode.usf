@@ -86,13 +86,13 @@ void GenerateLeafNode(uint3 DTid : SV_DispatchThreadID)
         MeshLightInstanceTriangle prim = MeshLightInstancePrimitiveBuffer[triId];
         float4x4 transform = MeshLightInstanceBuffer[prim.InstanceID].Transform;
 
-		// uint v0 = MeshLightIndexBuffer[prim.IndexOffset];
-		// uint v1 = MeshLightIndexBuffer[prim.IndexOffset + 1];
-		// uint v2 = MeshLightIndexBuffer[prim.IndexOffset + 2];
+		uint v0 = MeshLightIndexBuffer[prim.IndexOffset];
+		uint v1 = MeshLightIndexBuffer[prim.IndexOffset + 1];
+		uint v2 = MeshLightIndexBuffer[prim.IndexOffset + 2];
 
-        uint v0 = MeshLightIndexBuffer[3 * triId];
-		uint v1 = MeshLightIndexBuffer[3 * triId + 1];
-		uint v2 = MeshLightIndexBuffer[3 * triId + 2];
+        // uint v0 = MeshLightIndexBuffer[3 * triId];
+		// uint v1 = MeshLightIndexBuffer[3 * triId + 1];
+		// uint v2 = MeshLightIndexBuffer[3 * triId + 2];
 
         const float3 p0 = mul(float4(MeshLightVertexBuffer[v0],1.0), transform).xyz;
         const float3 p1 = mul(float4(MeshLightVertexBuffer[v1],1.0), transform).xyz;

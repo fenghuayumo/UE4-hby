@@ -452,9 +452,11 @@ DECLARE_GPU_STAT_NAMED(LightTreeGenerateInternalLevels, TEXT("GenerateInternalLe
 DECLARE_GPU_STAT_NAMED(LightNode_Visualizations, TEXT("LightNode Visualizations"));
 DECLARE_GPU_STAT_NAMED(LightCutsFinder, TEXT("Find LightCuts"));
 
+DECLARE_GPU_STAT_NAMED(MeshLightTreeBuild, TEXT("MeshLight Tree Build"));
 DECLARE_GPU_STAT_NAMED(MeshLightMortonCodeSort, TEXT("MeshLightMortonCodeSort"));
 DECLARE_GPU_STAT_NAMED(MeshLightTreeGenerateLeafeNodes, TEXT("MeshLightGenerateLeafeNodes"));
 DECLARE_GPU_STAT_NAMED(MeshLightTreeGenerateInternalNodes, TEXT("MeshLightGenerateInternalNodes"));
+DECLARE_GPU_STAT_NAMED(MeshLightCutsFinder, TEXT("Find Mesh LightCuts"));
 
 void LightTree::Init(int _numLights, int _quantizationLevels)
 {
@@ -679,8 +681,8 @@ void MeshLightTree::Build(FRDGBuilder& GraphBuilder,
 	FShaderResourceViewRHIRef MeshLightInstanceBuffer,
 	FShaderResourceViewRHIRef MeshLightInstancePrimitiveBuffer)
 {
-	//RDG_GPU_STAT_SCOPE(GraphBuilder, LightTreeBuild);
-	//RDG_EVENT_SCOPE(GraphBuilder, "Build Ligh Tree");
+	RDG_GPU_STAT_SCOPE(GraphBuilder, MeshLightTreeBuild);
+	RDG_EVENT_SCOPE(GraphBuilder, "Build Mesh Ligh Tree");
 
 	bEnableNodeViz = CVarVizLightNodeEnable.GetValueOnRenderThread();
 	NumTriLights = TriLightCount;
@@ -832,7 +834,45 @@ void MeshLightTree::GenerateMultipleLevels(FRDGBuilder& GraphBuilder, int srcLev
 
 void MeshLightTree::FindLightCuts(const FScene& Scene, const FViewInfo& View, FRDGBuilder& GraphBuilder, const FVector& LightBoundMin, const FVector& LightBoundMax)
 {
+	RDG_GPU_STAT_SCOPE(GraphBuilder, MeshLightCutsFinder);
+	RDG_EVENT_SCOPE(GraphBuilder, "MeshLightCutsFinder");
 
+	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
+	FRDGTextureRef GBufferATexture = GraphBuilder.RegisterExternalTexture(SceneContext.GBufferA);
+	FRDGTextureRef SceneDepthTexture = GraphBuilder.RegisterExternalTexture(SceneContext.SceneDepthZ);
+
+	float ScreenScale = 1.0;
+	uint32 ScaledViewSizeX = FMath::Max(1, FMath::CeilToInt(View.ViewRect.Size().X * ScreenScale));
+	uint32 ScaledViewSizeY = FMath::Max(1, FMath::CeilToInt(View.ViewRect.Size().Y * ScreenScale));
+	FIntPoint ScaledViewSize = FIntPoint(ScaledViewSizeX, ScaledViewSizeY);
+
+	int CutBlockSize = CVarCutBlockSize.GetValueOnRenderThread();
+	FIntPoint DispatchResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), CutBlockSize);
+	TShaderMapRef<FFindLightCutsCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+	FFindLightCutsCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FFindLightCutsCS::FParameters>();
+	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MAX_CUT_NODES * ((View.ViewRect.Size().X + 7) / 8) * ((View.ViewRect.Size().Y + 7) / 8)), TEXT("Mesh Light cut buffer"));
+	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(LightNodesBuffer);
+	PassParameters->LightCutBuffer = GraphBuilder.CreateUAV(LightCutBuffer);
+	PassParameters->MaxCutNodes = CVarMaxCutNodes.GetValueOnRenderThread();
+	PassParameters->CutShareGroupSize = CVarCutBlockSize.GetValueOnRenderThread();
+	PassParameters->ErrorLimit = CVarErrorLimit.GetValueOnRenderThread();
+	PassParameters->UseApproximateCosineBound = CVarUseApproximateCosineBound.GetValueOnRenderThread();
+	auto LightBound = (LightBoundMax - LightBoundMin) * 0.5;
+	PassParameters->SceneLightBoundRadius = LightBound.Size();
+
+	PassParameters->NormalTexture = GBufferATexture;
+	PassParameters->DepthTexture = SceneDepthTexture;
+	PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	PassParameters->ScaledViewSizeAndInvSize = FVector4(ScaledViewSize.X, ScaledViewSize.Y, 1.0f / ScaledViewSize.X, 1.0f / ScaledViewSize.Y);
+	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+	ClearUnusedGraphResources(ComputeShader, PassParameters);
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("LightCutsFinder"),
+		ComputeShader,
+		PassParameters,
+		FComputeShaderUtils::GetGroupCount(DispatchResolution, FFindLightCutsCS::GetThreadBlockSize()));
 }
 
 void MeshLightTree::BuildVizNodes(FRDGBuilder& GraphBuilder, int numNodes)

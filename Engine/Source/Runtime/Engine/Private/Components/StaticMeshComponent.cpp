@@ -595,6 +595,8 @@ void UStaticMeshComponent::OnUnregister()
 	Super::OnUnregister();
 }
 
+TMap<FString, TSharedPtr<FEmissiveLightMesh>>	EmissiveLightMeshCaches;
+
 void UStaticMeshComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
 {
 	LLM_SCOPE(ELLMTag::StaticMesh);
@@ -611,7 +613,10 @@ void UStaticMeshComponent::CreateRenderState_Concurrent(FRegisterComponentContex
 			auto& section = LODResources.Sections[SectionIndex];
 			int32 MaterialIndex = section.MaterialIndex;
 			auto material = GetMaterial(MaterialIndex);
-			
+			FString meshName = GetStaticMesh()->GetName() + FString("_Sec_") + FString::FromInt(SectionIndex);
+			TSharedPtr<FEmissiveLightMesh> lightMesh = EmissiveLightMeshCaches.Contains(meshName) ? *EmissiveLightMeshCaches.Find(meshName) : nullptr;
+		
+
 			if (material && material->GetMaterial()->HasEmissiveColorConnected())
 			{
 				FBox bounds;
@@ -625,21 +630,27 @@ void UStaticMeshComponent::CreateRenderState_Concurrent(FRegisterComponentContex
 				if (intensity > 0)
 				{
 					auto MeshLightProxy = new FMeshLightProxy();
-					for (uint32 VertID = section.MinVertexIndex; VertID <= section.MaxVertexIndex; VertID++)
+					if (!lightMesh)
 					{
-						const auto Pos = LODResources.VertexBuffers.PositionVertexBuffer.VertexPosition(VertID);
-						MeshLightProxy->Positions.Add(Pos);
-						bounds += Pos;
-					}
-					//MeshLightProxy->Positions.Insert((FVector*)LODResources.VertexBuffers.PositionVertexBuffer.GetVertexData(), LODResources.VertexBuffers.PositionVertexBuffer.GetNumVertices(), 0);
+						lightMesh = TSharedPtr<FEmissiveLightMesh>(new FEmissiveLightMesh());
+						EmissiveLightMeshCaches.Add(meshName, lightMesh);
+						for (uint32 VertID = section.MinVertexIndex; VertID <= section.MaxVertexIndex; VertID++)
+						{
+							const auto Pos = LODResources.VertexBuffers.PositionVertexBuffer.VertexPosition(VertID);
+							lightMesh->Positions.Add(Pos);
+							bounds += Pos;
+						}
+						//MeshLightProxy->Positions.Insert((FVector*)LODResources.VertexBuffers.PositionVertexBuffer.GetVertexData(), LODResources.VertexBuffers.PositionVertexBuffer.GetNumVertices(), 0);
 
-					for (uint32 Index = 0; Index < section.NumTriangles * 3; Index++)
-					{
-						uint32	idx = LODResources.IndexBuffer.GetIndex(section.FirstIndex + Index) - section.MinVertexIndex;
-						MeshLightProxy->IndexList.Add(idx );
+						for (uint32 Index = 0; Index < section.NumTriangles * 3; Index++)
+						{
+							uint32	idx = LODResources.IndexBuffer.GetIndex(section.FirstIndex + Index) - section.MinVertexIndex;
+							lightMesh->IndexList.Add(idx);
+						}
 					}
 					//Idx += MeshLightProxy->IndexList.Num();
 					
+					MeshLightProxy->EmissiveMesh = lightMesh.Get();
 					MeshLightProxy->Emission = FVector(emissive.R, emissive.G, emissive.B) * intensity;
 					MeshLightProxy->Transform = GetComponentTransform().ToMatrixWithScale();
 					MeshLightProxy->Bounds = GetStaticMesh()->GetMaterialBox(MaterialIndex, GetComponentTransform());

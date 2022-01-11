@@ -2444,6 +2444,10 @@ struct FMeshComputeDispatchCommand
 };
 #endif
 
+//struct FMeshLightProxyWrapper
+//{
+//
+//};
 /** 
  * Renderer scene which is private to the renderer module.
  * Ordinarily this is the renderer version of a UWorld, but an FScene can be created for previewing in editors which don't have a UWorld as well.

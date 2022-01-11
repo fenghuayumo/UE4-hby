@@ -33,12 +33,15 @@ struct FNavigationRelevantData;
 struct FStaticLightingPrimitiveInfo;
 
 
+struct FEmissiveLightMesh
+{
+	TArray<FVector>		Positions;
+	TArray<uint32_t>	IndexList;
+};
 struct FMeshLightProxy
 {
 public:
-	TArray<FVector>		Positions;
-	TArray<FVector>		Normals;
-	TArray<uint32_t>	IndexList;
+	FEmissiveLightMesh* EmissiveMesh = nullptr;
 	FMatrix				Transform;
 	FVector				Emission;
 	FBox				Bounds;

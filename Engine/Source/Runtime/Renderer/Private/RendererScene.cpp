@@ -1898,7 +1898,18 @@ void FScene::AddMeshLight(FMeshLightProxy* meshLight)
 		[Scene, meshLight](FRHICommandList&)
 		{
 			Scene->EmissiveLightProxies.Add(meshLight);
+			Scene->EmissiveLightProxies.Sort([](const FMeshLightProxy& A, const FMeshLightProxy& B) {
+				return A.EmissiveMesh < B.EmissiveMesh;
+				});
 		});
+}
+
+bool operator==(const FMeshLightProxy& p1, const FMeshLightProxy& p2 )
+{
+	return p1.Emission == p2.Emission && 
+		p1.EmissiveMesh == p2.EmissiveMesh && 
+		p1.Bounds == p2.Bounds && 
+		p1.Transform == p2.Transform;
 }
 
 void FScene::RemoveMeshLight(FMeshLightProxy* meshLight)
@@ -1908,11 +1919,7 @@ void FScene::RemoveMeshLight(FMeshLightProxy* meshLight)
 		[Scene, meshLight](FRHICommandList&)
 		{
 			Scene->EmissiveLightProxies.Remove(meshLight);
-			//if (meshLight)
-			{
-				delete meshLight;
-				//meshLight = nullptr;
-			}
+			delete meshLight;
 		});
 }
 
