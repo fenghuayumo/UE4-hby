@@ -27,30 +27,41 @@ RaytracingAccelerationStructure TLAS;
 RWTexture2D<float4> RWMeshLightIllumianceUAV;
 RWTexture2D<float2> RWMeshLightRayDistanceUAV;
 
+int DistanceType;
+int LeafStartIndex;
+
+int MaxCutNodes;
+int CutShareGroupSize;
+float ErrorLimit;
+int UseApproximateCosineBound;
+int InterleaveRate;
+
+
 StructuredBuffer<int> LightCutBuffer;
 StructuredBuffer<FLightNode> NodesBuffer;
+
+StructuredBuffer<FLightNode> MeshLightNodesBuffer;
+int 						 MeshLightLeafStartIndex;
 
 StructuredBuffer<float3>       MeshLightVertexBuffer;
 StructuredBuffer<uint>         MeshLightIndexBuffer;
 StructuredBuffer<MeshLightInstanceTriangle>    MeshLightInstancePrimitiveBuffer;
 StructuredBuffer<MeshLightInstance>   MeshLightInstanceBuffer;
 uint 							NumLightTriangles;
-bool SampleMeshLight(float3 RandSample,
+bool SampleTriangleLight(float2 RandSample,
 	float3 WorldPos,
 	float3 WorldNormal,
+	int triId,
+	float PickPdf,
 	out float3 OutDirection,
 	out float  OutDistance,
 	out float3 OutRadianceOverPdf,
 	out float OutPdf)
 {
-	if( NumLightTriangles == 0)
-		return false;
+
 	OutDirection = 0;
 	OutDistance = 0;
 	OutRadianceOverPdf = 0;
-
-	// sample a triangle
-	int triId = min(int(floor(RandSample.x * NumLightTriangles)), NumLightTriangles - 1);
 
 	MeshLightInstanceTriangle prim = MeshLightInstancePrimitiveBuffer[triId];
     const float4x4 transform = MeshLightInstanceBuffer[prim.InstanceID].Transform;
@@ -65,12 +76,12 @@ bool SampleMeshLight(float3 RandSample,
 	
 	float3  Emission = MeshLightInstanceBuffer[prim.InstanceID].Emission;
 
-	float3 LightN = -cross(p1 - p0,p2 - p0);
+	float3 LightN = cross(p2 - p0,p1 - p0);
 	float Area = 0.5 * length(LightN);
 	
-	//sample triangle
-	float e1 = RandSample.y;
-	float e2 = RandSample.z;
+	//sample a point in triangle
+	float e1 = RandSample.x;
+	float e2 = RandSample.y;
 	float beta = e2 * sqrt(1 - e1);
 	float gamma = 1 - sqrt(1 - e1);
 
@@ -82,18 +93,55 @@ bool SampleMeshLight(float3 RandSample,
 	Direction /= (LightDist + 1e-6);
 	// Direction = normalize(Direction);
 	// float LightDist = length(Direction);
-	float PickPdf = 1.0 / NumLightTriangles;
+
 	float dDotn = dot(-Direction, normalize(LightN));
 	// float pdf = dDotn < 0 ? 0 : dSquared / (Area * dDotn);
 	float Pdf = dSquared / (Area * dDotn);
 	if( Pdf <= 0) return false;
 	OutDirection = Direction;
 	OutDistance = LightDist ;
-	OutPdf = PickPdf * Pdf;
+	OutPdf = Pdf * PickPdf;
 	OutRadianceOverPdf = Emission / OutPdf;
 
 	return true;
 }
+
+bool SampleMeshLight(float3 RandSample,
+	float3 WorldPos,
+	float3 WorldNormal,
+	out float3 OutDirection,
+	out float  OutDistance,
+	out float3 OutRadianceOverPdf,
+	out float OutPdf)
+{
+	if( NumLightTriangles == 0)
+		return false;
+#if UNIFORM_MESHLIGHT_SAMPLING
+	// pick a triangle
+	int triId = min(int(floor(RandSample.x * NumLightTriangles)), NumLightTriangles - 1);
+	float LightPickPdf = 1.0 / NumLightTriangles;
+#else
+	float LightPickPdf = 1.0;
+	int triId = 0;
+	bool deadBranch = TraverseLightTree(WorldPos, WorldNormal, 1, MeshLightNodesBuffer, 
+				MeshLightLeafStartIndex, UseApproximateCosineBound, DistanceType,
+				RandSample.x,LightPickPdf,triId);
+	if( deadBranch ) return false;
+#endif
+	return SampleTriangleLight(
+		RandSample.yz,
+		WorldPos,
+		WorldNormal,
+		triId,
+		LightPickPdf,
+		OutDirection,
+		OutDistance,
+		OutRadianceOverPdf,
+		OutPdf
+	);
+
+}
+
 
 RAY_TRACING_ENTRY_RAYGEN(MeshLightRGS)
 {
@@ -193,11 +241,11 @@ RAY_TRACING_ENTRY_RAYGEN(MeshLightRGS)
                 float MaterialEvalPdf = 0.0;
 #if USE_PATHTRACING_MATERIALS
                 float3 MaterialWeight = 0;
-                EvalMaterial(Ray.Direction, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
+                EvalMaterial(CameraDirection, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
                 MaterialThroughput = MaterialWeight * MaterialEvalPdf;
 #else
                 half3 N = WorldNormal;
-                half3 V = -Ray.Direction;
+                half3 V = -CameraDirection;
                 half3 L = LightRay.Direction;
                 float NoL = saturate(dot(N, L));
                 FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
