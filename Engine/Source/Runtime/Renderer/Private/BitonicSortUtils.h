@@ -65,7 +65,7 @@
 // in the most significant bits.  Sorting 32-bit elements is faster than sorting
 // 64-bit elements because it uses less bandwidth.
 
-// The UE Implementation Reference To Microsoft MiniGameEngine
+// The UE Implementation Reference To Microsoft MiniGameEngine, The Implement is not very good, use AMD ParallelSort Lib Might be faster sorter: GPUOpen-Effects/FidelityFX-ParallelSort: FidelityFX Parallel Sort 
 
 struct FBitonicSortUtils
 {
@@ -75,6 +75,4 @@ struct FBitonicSortUtils
 		uint32_t CounterOffset,
 		bool IsPartiallyPreSorted,
 		bool SortAscending);
-
-	void Test(FRDGBuilder& GraphBuilder);
 };
