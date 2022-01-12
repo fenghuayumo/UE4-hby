@@ -2315,8 +2315,9 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 		PassParameters->MeshLightInstanceBuffer,
 		PassParameters->MeshLightInstancePrimitiveBuffer);
 
-	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax);
-	MeshTree.FindLightCuts(*Scene, View, GraphBuilder, MeshLightBounds.Min, MeshLightBounds.Max);
+	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax,
+		1.0 / UpscaleFactor);
+	MeshTree.FindLightCuts(*Scene, View, GraphBuilder, MeshLightBounds.Min, MeshLightBounds.Max, 1.0 /UpscaleFactor);
 
 	PassParameters->SceneTextures = SceneTextures;
 	PassParameters->AccumulateEmissive = FMath::Clamp(CVarRayTracingGlobalIlluminationAccumulateEmissive.GetValueOnRenderThread(), 0, 1);

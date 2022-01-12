@@ -119,6 +119,7 @@ SHADER_PARAMETER(int, CutShareGroupSize)
 SHADER_PARAMETER(float, ErrorLimit)
 SHADER_PARAMETER(int, UseApproximateCosineBound)
 SHADER_PARAMETER(float, SceneLightBoundRadius)
+SHADER_PARAMETER(float, ScreenScale)
 SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
 END_SHADER_PARAMETER_STRUCT()
 
@@ -601,7 +602,8 @@ void LightTree::FindLightCuts(
 		const FViewInfo& View, 
 		FRDGBuilder& GraphBuilder,
 		const FVector& LightBoundMin, 
-		const FVector& LightBoundMax)
+		const FVector& LightBoundMax,
+		float ScreenScale)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, LightCutsFinder);
 	RDG_EVENT_SCOPE(GraphBuilder, "LightCutsFinder");
@@ -610,16 +612,16 @@ void LightTree::FindLightCuts(
 	FRDGTextureRef GBufferATexture = GraphBuilder.RegisterExternalTexture(SceneContext.GBufferA);
 	FRDGTextureRef SceneDepthTexture = GraphBuilder.RegisterExternalTexture(SceneContext.SceneDepthZ);
 
-	float ScreenScale = 1.0;
+	//float ScreenScale = 1.0;
 	uint32 ScaledViewSizeX = FMath::Max(1, FMath::CeilToInt(View.ViewRect.Size().X * ScreenScale));
 	uint32 ScaledViewSizeY = FMath::Max(1, FMath::CeilToInt(View.ViewRect.Size().Y * ScreenScale));
 	FIntPoint ScaledViewSize = FIntPoint(ScaledViewSizeX, ScaledViewSizeY);
 
 	int CutBlockSize = CVarCutBlockSize.GetValueOnRenderThread();
-	FIntPoint DispatchResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), CutBlockSize);
+	FIntPoint DispatchResolution = FIntPoint::DivideAndRoundUp(ScaledViewSize.Size(), CutBlockSize);
 	TShaderMapRef<FFindLightCutsCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
 	FFindLightCutsCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FFindLightCutsCS::FParameters>();
-	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32),  MAX_CUT_NODES * ((View.ViewRect.Size().X + 7) / 8) * ((View.ViewRect.Size().Y + 7) / 8)), TEXT("Light cut buffer"));
+	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32),  MAX_CUT_NODES * ((ScaledViewSize.X + 7) / 8) * ((ScaledViewSize.Y + 7) / 8)), TEXT("Light cut buffer"));
 	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(LightNodesBuffer);
 	PassParameters->LightCutBuffer = GraphBuilder.CreateUAV(LightCutBuffer);
 	PassParameters->MaxCutNodes = CVarMaxCutNodes.GetValueOnRenderThread();
@@ -635,6 +637,7 @@ void LightTree::FindLightCuts(
 	PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 	PassParameters->ScaledViewSizeAndInvSize = FVector4(ScaledViewSize.X, ScaledViewSize.Y, 1.0f / ScaledViewSize.X, 1.0f / ScaledViewSize.Y);
 	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+	PassParameters->ScreenScale = ScreenScale;
 	ClearUnusedGraphResources(ComputeShader, PassParameters);
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,
@@ -832,7 +835,12 @@ void MeshLightTree::GenerateMultipleLevels(FRDGBuilder& GraphBuilder, int srcLev
 		FComputeShaderUtils::GetGroupCount(PassParameters->NumDstLevelsLights, FGenerateLevelUpCS::GetThreadBlockSize()));
 }
 
-void MeshLightTree::FindLightCuts(const FScene& Scene, const FViewInfo& View, FRDGBuilder& GraphBuilder, const FVector& LightBoundMin, const FVector& LightBoundMax)
+void MeshLightTree::FindLightCuts(const FScene& Scene, 
+	const FViewInfo& View, 
+	FRDGBuilder& GraphBuilder, 
+	const FVector& LightBoundMin, 
+	const FVector& LightBoundMax,
+	float ScreenScale)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, MeshLightCutsFinder);
 	RDG_EVENT_SCOPE(GraphBuilder, "MeshLightCutsFinder");
@@ -841,16 +849,16 @@ void MeshLightTree::FindLightCuts(const FScene& Scene, const FViewInfo& View, FR
 	FRDGTextureRef GBufferATexture = GraphBuilder.RegisterExternalTexture(SceneContext.GBufferA);
 	FRDGTextureRef SceneDepthTexture = GraphBuilder.RegisterExternalTexture(SceneContext.SceneDepthZ);
 
-	float ScreenScale = 1.0;
+	//float ScreenScale = 1.0;
 	uint32 ScaledViewSizeX = FMath::Max(1, FMath::CeilToInt(View.ViewRect.Size().X * ScreenScale));
 	uint32 ScaledViewSizeY = FMath::Max(1, FMath::CeilToInt(View.ViewRect.Size().Y * ScreenScale));
 	FIntPoint ScaledViewSize = FIntPoint(ScaledViewSizeX, ScaledViewSizeY);
 
 	int CutBlockSize = CVarCutBlockSize.GetValueOnRenderThread();
-	FIntPoint DispatchResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), CutBlockSize);
+	FIntPoint DispatchResolution = FIntPoint::DivideAndRoundUp(ScaledViewSize.Size(), CutBlockSize);
 	TShaderMapRef<FFindLightCutsCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
 	FFindLightCutsCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FFindLightCutsCS::FParameters>();
-	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MAX_CUT_NODES * ((View.ViewRect.Size().X + 7) / 8) * ((View.ViewRect.Size().Y + 7) / 8)), TEXT("Mesh Light cut buffer"));
+	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MAX_CUT_NODES * ((ScaledViewSize.X + 7) / 8) * ((ScaledViewSize.Y + 7) / 8)), TEXT("Mesh Light cut buffer"));
 	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(LightNodesBuffer);
 	PassParameters->LightCutBuffer = GraphBuilder.CreateUAV(LightCutBuffer);
 	PassParameters->MaxCutNodes = CVarMaxCutNodes.GetValueOnRenderThread();
@@ -866,6 +874,7 @@ void MeshLightTree::FindLightCuts(const FScene& Scene, const FViewInfo& View, FR
 	PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 	PassParameters->ScaledViewSizeAndInvSize = FVector4(ScaledViewSize.X, ScaledViewSize.Y, 1.0f / ScaledViewSize.X, 1.0f / ScaledViewSize.Y);
 	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+	PassParameters->ScreenScale = ScreenScale;
 	ClearUnusedGraphResources(ComputeShader, PassParameters);
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,

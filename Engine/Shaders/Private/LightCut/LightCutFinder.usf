@@ -19,7 +19,7 @@ float ErrorLimit;
 int UseApproximateCosineBound;
 
 float  SceneLightBoundRadius;
-
+float ScreenScale;
 struct LightHeapData
 {
 	int NodeID;
@@ -30,7 +30,8 @@ struct LightHeapData
 void LightCutFindCS(uint3 DTid : SV_DispatchThreadID)
 {
 	int2 anchor = DTid.xy * CutShareGroupSize;
-	uint2 BufferSize = View.BufferSizeAndInvSize.xy;
+	// uint2 BufferSize = View.BufferSizeAndInvSize.xy;
+	uint2 BufferSize = ScaledViewSizeAndInvSize.xy;
 	if (anchor.x >= BufferSize.x || anchor.y >= BufferSize.y) return;
 
 	RandomSequence RandSequence;
@@ -52,7 +53,7 @@ void LightCutFindCS(uint3 DTid : SV_DispatchThreadID)
 
 	// Get G-Buffer surface data
 	float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
-	float2 UV = (float2(PixelCoord) + 0.5) * InvBufferSize;
+	// float2 UV = (float2(PixelCoord) + 0.5) * InvBufferSize;
     float2 ScreenUV = (float2(PixelCoord) + .5) * float2(ScaledViewSizeAndInvSize.zw);
   // Calculate vector going through the center of appropriate GBuffer pixel
     int2 GBufferNearestPixelIndex = int2(ScreenUV * View.ViewSizeAndInvSize.xy);

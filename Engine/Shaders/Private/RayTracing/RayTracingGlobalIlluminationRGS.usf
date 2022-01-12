@@ -426,6 +426,15 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 	{
 		Query.StartTimer();
 	}
+#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
+	// uint2 BufferSize = View.BufferSizeAndInvSize.xy;
+	uint2 BufferSize = ceil(View.BufferSizeAndInvSize.xy / UpscaleFactor);
+	uint2 Pixel = DispatchThreadId;
+	// uint2 Pixel = PixelCoord;
+	int startAddr =  MAX_CUT_NODES * ( (Pixel.y / CutShareGroupSize) * ((BufferSize.x + CutShareGroupSize - 1) / CutShareGroupSize) + Pixel.x / CutShareGroupSize );
+
+	uint numPass = ceil(float(MaxCutNodes) / (InterleaveRate * InterleaveRate));
+#endif
 
 	for (uint SampleIndex = 0; SampleIndex < SamplesPerPixel; ++SampleIndex)
 	{
@@ -437,10 +446,6 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 #if MESH_LIGHT_SAMPLING
 
 	#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
-		uint2 BufferSize = View.BufferSizeAndInvSize.xy;
-		int startAddr =  MAX_CUT_NODES * ( (PixelCoord.y / CutShareGroupSize) * ((BufferSize.x + CutShareGroupSize - 1) / CutShareGroupSize) + PixelCoord.x / CutShareGroupSize );
-
-		uint numPass = ceil(float(MaxCutNodes) / (InterleaveRate * InterleaveRate));
 		float factor = 1.0 ;
 		for(uint NeeTrial = 0; NeeTrial < numPass; ++NeeTrial)
 	#else
@@ -465,7 +470,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 				if (InterleaveRate > 1)
 				{
 					int interleaveGroupSize = InterleaveRate * InterleaveRate;
-					int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (PixelCoord.y % InterleaveRate) + (PixelCoord.x % InterleaveRate)) % interleaveGroupSize;
+					int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (Pixel.y % InterleaveRate) + (Pixel.x % InterleaveRate)) % interleaveGroupSize;
 
 					float ratio = float(MaxCutNodes) / interleaveGroupSize;
 					startId = int(interleaveSamplingId * ratio);  
@@ -697,7 +702,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					if (InterleaveRate > 1)
 					{
 						int interleaveGroupSize = InterleaveRate * InterleaveRate;
-						int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (PixelCoord.y % InterleaveRate) + (PixelCoord.x % InterleaveRate)) % interleaveGroupSize;
+						int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (Pixel.y % InterleaveRate) + (Pixel.x % InterleaveRate)) % interleaveGroupSize;
 
 						float ratio = float(MaxCutNodes) / interleaveGroupSize;
 						startId = int(interleaveSamplingId * ratio);  
@@ -844,7 +849,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					if (InterleaveRate > 1)
 					{
 						int interleaveGroupSize = InterleaveRate * InterleaveRate;
-						int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (PixelCoord.y % InterleaveRate) + (PixelCoord.x % InterleaveRate)) % interleaveGroupSize;
+						int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (Pixel.y % InterleaveRate) + (Pixel.x % InterleaveRate)) % interleaveGroupSize;
 
 						float ratio = float(MaxCutNodes) / interleaveGroupSize;
 						startId = int(interleaveSamplingId * ratio);  

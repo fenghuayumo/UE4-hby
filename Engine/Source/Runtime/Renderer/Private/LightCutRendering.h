@@ -63,7 +63,8 @@ public:
 		const FViewInfo& View,
 		FRDGBuilder& GraphBuilder,
 		const FVector& LightBoundMin,
-		const FVector& LightBoundMax);
+		const FVector& LightBoundMax,
+		float	ScreenUpScale = 1.0);
 
 	void VisualizeNodes(
 		const FScene& Scene,
@@ -132,7 +133,8 @@ public:
 		const FViewInfo& View,
 		FRDGBuilder& GraphBuilder,
 		const FVector& LightBoundMin,
-		const FVector& LightBoundMax);
+		const FVector& LightBoundMax,
+		float	ScreenUpScale = 1.0);
 
 	void VisualizeNodes(
 		const FScene& Scene,
