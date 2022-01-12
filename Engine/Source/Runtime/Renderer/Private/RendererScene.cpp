@@ -1901,7 +1901,9 @@ void FScene::AddMeshLight(FMeshLightProxy* meshLight)
 			Scene->EmissiveLightProxies.Sort([](const FMeshLightProxy& A, const FMeshLightProxy& B) {
 				return A.EmissiveMesh < B.EmissiveMesh;
 				});
+			Scene->MeshLightChaged = true;
 		});
+
 }
 
 bool operator==(const FMeshLightProxy& p1, const FMeshLightProxy& p2 )
@@ -1920,6 +1922,7 @@ void FScene::RemoveMeshLight(FMeshLightProxy* meshLight)
 		{
 			Scene->EmissiveLightProxies.Remove(meshLight);
 			delete meshLight;
+			Scene->MeshLightChaged = true;
 		});
 }
 

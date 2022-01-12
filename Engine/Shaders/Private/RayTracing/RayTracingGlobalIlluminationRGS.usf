@@ -155,8 +155,9 @@ bool SampleLightTree(
 	}
 	FLightNode RootNode = LightNodes[1];
 	float BoundCenter = RootNode.BoundMin + RootNode.BoundMax;
-	float ToDist = length(BoundCenter - WorldPos);
-	float NodeLightingEstimate =  RootNode.Intensity / ( ToDist * ToDist);
+	float3 ToNode = (BoundCenter - WorldPos);
+	float ToDist = length(ToNode);
+	float NodeLightingEstimate =  RootNode.Intensity / ( ToDist * ToDist) * dot(ToNode / ToDist, WorldNormal);
 
 	// float pInfinite = float(SceneInfiniteLightCount) /
     //                       float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
@@ -355,8 +356,23 @@ bool SampleLightCut(
 	}
 	float LightPickPdf = 1.0;
 	bool deadBranch = false;
-	float pInfinite = float(SceneInfiniteLightCount) /
-                          float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
+	// float pInfinite = float(SceneInfiniteLightCount) /
+    //                       float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
+	float InfinteLightCdfSum = 0;
+	// float LightPickingCdf[4];
+	// int LightCdfCount = min(SceneInfiniteLightCount, 4);
+	for (uint LightIndex = 0; LightIndex < SceneInfiniteLightCount; ++LightIndex)
+	{
+		InfinteLightCdfSum += EstimateLight(LightIndex, WorldPos, WorldNormal, PrimitiveLightingChannelMask, IsTransmissiveMaterial);
+		// LightPickingCdf[LightIndex] = InfinteLightCdfSum;
+	}
+	FLightNode RootNode = LightNodes[1];
+	float BoundCenter = RootNode.BoundMin + RootNode.BoundMax;
+	float3 ToNode = (BoundCenter - WorldPos);
+	float ToDist = length(ToNode);
+	float NodeLightingEstimate =  RootNode.Intensity / ( ToDist * ToDist) * dot(ToNode / ToDist, WorldNormal);
+	
+	float pInfinite = InfinteLightCdfSum / ( InfinteLightCdfSum + NodeLightingEstimate) ;
 	if (RandSample.x < pInfinite) 
 	{
 		// Sample infinite lights with uniform probability

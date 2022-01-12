@@ -2149,6 +2149,168 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationFinalGathe
 #endif
 LightTree GTree;
 MeshLightTree	MeshTree;
+
+void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& GraphBuilder, FGlobalIlluminationRGS::FParameters* PassParameters,float UpscaleFactor)
+{
+	///mesh light
+	/// The following code should be excuted on the case of scene has been changed for efficiency, such as add meshlight, removemeshlight etc. like path tracer
+	/// When the scene has many meshlight ,the construction of the whole position buffer will be expensive
+	static TArray<FVector>	Positions;
+	static TArray<uint32>	IndexList;
+	static TArray<MeshLightInstanceTriangle>	meshLightTriangles;
+	static TArray<MeshLightInstance>	meshLights;
+	uint32 InstID = 0, indexOffset = 0;
+	uint32 VertexOffset = 0;
+	const float Inf = std::numeric_limits<float>::infinity();
+	static FBox MeshLightBounds;
+	if (Scene->MeshLightChaged)
+	{
+		Positions.Empty();
+		IndexList.Empty();
+		meshLightTriangles.Empty();
+		meshLights.Empty();
+
+		MeshLightBounds.Max = FVector(-Inf, -Inf, -Inf);
+		MeshLightBounds.Min = FVector(Inf, Inf, Inf);
+		FEmissiveLightMesh* CurrentEMesh = nullptr;
+		for (auto LightProxIndex = 0; LightProxIndex < Scene->EmissiveLightProxies.Num(); LightProxIndex++)
+		{
+			const auto& lightProxy = Scene->EmissiveLightProxies[LightProxIndex];
+			MeshLightInstance lightInstance;
+			lightInstance.Transform = lightProxy->Transform;
+			lightInstance.Emission = lightProxy->Emission;
+			meshLights.Add(lightInstance);
+
+			MeshLightBounds += lightProxy->Bounds;
+			if (CurrentEMesh != lightProxy->EmissiveMesh)
+			{
+				CurrentEMesh = lightProxy->EmissiveMesh;
+				for (const auto& p : CurrentEMesh->Positions)
+				{
+					Positions.Add(p);
+				}
+				for (int32 idx = 0; idx < CurrentEMesh->IndexList.Num(); idx++)
+				{
+					auto idx0 = CurrentEMesh->IndexList[idx] + VertexOffset;
+					IndexList.Add(idx0);
+				}
+
+			}
+			for (int32 i = 0; i < CurrentEMesh->IndexList.Num() / 3; i++)
+			{
+				MeshLightInstanceTriangle tri;
+				tri.IndexOffset = i * 3 + indexOffset;
+				tri.InstanceID = InstID;
+				meshLightTriangles.Add(tri);
+			}
+			if (LightProxIndex < (Scene->EmissiveLightProxies.Num() - 1) && CurrentEMesh != Scene->EmissiveLightProxies[LightProxIndex + 1]->EmissiveMesh)
+			{
+				indexOffset += CurrentEMesh->IndexList.Num();
+				VertexOffset += CurrentEMesh->Positions.Num();
+			}
+			InstID++;
+		}
+		Scene->MeshLightChaged = false;
+	}
+	static FStructuredBufferRHIRef MeshTriBuffer = nullptr;
+	static FStructuredBufferRHIRef MeshPosBuffer = nullptr;
+	static FStructuredBufferRHIRef MeshIndexBuffer = nullptr;
+	static FStructuredBufferRHIRef MeshInstanceBuffer = nullptr;
+	//if (Scene->MeshLightChaged)
+	{
+		{
+			// Upload the buffer of lights to the GPU (send at least one)
+			//meshTRi
+			FRHIResourceCreateInfo CreateInfo_MeshLightTri;
+			uint32 dataSize = FMath::Max<uint32>(meshLightTriangles.Num(), 1u) * sizeof(MeshLightInstanceTriangle);
+			MeshTriBuffer = RHICreateStructuredBuffer(sizeof(MeshLightInstanceTriangle), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightTri);
+			uint32 OffsetFloat = 0;
+			void* BasePtr = RHILockStructuredBuffer(MeshTriBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
+			if (meshLightTriangles.Num() > 0)
+				FPlatformMemory::Memcpy(BasePtr, meshLightTriangles.GetData(), dataSize);
+
+			RHIUnlockStructuredBuffer(MeshTriBuffer);
+		}
+
+		{
+			//meshPos
+			FRHIResourceCreateInfo CreateInfo_MeshLightPos;
+			uint32 dataSize = FMath::Max<uint32>(Positions.Num(), 1u) * sizeof(FVector);
+			MeshPosBuffer = RHICreateStructuredBuffer(sizeof(FVector), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightPos);
+			uint32 OffsetFloat = 0;
+			void* BasePtr = RHILockStructuredBuffer(MeshPosBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
+			if (Positions.Num() > 0)
+				FPlatformMemory::Memcpy(BasePtr, Positions.GetData(), dataSize);
+			RHIUnlockStructuredBuffer(MeshPosBuffer);
+		}
+
+		{
+			//Mesh Index
+			FRHIResourceCreateInfo CreateInfo_MeshLightIndex;
+			uint32 dataSize = FMath::Max<uint32>(IndexList.Num(), 1u) * sizeof(uint32);
+			MeshIndexBuffer = RHICreateStructuredBuffer(sizeof(uint32), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightIndex);
+			uint32 OffsetFloat = 0;
+			void* BasePtr = RHILockStructuredBuffer(MeshIndexBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
+			if (IndexList.Num() > 0)
+				FPlatformMemory::Memcpy(BasePtr, IndexList.GetData(), dataSize);
+			RHIUnlockStructuredBuffer(MeshIndexBuffer);
+
+		}
+
+		{
+			//Mesh Inst
+			FRHIResourceCreateInfo CreateInfo_MeshLightInstance;
+			uint32 dataSize = FMath::Max<uint32>(meshLights.Num(), 1u) * sizeof(MeshLightInstance);
+			MeshInstanceBuffer = RHICreateStructuredBuffer(sizeof(MeshLightInstance), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightInstance);
+			uint32 OffsetFloat = 0;
+			void* BasePtr = RHILockStructuredBuffer(MeshInstanceBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
+			if (meshLights.Num() > 0)
+				FPlatformMemory::Memcpy(BasePtr, meshLights.GetData(), dataSize);
+			RHIUnlockStructuredBuffer(MeshInstanceBuffer);
+		}
+
+		//Scene->MeshLightChaged = false;
+	}
+	if ( !MeshTriBuffer)
+	{
+		{
+			FRHIResourceCreateInfo CreateInfo_MeshLightTri;
+			uint32 dataSize = sizeof(MeshLightInstanceTriangle);
+			MeshTriBuffer = RHICreateStructuredBuffer(sizeof(MeshLightInstanceTriangle), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightTri);
+		}
+		{
+			FRHIResourceCreateInfo CreateInfo_MeshLightPos;
+			uint32 dataSize = 1u * sizeof(FVector);
+			MeshPosBuffer = RHICreateStructuredBuffer(sizeof(FVector), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightPos);
+		}
+		{
+			FRHIResourceCreateInfo CreateInfo_MeshLightIndex;
+			uint32 dataSize = 1u * sizeof(uint32);
+			MeshIndexBuffer = RHICreateStructuredBuffer(sizeof(uint32), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightIndex);
+		}
+		{
+			FRHIResourceCreateInfo CreateInfo_MeshLightInstance;
+			uint32 dataSize =  sizeof(MeshLightInstance);
+			MeshInstanceBuffer = RHICreateStructuredBuffer(sizeof(MeshLightInstance), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightInstance);
+		}
+	}
+	PassParameters->MeshLightInstancePrimitiveBuffer = RHICreateShaderResourceView(MeshTriBuffer);
+	PassParameters->MeshLightInstanceBuffer = RHICreateShaderResourceView(MeshInstanceBuffer);
+	PassParameters->MeshLightIndexBuffer = RHICreateShaderResourceView(MeshIndexBuffer);
+	PassParameters->MeshLightVertexBuffer = RHICreateShaderResourceView(MeshPosBuffer);
+	PassParameters->NumLightTriangles = meshLightTriangles.Num();
+
+	MeshTree.Build(GraphBuilder,
+		meshLightTriangles.Num(),
+		MeshLightBounds.Min,
+		MeshLightBounds.Max,
+		PassParameters->MeshLightIndexBuffer,
+		PassParameters->MeshLightVertexBuffer,
+		PassParameters->MeshLightInstanceBuffer,
+		PassParameters->MeshLightInstancePrimitiveBuffer);
+
+	MeshTree.FindLightCuts(*Scene, View, GraphBuilder, MeshLightBounds.Min, MeshLightBounds.Max, 1.0 / UpscaleFactor);
+}
 void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce(
 	FRDGBuilder& GraphBuilder,
 	FSceneTextureParameters& SceneTextures,
@@ -2197,127 +2359,13 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
 	SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters,
 		&PassParameters->LightGridParameters);
-	///mesh light
-	/// The following code should be excuted on the case of scene has been changed for efficiency, such as add meshlight, removemeshlight etc. like path tracer
-	/// When the scene has many meshlight ,the construction of the whole position buffer will be expensive
-	TArray<FVector>	Positions;
-	TArray<uint32>	IndexList;
-	TArray<MeshLightInstanceTriangle>	meshLightTriangles;
-	TArray<MeshLightInstance>	meshLights;
-	uint32 InstID = 0, indexOffset = 0;
-	uint32 VertexOffset = 0;
-	const float Inf = std::numeric_limits<float>::infinity();
-	FBox MeshLightBounds;
-	MeshLightBounds.Max = FVector(-Inf, -Inf, -Inf);
-	MeshLightBounds.Min = FVector(Inf, Inf, Inf);
-	FEmissiveLightMesh* CurrentEMesh = nullptr;
-	for (auto LightProxIndex = 0; LightProxIndex < Scene->EmissiveLightProxies.Num(); LightProxIndex++)
-	{
-		const auto& lightProxy = Scene->EmissiveLightProxies[LightProxIndex];
-		MeshLightInstance lightInstance; 
-		lightInstance.Transform = lightProxy->Transform;
-		lightInstance.Emission = lightProxy->Emission;
-		meshLights.Add(lightInstance);
-		
-		MeshLightBounds += lightProxy->Bounds;
-		if (CurrentEMesh != lightProxy->EmissiveMesh)
-		{
-			CurrentEMesh = lightProxy->EmissiveMesh;
-			for (const auto& p : CurrentEMesh->Positions)
-			{
-				Positions.Add(p);
-			}
-			for (int32 idx = 0; idx < CurrentEMesh->IndexList.Num(); idx++)
-			{
-				auto idx0 = CurrentEMesh->IndexList[idx] + VertexOffset;
-				IndexList.Add(idx0);
-			}
-
-		}
-		for (int32 i = 0; i < CurrentEMesh->IndexList.Num() / 3; i++)
-		{
-			MeshLightInstanceTriangle tri;
-			tri.IndexOffset = i * 3 + indexOffset;
-			tri.InstanceID = InstID;
-			meshLightTriangles.Add(tri);
-		}
-		if (LightProxIndex < (Scene->EmissiveLightProxies.Num()-1)  && CurrentEMesh != Scene->EmissiveLightProxies[LightProxIndex+1]->EmissiveMesh)
-		{
-			indexOffset += CurrentEMesh->IndexList.Num();
-			VertexOffset += CurrentEMesh->Positions.Num();
-		}
-		InstID++;
-	}
-
-	{
-		// Upload the buffer of lights to the GPU (send at least one)
-		//meshTRi
-		FRHIResourceCreateInfo CreateInfo_MeshLightTri;
-		uint32 dataSize = FMath::Max<uint32>(meshLightTriangles.Num(), 1u) * sizeof(MeshLightInstanceTriangle);
-		FStructuredBufferRHIRef MeshTriBuffer = RHICreateStructuredBuffer(sizeof(MeshLightInstanceTriangle), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightTri);
-		uint32 OffsetFloat = 0;
-		void* BasePtr = RHILockStructuredBuffer(MeshTriBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
-		if(meshLightTriangles.Num() > 0)
-			FPlatformMemory::Memcpy(BasePtr, meshLightTriangles.GetData(), dataSize);
-
-		RHIUnlockStructuredBuffer(MeshTriBuffer);
-		PassParameters->MeshLightInstancePrimitiveBuffer = RHICreateShaderResourceView(MeshTriBuffer);
-	}
-
-	{
-		//meshPos
-		FRHIResourceCreateInfo CreateInfo_MeshLightPos;
-		uint32 dataSize = FMath::Max<uint32>(Positions.Num(), 1u) * sizeof(FVector);
-		FStructuredBufferRHIRef MeshPosBuffer = RHICreateStructuredBuffer(sizeof(FVector), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightPos);
-		uint32 OffsetFloat = 0;
-		void* BasePtr = RHILockStructuredBuffer(MeshPosBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
-		if (Positions.Num() > 0)
-		FPlatformMemory::Memcpy(BasePtr, Positions.GetData(), dataSize);
-		RHIUnlockStructuredBuffer(MeshPosBuffer);
-		PassParameters->MeshLightVertexBuffer = RHICreateShaderResourceView(MeshPosBuffer);
-	}
-
-	{
-		//Mesh Index
-		FRHIResourceCreateInfo CreateInfo_MeshLightIndex;
-		uint32 dataSize = FMath::Max<uint32>(IndexList.Num(), 1u) * sizeof(uint32);
-		FStructuredBufferRHIRef MeshIndexBuffer = RHICreateStructuredBuffer(sizeof(uint32), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightIndex);
-		uint32 OffsetFloat = 0;
-		void* BasePtr = RHILockStructuredBuffer(MeshIndexBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
-		if (IndexList.Num() > 0)
-		FPlatformMemory::Memcpy(BasePtr, IndexList.GetData(), dataSize);
-		RHIUnlockStructuredBuffer(MeshIndexBuffer);
-		PassParameters->MeshLightIndexBuffer = RHICreateShaderResourceView(MeshIndexBuffer);
-	}
-
-	{
-		//Mesh Inst
-		FRHIResourceCreateInfo CreateInfo_MeshLightInstance;
-		uint32 dataSize = FMath::Max<uint32>(meshLights.Num(), 1u) * sizeof(MeshLightInstance);
-		FStructuredBufferRHIRef MeshInstanceBuffer = RHICreateStructuredBuffer(sizeof(MeshLightInstance), dataSize, BUF_Transient | BUF_FastVRAM | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo_MeshLightInstance);
-		uint32 OffsetFloat = 0;
-		void* BasePtr = RHILockStructuredBuffer(MeshInstanceBuffer, OffsetFloat, dataSize, RLM_WriteOnly);
-		if (meshLights.Num() > 0)
-		FPlatformMemory::Memcpy(BasePtr, meshLights.GetData(), dataSize);
-		RHIUnlockStructuredBuffer(MeshInstanceBuffer);
-		PassParameters->MeshLightInstanceBuffer = RHICreateShaderResourceView(MeshInstanceBuffer);
-	}
-	PassParameters->NumLightTriangles = meshLightTriangles.Num();
 
 	GTree.Build(GraphBuilder, PassParameters->SceneLightCount, PassParameters->LightGridParameters.SceneInfiniteLightCount,PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax, PassParameters->SceneLights);
 	
-	MeshTree.Build(GraphBuilder, 
-		meshLightTriangles.Num(),
-		MeshLightBounds.Min , 
-		MeshLightBounds.Max,
-		PassParameters->MeshLightIndexBuffer,
-		PassParameters->MeshLightVertexBuffer,
-		PassParameters->MeshLightInstanceBuffer,
-		PassParameters->MeshLightInstancePrimitiveBuffer);
-
 	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax,
 		1.0 / UpscaleFactor);
-	MeshTree.FindLightCuts(*Scene, View, GraphBuilder, MeshLightBounds.Min, MeshLightBounds.Max, 1.0 /UpscaleFactor);
+
+	SetupMeshLightParamters(Scene, View, GraphBuilder, PassParameters, UpscaleFactor);
 
 	PassParameters->SceneTextures = SceneTextures;
 	PassParameters->AccumulateEmissive = FMath::Clamp(CVarRayTracingGlobalIlluminationAccumulateEmissive.GetValueOnRenderThread(), 0, 1);

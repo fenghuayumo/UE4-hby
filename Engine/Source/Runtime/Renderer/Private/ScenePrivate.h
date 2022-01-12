@@ -2511,6 +2511,7 @@ public:
 
 	/*MeshLight*/
 	TArray<FMeshLightProxy*>			EmissiveLightProxies;
+	bool								MeshLightChaged = true;
 	/*GI Volume*/
 	TSet<FTestGIVolumeSceneProxy*>	TestGIProxies;
 

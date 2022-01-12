@@ -628,7 +628,7 @@ void LightTree::FindLightCuts(
 	PassParameters->CutShareGroupSize = CVarCutBlockSize.GetValueOnRenderThread();
 	PassParameters->ErrorLimit = CVarErrorLimit.GetValueOnRenderThread();
 	PassParameters->UseApproximateCosineBound = CVarUseApproximateCosineBound.GetValueOnRenderThread();
-	auto LightBound = (LightBoundMax - LightBoundMin) * 0.5;
+	const auto LightBound = (LightBoundMax - LightBoundMin) * 0.5;
 	PassParameters->SceneLightBoundRadius = LightBound.Size();
 	
 	PassParameters->NormalTexture = GBufferATexture;
