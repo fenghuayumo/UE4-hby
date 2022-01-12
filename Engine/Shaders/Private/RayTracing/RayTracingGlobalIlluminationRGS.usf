@@ -88,8 +88,10 @@ StructuredBuffer<uint>         MeshLightIndexBuffer;
 StructuredBuffer<MeshLightInstanceTriangle>    MeshLightInstancePrimitiveBuffer;
 StructuredBuffer<MeshLightInstance>   MeshLightInstanceBuffer;
 uint 							NumLightTriangles;
-#define MESH_LIGHT_SAMPLING     1
 
+#if LIGHT_SAMPLING_TYPE > LIGHT_GRID
+#define MESH_LIGHT_SAMPLING     1
+#endif
 // #define UNIFORM_MESHLIGHT_SAMPLING 1
 void GenerateCosineNormalRay(
 	float3 WorldPosition,

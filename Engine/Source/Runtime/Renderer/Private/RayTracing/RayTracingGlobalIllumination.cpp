@@ -2197,7 +2197,9 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
 	SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters,
 		&PassParameters->LightGridParameters);
-	//mesh light
+	///mesh light
+	/// The following code should be excuted on the case of scene has been changed for efficiency, such as add meshlight, removemeshlight etc. like path tracer
+	/// When the scene has many meshlight ,the construction of the whole position buffer will be expensive
 	TArray<FVector>	Positions;
 	TArray<uint32>	IndexList;
 	TArray<MeshLightInstanceTriangle>	meshLightTriangles;
