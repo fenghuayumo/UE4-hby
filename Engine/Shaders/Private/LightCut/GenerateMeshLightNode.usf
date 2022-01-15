@@ -115,6 +115,14 @@ void GenerateLeafNode(uint3 DTid : SV_DispatchThreadID)
 		node.BoundMax = boundMax;
 		node.Intensity = Intensity;
 		node.ID = triId;
+
+#ifdef LIGHT_CONE
+		if (node.Intensity > 0)
+		{
+			node.Cone.xyz = LightN.xyz;
+			node.Cone.w = 0.5 * PI;
+		}
+#endif
         LeafNodes[triId] = node;
     }
 

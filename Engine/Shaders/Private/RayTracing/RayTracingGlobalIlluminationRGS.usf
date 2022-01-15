@@ -14,7 +14,7 @@
 
 #include "RayTracingTimingCommon.ush"
 
-// #define EXPLORE_DISTANCE_TYPE
+#define EXPLORE_DISTANCE_TYPE
 #define LIGHT_GRID 1
 #define LIGHT_TREE 2
 #define LIGHT_CUT  3
@@ -157,7 +157,7 @@ bool SampleLightTree(
 	float BoundCenter = RootNode.BoundMin + RootNode.BoundMax;
 	float3 ToNode = (BoundCenter - WorldPos);
 	float ToDist = length(ToNode);
-	float NodeLightingEstimate =  RootNode.Intensity / ( ToDist * ToDist) * dot(ToNode / ToDist, WorldNormal);
+	float NodeLightingEstimate =  RootNode.Intensity * dot(ToNode / ToDist, WorldNormal);// / ( ToDist * ToDist);
 
 	// float pInfinite = float(SceneInfiniteLightCount) /
     //                       float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
@@ -370,7 +370,7 @@ bool SampleLightCut(
 	float BoundCenter = RootNode.BoundMin + RootNode.BoundMax;
 	float3 ToNode = (BoundCenter - WorldPos);
 	float ToDist = length(ToNode);
-	float NodeLightingEstimate =  RootNode.Intensity / ( ToDist * ToDist) * dot(ToNode / ToDist, WorldNormal);
+	float NodeLightingEstimate =  RootNode.Intensity * dot(ToNode / ToDist, WorldNormal);// / ( ToDist * ToDist);
 	
 	float pInfinite = InfinteLightCdfSum / ( InfinteLightCdfSum + NodeLightingEstimate) ;
 	if (RandSample.x < pInfinite) 

@@ -52,6 +52,11 @@ int LevelsNumber;
 ByteAddressBuffer keyIndexList;
 RWStructuredBuffer<FLightNode> LightNodes;
 uint SceneInfiniteLightCount;
+
+// float SurfaceArea(float3 pMin, float3 pMax)
+// {
+// }
+
 [numthreads(THREAD_BLOCK_SIZE, 1, 1)]
 void GenerateLevelZeroFromLights(uint3 DTid : SV_DispatchThreadID)
 {
@@ -65,38 +70,47 @@ void GenerateLevelZeroFromLights(uint3 DTid : SV_DispatchThreadID)
 		if (levelNodeId < (SceneLightCount - SceneInfiniteLightCount) )
 		{
 			uint2 KeyIndexPair = keyIndexList.Load2(8 * levelNodeId);
-			int index = KeyIndexPair.x + SceneInfiniteLightCount;
-			float3 lightPos = SceneLights[index].Position.xyz;
-			float3 lightN = SceneLights[index].Normal.xyz;
-			float3 lightColor = SceneLights[index].Color.xyz;
+			int LightId = KeyIndexPair.x + SceneInfiniteLightCount;
+			float3 lightPos = SceneLights[LightId].Position.xyz;
+			float3 lightN = SceneLights[LightId].Normal.xyz;
+			float3 lightColor = SceneLights[LightId].Color.xyz;
 			node.ID = KeyIndexPair.x ;
 
 			float3 boundMin = 1e10;
 			float3 boundMax = -1e10;
 			node.Intensity = GetColorIntensity(lightColor.xyz);
 
-			// if( IsEnvironmentLight(index) || IsDirectionalLight(index) )
-			// {
-			// 	node.BoundMin = SceneLightBoundsMin;
-            //     node.BoundMax = SceneLightBoundsMax;
-			// }
-			//if (node.Intensity > 0) //real light
+			if( IsSpotLight(LightId) || IsPointLight(LightId) )
 			{
-                node.BoundMin = SceneLights[index].BoundMin;
-                node.BoundMax = SceneLights[index].BoundMax;
-			}
-            // else
-            // {
-            //     node.BoundMin = node.BoundMax = boundMin;
-            // }
-
+				node.BoundMin = node.BoundMax = lightPos;
 #ifdef LIGHT_CONE
-			if (node.Intensity > 0)
-			{
-				node.Cone.xyz = lightN.xyz;
-				node.Cone.w = 0;
-			}
+				if (IsSpotLight(LightId) > 0)
+				{
+					node.Cone.xyz = lightN.xyz;
+					float2 CosConeAngles = GetCosConeAngles(LightId);
+					node.Cone.w = acos(CosConeAngles.x);
+				}
+				else
+				{
+					node.Cone.xyz = lightN.xyz;
+					node.Cone.w = PI;
+				}
 #endif
+			}
+			else
+			{
+				float3 LightdPdu = GetdPdu(LightId);
+				float3 LightdPdv = GetdPdv(LightId);
+				float2 LightExtent = 0.5 * GetRectSize(LightId);
+				node.BoundMin = lightPos - (LightExtent.x * LightdPdu + LightExtent.y * LightdPdv);
+                node.BoundMax = lightPos + (LightExtent.x * LightdPdu + LightExtent.y * LightdPdv);
+				node.Intensity *= 2 * LightExtent.x * LightExtent.y;
+	#ifdef LIGHT_CONE
+				node.Cone.xyz = lightN.xyz;
+				node.Cone.w = 0.5 * PI;
+	#endif
+
+			}
 		}
 		else
 		{

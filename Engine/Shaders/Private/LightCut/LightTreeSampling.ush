@@ -140,56 +140,42 @@ inline bool TraverseLightTree(
     out int OutLightId
    )
 {
-
-	// uint ScenefiniteLightCount = SceneLightCount - SceneInfiniteLightCount;
-	// float pInfinite = float(SceneInfiniteLightCount) /
-    //                       float(SceneInfiniteLightCount + (SceneLightCount ==  SceneInfiniteLightCount? 0 : 1));
 	bool deadBranch = false;
     float Pdf = 1.0;
-	// if (RandSample < pInfinite) 
-	// {
-	// 	// Sample infinite lights with uniform probability
-	// 	RandSample /= pInfinite;
-	// 	int index = min(int(floor(RandSample * SceneInfiniteLightCount)), SceneInfiniteLightCount - 1);
-	// 	OutPdf = pInfinite / SceneInfiniteLightCount;
-	// 	OutLightId = index;
-	// 	return deadBranch;
-	// }
-	// else
-	{
-		while (NodeID < LeafStartIndex) 
-		{
-			int lChildID = NodeID << 1;
-			int rChildID = lChildID + 1;
-			float prob0;
 
-			if (SelectChildNode(WorldPos, WorldNormal, prob0, lChildID, rChildID, NodeBuffer, ApproximateCosineBound,DistanceType )) 
+	while (NodeID < LeafStartIndex) 
+	{
+		int lChildID = NodeID << 1;
+		int rChildID = lChildID + 1;
+		float prob0;
+
+		if (SelectChildNode(WorldPos, WorldNormal, prob0, lChildID, rChildID, NodeBuffer, ApproximateCosineBound,DistanceType )) 
+		{
+			if (RandSample < prob0) 
 			{
-				if (RandSample < prob0) 
-				{
-					NodeID = lChildID;
-					RandSample /= prob0;
-					Pdf *= prob0;
-				}
-				else 
-				{
-					NodeID = rChildID;
-					RandSample = (RandSample - prob0) / (1 - prob0);
-					Pdf *= (1 - prob0);
-				}
+				NodeID = lChildID;
+				RandSample /= prob0;
+				Pdf *= prob0;
 			}
 			else 
 			{
-				deadBranch = true;
-				break;
+				NodeID = rChildID;
+				RandSample = (RandSample - prob0) / (1 - prob0);
+				Pdf *= (1 - prob0);
 			}
 		}
-		if( deadBranch )
-			OutLightId = -1;
-		else
-			OutLightId = NodeBuffer[NodeID].ID + SceneInfiniteLightCount;
-		OutPdf = Pdf;
+		else 
+		{
+			deadBranch = true;
+			break;
+		}
 	}
+	if( deadBranch )
+		OutLightId = -1;
+	else
+		OutLightId = NodeBuffer[NodeID].ID + SceneInfiniteLightCount;
+	OutPdf = Pdf;
+
 	return deadBranch;
 }
 

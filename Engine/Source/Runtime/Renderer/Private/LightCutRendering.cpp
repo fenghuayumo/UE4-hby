@@ -57,7 +57,7 @@ TAutoConsoleVariable<int> CVarCutSharing(
 
 TAutoConsoleVariable<int> CVarMaxCutNodes(
 	TEXT("r.LightCut.MaxCutNodes"),
-	8,
+	2,
 	TEXT("Set Max Light Cut Nodes)"),
 	ECVF_RenderThreadSafe
 );

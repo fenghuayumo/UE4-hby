@@ -600,6 +600,7 @@ static void SetupLightParameters(
 			// simple sphere of influence
 			DestLight.BoundMin = Center - FVector(Radius, Radius, Radius);
 			DestLight.BoundMax = Center + FVector(Radius, Radius, Radius);
+			DestLight.Normal = FVector(0,1,0);
 			break;
 		}
 		case LightType_Spot:
@@ -2473,8 +2474,8 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 			}
 		}
 	}
-	//GTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
-	MeshTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
+	GTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
+	//MeshTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
 }
 #else
 {
