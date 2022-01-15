@@ -76,6 +76,16 @@ TAutoConsoleVariable<int> CVarInterleaveRate(
 	ECVF_RenderThreadSafe
 );
 
+
+static TAutoConsoleVariable<int> CVarLightTreeDistanceType(
+	TEXT("r.LightCut.DistanceType"),
+	1,
+	TEXT("Set LightTree DistanceType"),
+	ECVF_RenderThreadSafe);
+
+LightTree GTree;
+MeshLightTree	MeshTree;
+
 TAutoConsoleVariable<int>&  GetCVarInterleaveRate()
 {
 	return CVarInterleaveRate;
@@ -86,9 +96,10 @@ TAutoConsoleVariable<float>& GetCVarErrorLimit()
 	return CVarErrorLimit;
 }
 
-TAutoConsoleVariable<int>& GetCVarMaxCutNodes()
+int GetMaxCutNodes()
 {
-	return CVarMaxCutNodes;
+	int MacCutNode = FMath::Min<int32>(GTree.NumTreeLevels / 2, CVarMaxCutNodes.GetValueOnRenderThread());
+	return MacCutNode;
 }
 
 TAutoConsoleVariable<int>& GetCVarCutBlockSize()
@@ -104,6 +115,11 @@ TAutoConsoleVariable<int>& GetCVarCutSharing()
 TAutoConsoleVariable<int>& GetCVarUseApproximateCosineBound()
 {
 	return CVarUseApproximateCosineBound;
+}
+
+TAutoConsoleVariable<int>& GetCVarLightTreeDistanceType()
+{
+	return CVarLightTreeDistanceType;
 }
 
 BEGIN_SHADER_PARAMETER_STRUCT(FFindLightCutsShaderParameters, )
@@ -624,7 +640,7 @@ void LightTree::FindLightCuts(
 	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32),  MAX_CUT_NODES * ((ScaledViewSize.X + 7) / 8) * ((ScaledViewSize.Y + 7) / 8)), TEXT("Light cut buffer"));
 	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(LightNodesBuffer);
 	PassParameters->LightCutBuffer = GraphBuilder.CreateUAV(LightCutBuffer);
-	PassParameters->MaxCutNodes = CVarMaxCutNodes.GetValueOnRenderThread();
+	PassParameters->MaxCutNodes = GetMaxCutNodes();
 	PassParameters->CutShareGroupSize = CVarCutBlockSize.GetValueOnRenderThread();
 	PassParameters->ErrorLimit = CVarErrorLimit.GetValueOnRenderThread();
 	PassParameters->UseApproximateCosineBound = CVarUseApproximateCosineBound.GetValueOnRenderThread();

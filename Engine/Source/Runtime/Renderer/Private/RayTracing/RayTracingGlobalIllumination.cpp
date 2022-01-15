@@ -427,11 +427,6 @@ static TAutoConsoleVariable<int> CVarLightSamplingType(
 	TEXT(" 4:	Uniform"),
 	ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<int> CVarLightTreeDistanceType(
-	TEXT("r.LightTree.DistanceType"),
-	1,
-	TEXT("Set LightTree DistanceType"),
-	ECVF_RenderThreadSafe);
 
 DECLARE_GPU_STAT_NAMED(RayTracingGIBruteForce, TEXT("Ray Tracing GI: Brute Force"));
 DECLARE_GPU_STAT_NAMED(RayTracingGIFinalGather, TEXT("Ray Tracing GI: Final Gather"));
@@ -2148,8 +2143,8 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationFinalGathe
 	unimplemented();
 }
 #endif
-LightTree GTree;
-MeshLightTree	MeshTree;
+extern LightTree GTree;
+extern MeshLightTree	MeshTree;
 
 void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& GraphBuilder, FGlobalIlluminationRGS::FParameters* PassParameters,float UpscaleFactor)
 {
@@ -2398,14 +2393,14 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	PassParameters->RenderTileOffsetY = 0;
 	FLightCutCommonParameter	LightCutCommonParameters;
 	LightCutCommonParameters.CutShareGroupSize = GetCVarCutBlockSize().GetValueOnRenderThread();
-	LightCutCommonParameters.MaxCutNodes = GetCVarMaxCutNodes().GetValueOnRenderThread();
+	LightCutCommonParameters.MaxCutNodes = GetMaxCutNodes();
 	LightCutCommonParameters.ErrorLimit = GetCVarErrorLimit().GetValueOnRenderThread();
 	LightCutCommonParameters.UseApproximateCosineBound = GetCVarUseApproximateCosineBound().GetValueOnRenderThread();
 	LightCutCommonParameters.InterleaveRate = GetCVarInterleaveRate().GetValueOnRenderThread();
 	PassParameters->LightCutCommonParameters = LightCutCommonParameters;
 	PassParameters->LightCutBuffer = GraphBuilder.CreateSRV(GTree.LightCutBuffer);
 	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(GTree.LightNodesBuffer);
-	PassParameters->DistanceType = CVarLightTreeDistanceType.GetValueOnRenderThread();
+	PassParameters->DistanceType = GetCVarLightTreeDistanceType().GetValueOnRenderThread();
 	PassParameters->LeafStartIndex = GTree.GetLeafStartIndex();
 	PassParameters->MeshLightLeafStartIndex = MeshTree.GetLeafStartIndex();
 	PassParameters->MeshLightCutBuffer = GraphBuilder.CreateSRV(MeshTree.LightCutBuffer);

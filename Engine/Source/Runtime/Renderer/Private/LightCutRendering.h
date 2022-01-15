@@ -161,7 +161,8 @@ public:
 
 extern TAutoConsoleVariable<int>& GetCVarInterleaveRate();
 extern TAutoConsoleVariable<float>& GetCVarErrorLimit();
-extern TAutoConsoleVariable<int>& GetCVarMaxCutNodes();
+extern int GetMaxCutNodes();
 extern TAutoConsoleVariable<int>& GetCVarCutBlockSize();
 extern TAutoConsoleVariable<int>& GetCVarCutSharing();
 extern TAutoConsoleVariable<int>& GetCVarUseApproximateCosineBound();
+extern TAutoConsoleVariable<int>& GetCVarLightTreeDistanceType();
