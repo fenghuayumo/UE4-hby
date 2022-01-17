@@ -57,7 +57,7 @@ TAutoConsoleVariable<int> CVarCutSharing(
 
 TAutoConsoleVariable<int> CVarMaxCutNodes(
 	TEXT("r.LightCut.MaxCutNodes"),
-	2,
+	1,
 	TEXT("Set Max Light Cut Nodes)"),
 	ECVF_RenderThreadSafe
 );
@@ -98,8 +98,9 @@ TAutoConsoleVariable<float>& GetCVarErrorLimit()
 
 int GetMaxCutNodes()
 {
-	int MacCutNode = FMath::Min<int32>(GTree.NumTreeLevels / 2, CVarMaxCutNodes.GetValueOnRenderThread());
-	return MacCutNode;
+	//int MaxCutNode = FMath::Min<int32>(FMath::CeilToInt(GTree.NumTreeLevels / 2.0), CVarMaxCutNodes.GetValueOnRenderThread());
+	int MaxCutNode = CVarMaxCutNodes.GetValueOnRenderThread();
+	return MaxCutNode;
 }
 
 TAutoConsoleVariable<int>& GetCVarCutBlockSize()
@@ -877,7 +878,7 @@ void MeshLightTree::FindLightCuts(const FScene& Scene,
 	LightCutBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MAX_CUT_NODES * ((ScaledViewSize.X + 7) / 8) * ((ScaledViewSize.Y + 7) / 8)), TEXT("Mesh Light cut buffer"));
 	PassParameters->NodesBuffer = GraphBuilder.CreateSRV(LightNodesBuffer);
 	PassParameters->LightCutBuffer = GraphBuilder.CreateUAV(LightCutBuffer);
-	PassParameters->MaxCutNodes = CVarMaxCutNodes.GetValueOnRenderThread();
+	PassParameters->MaxCutNodes = GetMaxCutNodes();
 	PassParameters->CutShareGroupSize = CVarCutBlockSize.GetValueOnRenderThread();
 	PassParameters->ErrorLimit = CVarErrorLimit.GetValueOnRenderThread();
 	PassParameters->UseApproximateCosineBound = CVarUseApproximateCosineBound.GetValueOnRenderThread();
