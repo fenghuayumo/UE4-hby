@@ -247,9 +247,9 @@ bool SampleTriangleLight(float2 RandSample,
 	uint v1 = MeshLightIndexBuffer[prim.IndexOffset + 1];
 	uint v2 = MeshLightIndexBuffer[prim.IndexOffset + 2];
 
-	const float3 p0 = mul(float4(MeshLightVertexBuffer[v0],1.0), transform).xyz;
-	const float3 p1 = mul(float4(MeshLightVertexBuffer[v1],1.0), transform).xyz;
-	const float3 p2 = mul(float4(MeshLightVertexBuffer[v2],1.0), transform).xyz;
+	const float3 p0 = mul(float4(MeshLightVertexBuffer[v0],1.0f), transform).xyz;
+	const float3 p1 = mul(float4(MeshLightVertexBuffer[v1],1.0f), transform).xyz;
+	const float3 p2 = mul(float4(MeshLightVertexBuffer[v2],1.0f), transform).xyz;
 	
 	float3  Emission = MeshLightInstanceBuffer[prim.InstanceID].Emission;
 
@@ -265,18 +265,19 @@ bool SampleTriangleLight(float2 RandSample,
 	float3 SampleLightPos = p0 + beta * (p1 - p0) + gamma * (p2 - p0);
 
 	float3 Direction = (SampleLightPos - WorldPos);
-	float dSquared = dot(Direction, Direction);
+	float dSquared = max(dot(Direction, Direction), 1e-1) ;
 	float LightDist = sqrt(dSquared);
-	Direction /= (LightDist + 1e-6);
+	Direction /= LightDist;
 	// Direction = normalize(Direction);
 	// float LightDist = length(Direction);
 
-	float dDotn = dot(-Direction, normalize(LightN));
-	// float pdf = dDotn < 0 ? 0 : dSquared / (Area * dDotn);
-	float Pdf = dSquared / (Area * dDotn);
-	if( Pdf <= 0) return false;
+	float dDotn = abs(dot(-Direction, normalize(LightN))) + 1e-4;
+	//float Pdf = dSquared;
+	//if( Area > 1e-4)
+	float Pdf = dSquared / (Area * dDotn );
+	//if( Pdf <= 0) return false;
 	OutDirection = Direction;
-	OutDistance = LightDist ;
+	OutDistance =  LightDist - 8e-1;
 	OutPdf = Pdf * PickPdf;
 	OutRadianceOverPdf = Emission / OutPdf;
 
@@ -536,7 +537,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 		#endif
 				LightRay.Origin = WorldPosition;
 				LightRay.TMin = 0;
-				LightRay.TMax = min(LightRay.TMax - 1e-1, MaxShadowDistance);
+				LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
 				bool bTransmission = true;
 				float3 BiasNormal = WorldNormal;
 				if ( dot(BiasNormal, LightRay.Direction) < 0.0)
@@ -565,11 +566,21 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 				{
 					// Evaluate material
 					float3 MaterialThroughput;
-					float MaterialEvalPdf = 0.0;
 #if USE_PATHTRACING_MATERIALS
-					float3 MaterialWeight = 0;
-					EvalMaterial(CameraDirection, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
-					MaterialThroughput = MaterialWeight * MaterialEvalPdf;
+					// EvalMaterial(CameraDirection, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
+					FMaterialClosestHitPayload Payload = (FMaterialClosestHitPayload)0;
+					Payload.WorldPos = WorldPosition;
+					Payload.WorldNormal = WorldNormal;
+					Payload.BaseColor = GBufferData.BaseColor;
+					Payload.Specular = GBufferData.Specular;
+					Payload.Roughness = GBufferData.Roughness;
+					Payload.Metallic = GBufferData.Metallic;
+					Payload.Roughness = GBufferData.Roughness;
+					Payload.ShadingModelID = GBufferData.ShadingModelID;
+					Payload.CustomData = GBufferData.CustomData;
+
+					FMaterialEval MaterialEval = EvalMaterial(CameraDirection, LightRay.Direction, Payload, false);
+					MaterialThroughput = MaterialEval.Weight * MaterialEval.Pdf;
 #else
 					half3 N = WorldNormal;
 					half3 V = -CameraDirection;
@@ -582,7 +593,6 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					{
 						MaterialThroughput += LightingSample.Transmission;
 					}
-					MaterialEvalPdf = 1.0;
 #endif
 
 					// Record the contribution
@@ -707,7 +717,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 #if !MESH_LIGHT_SAMPLING
 			if (AccumulateEmissive)
 			{
-				Irradiance += Payload.Radiance;
+				Irradiance += Payload.Radiance * RayThroughput / RayPdf;
 			}
 #else
 	#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
@@ -768,7 +778,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 		#endif
 					LightRay.Origin = Ray.Origin;
 					LightRay.TMin = 0;
-					LightRay.TMax = min(LightRay.TMax - 1e-1, MaxShadowDistance);
+					LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
 					bool bTransmission = true;
 					float3 BiasNormal = Payload.WorldNormal;
 					if ( dot(BiasNormal, LightRay.Direction) < 0.0)
@@ -797,11 +807,9 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					{
 						// Evaluate material
 						float3 MaterialThroughput;
-						float MaterialEvalPdf = 0.0;
 	#if USE_PATHTRACING_MATERIALS
-						float3 MaterialWeight = 0;
-						EvalMaterial(Ray.Direction, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
-						MaterialThroughput = MaterialWeight * MaterialEvalPdf;
+						FMaterialEval MaterialEval = EvalMaterial(CameraDirection, LightRay.Direction, Payload, false);
+						MaterialThroughput = MaterialEval.Weight * MaterialEval.Pdf;
 	#else
 						half3 N = Payload.WorldNormal;
 						half3 V = -Ray.Direction;
@@ -814,7 +822,6 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 						{
 							MaterialThroughput += LightingSample.Transmission;
 						}
-						MaterialEvalPdf = 1.0;
 	#endif
 
 						// Record the contribution
@@ -963,11 +970,10 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					{
 						// Evaluate material
 						float3 MaterialThroughput;
-						float MaterialEvalPdf = 0.0;
 #if USE_PATHTRACING_MATERIALS
-						float3 MaterialWeight = 0;
-						EvalMaterial(Ray.Direction, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
-						MaterialThroughput = MaterialWeight * MaterialEvalPdf;
+						//EvalMaterial(Ray.Direction, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
+						FMaterialEval MaterialEval = EvalMaterial(CameraDirection, LightRay.Direction, Payload, false);
+						MaterialThroughput = MaterialEval.Weight * MaterialEval.Pdf;
 #else
 						half3 N = Payload.WorldNormal;
 						half3 V = -Ray.Direction;
@@ -980,7 +986,6 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 						{
 							MaterialThroughput += LightingSample.Transmission;
 						}
-						MaterialEvalPdf = 1.0;
 #endif
 
 						// Record the contribution
