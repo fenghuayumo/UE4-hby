@@ -107,6 +107,16 @@ uint2 GetPixelCoord2(uint2 DispatchThreadId, uint UpscaleFactor)
 	return DispatchThreadId * UpscaleFactor;// + uint2(SubPixelId & (UpscaleFactor - 1), SubPixelId / UpscaleFactor);
 }
 
+float GetTargetPdf(float3 Irradiance, float3 Normal, float3 Position, float3 SamplePosition)
+{
+#define COSINE_TARGET_PDF 0
+#if COSINE_TARGET_PDF
+	return dot(Irradiance, 1) * max(0.1, dot(Normal, normalize(SamplePosition - Position)));
+#else
+	return dot(Irradiance, 1);
+#endif
+}
+
 void TraceLightFunctionRayPacked(
 	inout FPackedMaterialClosestHitPayload PackedPayload,
 	in RaytracingAccelerationStructure TLAS,
@@ -163,10 +173,10 @@ FLightFunctionPayload TraceLightFunctionRay(
 
 float GetApproximateLightSampleWeight(float3 WorldPosition, float3 CameraDirection, FGBufferData GBuffer, RTXGI_SampleRef SampleRef)
 {
-	float3 dir = normalize(SampleRef.GetSamPosition() - WorldPosition);
-	float cosTheta = dot(dir, GBuffer.WorldNormal);
+	// float3 dir = normalize(SampleRef.Position - WorldPosition);
+	// float cosTheta = dot(dir, GBuffer.WorldNormal);
 	// float weight = Luminance(GBuffer.DiffuseColor * SampleRef.Li * cosTheta);
-	float weight = Luminance(SampleRef.Li);
+	float weight = GetTargetPdf(SampleRef.Irradiance,GBuffer.WorldNormal, WorldPosition,  SampleRef.Position);
 	return weight;
 }
 
@@ -175,7 +185,7 @@ bool CheckApproximateVisibility(uint2 PixelCoord, float DeviceZ, float3 WorldPos
 	RayDesc Ray;
 
 	Ray.Origin = WorldPosition;
-	float3 toLight = SampleRef.GetSamPosition() - WorldPosition;
+	float3 toLight = SampleRef.Position - WorldPosition;
 	float length = sqrt(dot( toLight, toLight));
 	Ray.Direction = toLight / length;
 	
@@ -334,10 +344,12 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 
 			if (Bounce == 0)
 			{
-				float3 samPos = Ray.Origin + Ray.Direction * Payload.HitT;
+				float3 HitPos = Ray.Origin + Ray.Direction * Payload.HitT;
 				// sampleRef.Create( samPos,Payload.WorldNormal, WorldPosition, GBuffer.WorldNormal );
-				sampleRef.SetVisPoint(WorldNormal, WorldPosition);
-				sampleRef.SetSamPoint(Payload.WorldNormal, samPos);
+				sampleRef.CreationPoint = WorldPosition;
+				sampleRef.CreationNormal = WorldNormal;
+				sampleRef.Position = HitPos;
+				sampleRef.Normal = Payload.WorldNormal;
 			}
 			if (Payload.HitT > MaxRayDistanceForGI) break;
 
@@ -513,32 +525,19 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 			Bounce++;
 		}
 
-		sampleRef.Li = Irradiance;
-		float pdfScale = 1.0;
-		float weight = Luminance(sampleRef.Li);
+		sampleRef.Irradiance = Irradiance;
+		// float pdfScale = 1.0;
+		// float weight = Luminance(sampleRef.Irradiance);
+		float targetPdf = GetTargetPdf(sampleRef.Irradiance, sampleRef.CreationPoint,sampleRef.CreationNormal, sampleRef.Position);	
+		float invSourcePdf = 1.0;
 		float risRnd = RandContext.GenerateSample1D();
 
-		bool selected = LocalReservoir.StreamSample(sampleRef, risRnd, weight, pdfScale);
+		bool selected = LocalReservoir.StreamSample(sampleRef, risRnd, targetPdf, invSourcePdf);
 	}
 	LocalReservoir.FinalizeResampling(1.0, LocalReservoir.M);
 	LocalReservoir.M = 1;
 
-	state = RTXGI_Reservoir::Empty();
-	float LocalVisibilityFactor = 1.0f;
-	// bool PostTestVisibility = InitialSampleVisibility == 1;
-
-	// if (InitialSampleVisibility == 2)
-	// {
-	// 	if (LocalReservoir.sampleRef.IsValid())
-	// 	{
-	// 		LocalVisibilityFactor = CheckApproximateVisibility(PixelCoord, DeviceZ, WorldPosition, GBuffer, LocalReservoir.sampleRef) ? 1.0 : 0.0;
-	// 	}
-	// }
-
-	// state.CombineReservoirs(LocalReservoir, 0.5, LocalReservoir.targetPdf * LocalVisibilityFactor);
-
-	// state.FinalizeResampling(1.0, 1.0);
-	// state.M = 1;
+	// state = RTXGI_Reservoir::Empty();
 	state = LocalReservoir;
 }
 
@@ -557,14 +556,15 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 
 	if (centerSample.sampleRef.IsValid() )
 	{
-		selectedPos = centerSample.sampleRef.GetSamPosition();
-		selectedNormal = centerSample.sampleRef.GetSamNormal();
-		selectedLi = centerSample.sampleRef.Li;
+		selectedPos = centerSample.sampleRef.Position;
+		selectedNormal = centerSample.sampleRef.Normal;
+		selectedLi = centerSample.sampleRef.Irradiance;
 		selected = true;
 	}
 
 	state.CombineReservoirs(centerSample, /* random = */ 0.5f, centerSample.targetPdf);
 
+	float3 WorldNormal = GBuffer.WorldNormal;
 	//
 	// Walk the specified number of neighbors, resampling using RIS
 	//
@@ -615,6 +615,7 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 		float3 AdjCameraDirection;
 		ReconstructWorldPositionAndCameraDirectionFromDeviceZ(SampleCoord, AdjDeviceZ, AdjWorldPosition, AdjCameraDirection);
 
+
 		// TODO: refine sample rejection tests
 		if (dot(GBuffer.WorldNormal, AdjGBuffer.WorldNormal) < SpatialNormalRejectionThreshold)
 		{
@@ -646,14 +647,42 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 				Visible = CheckApproximateVisibility(SampleCoord, DeviceZ, WorldPosition, GBuffer, neighborSample.sampleRef);
 			}
 #endif
-			float neighborWeight = Visible ? GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, neighborSample.sampleRef) : 0;
+			//float neighborWeight = Visible ? GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, neighborSample.sampleRef) : 0;
+			float3 OffsetB = neighborSample.sampleRef.Position - neighborSample.sampleRef.CreationPoint;
+			float3 OffsetA = neighborSample.sampleRef.Position - WorldPosition;
+			// Discard back-face
+			if (dot(WorldNormal, OffsetA) < 0 || dot(neighborSample.sampleRef.CreationNormal, WorldNormal) < 0.8 || any(isnan(OffsetA)) || any(isnan(OffsetB)))
+			{
+				continue;
+			}
+
+			//float pOldTN = GetTargetPdf(neighborSample.sampleRef.Irradiance, neighborSample.sampleRef.CreationNormal, neighborSample.sampleRef.CreationPoint, GatherSampleTNear.Position);
+			float pNewTN = GetTargetPdf(neighborSample.sampleRef.Irradiance, WorldNormal, WorldPosition, neighborSample.sampleRef.Position);
+
+			float RB2 = dot(OffsetB, OffsetB);
+			float RA2 = dot(OffsetA, OffsetA);
+			OffsetB = normalize(OffsetB);
+			OffsetA = normalize(OffsetA);
+
+			float cosA = dot(WorldNormal, OffsetB);
+			float cosB = dot(neighborSample.sampleRef.CreationNormal, OffsetB);
+			float cosPhiA = -dot(OffsetA, neighborSample.sampleRef.Normal);
+			float cosPhiB = -dot(OffsetB, neighborSample.sampleRef.Normal);
+			// Discard extreme samples to prevent fireflies
+			if (cosA <= 0 || cosB <= 0 || cosPhiA <= 0 || cosPhiB <= 0 || RA2 <= 0 || RB2 <= 0)
+			{
+				continue;
+			}
+			float Jocbian = RB2 * cosPhiA / max(1e-5, (RA2 * cosPhiB));
+
+			float neighborWeight = Visible ?  pNewTN * Jocbian : 0;
 			{
 				cachedResult |= (1u << uint(i));
 				if (state.CombineReservoirs(neighborSample, RandContext.GenerateSample1D(), neighborWeight))
 				{
 					selected = i;
-					selectedPos = neighborSample.sampleRef.GetSamPosition();
-					selectedNormal = neighborSample.sampleRef.GetSamNormal();
+					selectedPos = neighborSample.sampleRef.Position;
+					selectedNormal = neighborSample.sampleRef.Normal;
 				}
 			}
 		}
@@ -805,14 +834,14 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 
 			if (risSample.sampleRef.IsValid())
 			{
-				float3 LightPosition = risSample.sampleRef.GetSamPosition();
+				float3 LightPosition = risSample.sampleRef.Position;
 				float3 Direction = (LightPosition - WorldPosition);
 				
 				RayDesc Ray;	
 				Ray.Origin = WorldPosition;
 				Ray.Direction = normalize(Direction);
 				Ray.TMin = 0;
-				Ray.TMax = length(Direction) - 5e-2;
+				Ray.TMax = length(Direction) - 1e-1;
 				Ray.TMax = min(Ray.TMax, MaxShadowDistance);
 
 				float3 BiasNormal = GBuffer.WorldNormal;
@@ -835,7 +864,7 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 					Ray);
 				if (!LightPayload.IsHit() )
 				{
-					DiffuseExitantRadiance +=  risSample.sampleRef.Li * risSample.weightSum;
+					DiffuseExitantRadiance +=  risSample.sampleRef.Irradiance * risSample.weightSum;
 					RayDistance += Ray.TMax;
 					HitCount += 1.0f;
 				}
@@ -956,6 +985,7 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 	const bool bIsDepthValid = DeviceZ > 0.0;
 	const bool bIsValidPixel = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && bIsDepthValid && Luminance(DiffuseColor) > DiffuseThreshold;
 
+	float3 WorldNormal = GBuffer.WorldNormal;
 	if (bIsValidPixel)
 	{
 		RTXGI_Reservoir curSample = RTXGI_Reservoir::Load(ReadReservoirData(DispatchThreadId, InputSlice));
@@ -1058,7 +1088,32 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 					Visible = CheckApproximateVisibility(PixelCoord, DeviceZ, WorldPosition, GBuffer, prevSample.sampleRef);
 				}
 #endif
-				previousWeight = Visible ? GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, prevSample.sampleRef) : 0;
+				//previousWeight = Visible ? GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, prevSample.sampleRef) : 0;
+				float Jocbian = 1.0f;
+				// float3 OffsetB = prevSample.sampleRef.Position - prevSample.sampleRef.CreationPoint;
+				// float3 OffsetA = prevSample.sampleRef.Position - WorldPosition;
+				// // Discard back-face
+				// if (dot(WorldNormal, OffsetA) < 0 || dot(prevSample.sampleRef.CreationNormal, WorldNormal) < 0.8 || any(isnan(OffsetA)) || any(isnan(OffsetB)))
+				// 	Jocbian = 0;
+
+				// //float pOldTN = GetTargetPdf(prevSample.sampleRef.Irradiance, prevSample.sampleRef.CreationNormal, prevSample.sampleRef.CreationPoint, GatherSampleTNear.Position);
+				float pNewTN = GetTargetPdf(prevSample.sampleRef.Irradiance, WorldNormal, WorldPosition, prevSample.sampleRef.Position);
+
+				// float RB2 = dot(OffsetB, OffsetB);
+				// float RA2 = dot(OffsetA, OffsetA);
+				// OffsetB = normalize(OffsetB);
+				// OffsetA = normalize(OffsetA);
+
+				// float cosA = dot(WorldNormal, OffsetB);
+				// float cosB = dot(prevSample.sampleRef.CreationNormal, OffsetB);
+				// float cosPhiA = -dot(OffsetA, prevSample.sampleRef.Normal);
+				// float cosPhiB = -dot(OffsetB, prevSample.sampleRef.Normal);
+				// // Discard extreme samples to prevent fireflies
+				// if (cosA <= 0 || cosB <= 0 || cosPhiA <= 0 || cosPhiB <= 0 || RA2 <= 0 || RB2 <= 0)
+				// 	Jocbian = 0;
+				// Jocbian = RB2 * cosPhiA / max(1e-5, (RA2 * cosPhiB));
+
+				previousWeight = Visible ?  pNewTN * Jocbian : 0;
 				{
 					previousM = prevSample.M;
 

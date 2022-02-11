@@ -5,11 +5,9 @@
 struct RTXGI_PackedReservoir
 {
 	// Internal compressed GI sample data
-	uint4 VisPos;
-	uint4 SamPos;
-
-	uint4 	data1;
-	uint4   data2;
+	uint4 CreationGeometry;
+	uint4 HitGeometry;
+	uint4 LightInfo;
 };
 
 RWStructuredBuffer<RTXGI_PackedReservoir> RWGIReservoirUAV;
@@ -60,71 +58,52 @@ void WriteReservoirHistoryData(int2 PixelCoord, int Slice,in RTXGI_PackedReservo
 	RWGIReservoirHistoryUAV[Address] = Value;
 }
 
+uint2 PackIrradiance(float3 Irradiance, float M)
+{
+	uint2 Packed = (uint2)0;
+
+	// Note: Consider keeping Lumiance(Y) in full range
+	Packed.x = f32tof16(Irradiance.x) | (f32tof16(Irradiance.y) << 16);
+	Packed.y = f32tof16(Irradiance.z) | (f32tof16(M) << 16);
+	return Packed;
+}
+
+void UnpackIrradiance(uint2 Irradiance, out float3 Unpacked, out float M)
+{
+	Unpacked.x = f16tof32(Irradiance.x & 0xffff);
+	Unpacked.y = f16tof32(Irradiance.x >> 16);
+	Unpacked.z = f16tof32(Irradiance.y & 0xffff);
+	M          = f16tof32(Irradiance.y >> 16);
+}
+
+uint PackNormal(float3 Normal)
+{
+	float alpha = 0;
+	if ((Normal.x != 0 || Normal.y != 0))
+	{
+		alpha = atan2(Normal.y, Normal.x);
+	}
+	return f32tof16(alpha) | (f32tof16(Normal.z) << 16);
+}
+
+float3 UnpackNormal(uint PackedNormal)
+{
+	float z = f16tof32(PackedNormal >> 16);
+	float alpha = f16tof32(PackedNormal & 0xffff);
+	float r = sqrt(abs(1 - z * z));
+	return float3(cos(alpha) * r, sin(alpha) * r, z);
+}
+
+
 struct RTXGI_SampleRef
 {
 	// Internal compressed GI sample data
-	uint4 VisPos;
-	uint4 SamPos;
-
-	float3 Li;
+	float3 CreationPoint;
+	float3 CreationNormal;
+	float3 Position;
+	float3 Normal;
+	float3 Irradiance;
 	uint   Valid;
-
-	float3 GetVisPosition()
-	{
-		return asfloat( VisPos.xyz);
-	}
-
-	float3 GetVisNormal()
-	{
-		uint normal_w = VisPos.w;
-		float3 normal;
-		normal.x = (float)((normal_w >> 0u) & 0xFF) / 255.0 * 2 - 1;
-		normal.y = (float)((normal_w >> 8u) & 0xFF) / 255.0 * 2 - 1;
-		normal.z = (float)((normal_w >> 16u) & 0xFF) / 255.0 * 2 - 1;
-
-		return normal;
-	}
-
-	float3 GetSamPosition()
-	{
-		return asfloat( SamPos.xyz);
-	}
-
-	float3 GetSamNormal()
-	{
-		uint normal_w = SamPos.w;
-		float3 normal;
-		normal.x = (float)((normal_w >> 0u) & 0xFF) / 255.0 * 2 - 1;
-		normal.y = (float)((normal_w >> 8u) & 0xFF) / 255.0 * 2 - 1;
-		normal.z = (float)((normal_w >> 16u) & 0xFF) / 255.0 * 2 - 1;
-
-		return normal;
-	}
-
-	void SetVisPoint(float3 normal, float3 position)
-	{
-		uint normal_extra = 0; // reset only the normals
-		normal_extra |= (uint)((normal.x * 0.5f + 0.5f) * 255.0f) << 0;
-		normal_extra |= (uint)((normal.y * 0.5f + 0.5f) * 255.0f) << 8;
-		normal_extra |= (uint)((normal.z * 0.5f + 0.5f) * 255.0f) << 16;
-
-		VisPos.xyz = asuint(position);
-		VisPos.w = normal_extra;
-		Valid = 1;
-	}
-
-	void SetSamPoint(float3 normal, float3 position)
-	{
-		uint normal_extra = 0;
-		normal_extra |= (uint)((normal.x * 0.5f + 0.5f) * 255.0f) << 0;
-		normal_extra |= (uint)((normal.y * 0.5f + 0.5f) * 255.0f) << 8;
-		normal_extra |= (uint)((normal.z * 0.5f + 0.5f) * 255.0f) << 16;
-
-		SamPos.xyz = asuint(position.xyz);
-		SamPos.w = normal_extra;
-
-		Valid = 1;
-	}
 
 	bool IsValid()
 	{
@@ -135,17 +114,22 @@ struct RTXGI_SampleRef
 	{
 		RTXGI_SampleRef s = (RTXGI_SampleRef)0;
 		s.Valid = 0;
-		s.VisPos = 0;
-		s.SamPos = 0;
-		s.Li = 0;
+		s.Irradiance = 0;
+		
+		s.CreationPoint = 0;
+		s.CreationNormal = 0;
+		s.Position = 0;
+		s.Normal = 0;
 		return s;
 	}
 
 	static RTXGI_SampleRef Create(float3 samPos, float3 samNormal, float3 visPos, float3 visNormal)
 	{
 		RTXGI_SampleRef s;
-		s.SetVisPoint(visPos, visNormal);
-		s.SetSamPoint(samPos, samNormal);
+		s.CreationPoint = visPos;
+		s.CreationNormal = visNormal;
+		s.Position = samPos;
+		s.Normal = samNormal;
 		s.Valid = 1;
 		return s;
 	}
@@ -176,25 +160,20 @@ struct RTXGI_Reservoir
 	static RTXGI_Reservoir Load(RTXGI_PackedReservoir data)
 	{
 		RTXGI_Reservoir res;
-		res.sampleRef.VisPos = data.VisPos;
-		res.sampleRef.SamPos = data.SamPos;
-		res.sampleRef.Li = asfloat(data.data1.xyz);
-		res.sampleRef.Valid = data.data1.w;
-#if !CUSTOM_FLOAT
-		res.weightSum = f16tof32(data.data2.z);
-		res.targetPdf = f16tof32(data.data2.z >> 16);
-		res.M = data.data2.w;
-#else
-		res.M = data.data2.w & 0xff;
-		res.M |= (data.data2.z & 0xff) << 8;
+		uint4 CreationGeometry = data.CreationGeometry;
+		res.sampleRef.CreationPoint = asfloat(CreationGeometry.xyz);
+		res.sampleRef.CreationNormal = UnpackNormal(CreationGeometry.w);
 
-		// unsigned 24 bit floats
-		uint weightSum = (data.data2.z & 0xffffff00);
-		uint targetPdf = (data.data2.w & 0xffffff00);
-		res.weightSum = asfloat(weightSum >> 1);
-		res.targetPdf = asfloat(targetPdf >> 1);
+		uint4 HitGeometry = data.HitGeometry;
+		res.sampleRef.Position = asfloat(HitGeometry.xyz);
+		res.sampleRef.Normal = UnpackNormal(HitGeometry.w);
 
-#endif
+		uint4 LightInfo = data.LightInfo;
+		UnpackIrradiance(LightInfo.xy, res.sampleRef.Irradiance, res.M);
+		res.sampleRef.Valid = res.M ;
+
+		res.weightSum = asfloat(LightInfo.z );
+		res.targetPdf = asfloat(LightInfo.w);
 
 		// Discard reservoirs that have Inf/NaN
 		if (isinf(res.weightSum) || isnan(res.weightSum)) {
@@ -207,36 +186,22 @@ struct RTXGI_Reservoir
 	RTXGI_PackedReservoir Store()
 	{
 		RTXGI_PackedReservoir data;
-		data.VisPos = sampleRef.VisPos;
-		data.SamPos = sampleRef.SamPos;
-		data.data1.xyz = asuint(sampleRef.Li);
-		data.data1.w = sampleRef.Valid;
-		data.data2 = 0;
-#if !CUSTOM_FLOAT
-		data.data2.w = M;
-		data.data2.z = f32tof16(weightSum) | (f32tof16(targetPdf) << 16);
-#else
+		uint4 CreationGeometry;
+		CreationGeometry.xyz = asuint(sampleRef.CreationPoint);
+		CreationGeometry.w = PackNormal(sampleRef.CreationNormal);
+		data.CreationGeometry = CreationGeometry;
 
-		const float RoundConst = 1.0f / float(1 << 18); // 1/(2^18) is the first bit unrepresented by the custom float)
-		float RoundedWeight = weightSum + weightSum * RoundConst;
-		float RoundedPdf = targetPdf + targetPdf * RoundConst;
+		uint4 HitGeometry;
+		HitGeometry.xyz = asuint(sampleRef.Position);
+		HitGeometry.w = PackNormal(sampleRef.Normal);
+		data.HitGeometry = HitGeometry;
 
-		//remove sign as values are guaranteed positive
-		uint uWeightSum = asuint(max(0.0, RoundedWeight)) << 1;
-		uint uTargetPdf = asuint(max(0.0, RoundedPdf)) << 1;
-
-		//chop to 24 bits
-		uWeightSum = uWeightSum & 0xffffff00;
-		uTargetPdf = uTargetPdf & 0xffffff00;
-
-		//clamp M
-		M = min(M, MaxM);
-
-		// pack M to bottom bits
-		data.data2.z = (uWeightSum) | ((M >> 8) & 0xff);
-		data.data2.w = (uTargetPdf) | (M & 0xff);
-#endif
-
+		uint4 LightInfo;
+		LightInfo.xy = PackIrradiance(sampleRef.Irradiance, M);
+		LightInfo.z = asuint(weightSum);
+		LightInfo.w = asuint(targetPdf);
+		data.LightInfo = LightInfo;
+		
 		return data;
 	}
 
@@ -295,4 +260,32 @@ struct RTXGI_Reservoir
 
 		return selectSample;
 	}
+
+	// bool Update(RTXGI_SampleRef newSampleRef, float random, float risWeight)
+	// {
+	// 	// Update the weight sum
+	// 	weightSum += risWeight;
+	// 	// Add one sample to the counter
+	// 	M += 1;
+	// 	// Decide if we will randomly pick this sample
+	// 	bool selectSample = (random * weightSum <= risWeight);
+
+	// 	// If we did select this sample, update the relevant data.
+	// 	// New samples don't have visibility or age information, we can skip that.
+	// 	if (selectSample)
+	// 	{
+	// 		sampleRef = newSampleRef;
+	// 		targetPdf = newTargetPdf;
+	// 	}
+
+	// 	return selectSample;
+	// }
+
+	// bool MergeReservoirs(RTXGI_Reservoir newReservoir,float random, float newTargetPdf )
+	// {
+	// 	uint M0 = M;
+	// 	bool selectSample = Update(newReservoir.sampleRef, random, newTargetPdf * newReservoir.weightSum *newReservoir.M );
+	// 	M = M0 + newReservoir.M;
+	// 	return selectSample;
+	// }
 };
