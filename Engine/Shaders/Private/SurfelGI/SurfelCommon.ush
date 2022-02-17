@@ -1,0 +1,145 @@
+#ifndef SURFEL_COMMON_HLSL
+#define SURFEL_COMMON_HLSL
+#include "HashUtil.ush"
+
+#define SURFEL_UNIT_SCALE 200
+// static const uint MAX_SURFEL_GRID_CELLS = 1024 * 256;
+static const float SURFEL_GRID_CELL_DIAMETER = 0.25 * SURFEL_UNIT_SCALE;
+
+static const uint MAX_SURFEL_CELLS  = 1024 * 1024;
+// static const uint MAX_SURFELS  = MAX_SURFEL_CELLS;
+static const uint MAX_SURFELS_PER_CELL  = 32;
+static const uint MAX_SURFEL_COUNT  = MAX_SURFELS_PER_CELL * MAX_SURFEL_CELLS;
+
+static const float SURFEL_RADIUS = 0.3 * SURFEL_UNIT_SCALE;
+static const float SURFEL_NORMAL_DIRECTION_SQUISH = 2;
+static const float RADIUS_OVERSCALE = 1.3;
+
+struct SurfelVertexPacked
+{
+    float4   data0;
+    float4   data1;
+};
+
+struct SurfelVertex 
+{
+    float3  Position;
+    float3  Normal;
+    uint2   PixelCoord;
+    float3  DiffuseColor;
+};
+
+float UnPackUnormal(uint pckd, uint bitCount) 
+{
+	uint maxVal = (1u << bitCount) - 1;
+	return float(pckd & maxVal) / maxVal;
+}
+
+uint PackUnorm(float val, uint bitCount) 
+{
+	uint maxVal = (1u << bitCount) - 1;
+	return uint(clamp(val, 0.0, 1.0) * maxVal);
+}
+
+float3 UnPackNormal_11_10_11(float pckd) 
+{
+	uint p = asuint(pckd);
+	return normalize(float3(
+		UnPackUnormal(p, 11),
+		UnPackUnormal(p >> 11, 10),
+		UnPackUnormal(p >> 21, 11)
+	) * 2.0 - 1.0);
+}
+
+float PackNormal_11_10_11(float3 n)
+{
+	uint pckd = 0;
+	pckd += PackUnorm(n.x * 0.5 + 0.5, 11);
+	pckd += PackUnorm(n.y * 0.5 + 0.5, 10) << 11;
+	pckd += PackUnorm(n.z * 0.5 + 0.5, 11) << 21;
+	return asfloat(pckd);
+}
+
+float3 UnPackUnitDirection_11_10_11(uint pck) 
+{
+    return float3(
+        float(pck & ((1u << 11u)-1u)) * (2.0f / float((1u << 11u)-1u)) - 1.0f,
+        float((pck >> 11u) & ((1u << 10u)-1u)) * (2.0f / float((1u << 10u)-1u)) - 1.0f,
+        float((pck >> 21u)) * (2.0f / float((1u << 11u)-1u)) - 1.0f
+    );
+}
+
+uint  PackUint16_16(uint2 px)
+{
+    uint mask = 0xffff;
+    return ( (px.y & mask) << 16 )| (px.x & mask);
+}
+
+uint2 UnPackUint16_16(uint p)
+{
+    uint mask = 0xffff;
+    return uint2(p & mask , ( p >> 16 ) & mask);
+}
+
+SurfelVertex UnPackVertex(SurfelVertexPacked p) 
+{
+    SurfelVertex res;
+    res.Position = p.data0.xyz;
+    res.Normal = UnPackNormal_11_10_11(p.data0.w);
+    res.DiffuseColor = p.data1.xyz;
+    res.PixelCoord = UnPackUint16_16(asuint(p.data1.w));
+    return res;
+}
+
+int3 GetSurfelGridCoordFromPos(float3 WorldPosition) 
+{
+    return int3(floor( (WorldPosition)/ SURFEL_GRID_CELL_DIAMETER));
+}
+
+float3 GetSurfelGridCenter(int3 Coord) 
+{
+    return (Coord + 0.5.xxx) * SURFEL_GRID_CELL_DIAMETER;
+}
+
+uint GetHashFromSurfelGridCoord(int3 Coord) 
+{
+    return hash3(asuint(Coord));
+}
+
+uint GetHashFromSurfelPos(float3 WorldPosition) 
+{
+    return GetHashFromSurfelGridCoord(GetSurfelGridCoordFromPos(WorldPosition));
+}
+
+void GetSurfelGridBoxMinMax(SurfelVertex surfel, out int3 pMin, out int3 pMax) 
+{
+    const float3 box_min_pos = surfel.Position - SURFEL_RADIUS;
+    const float3 box_max_pos = surfel.Position + SURFEL_RADIUS;
+
+    pMin = GetSurfelGridCoordFromPos(box_min_pos);
+    pMax = GetSurfelGridCoordFromPos(box_max_pos);
+}
+
+bool SurfelIntersectsGrid(SurfelVertex surfel, int3 GridCoord) 
+{
+    const float3 CellCenter = GetSurfelGridCenter(GridCoord);
+    const float GridCellRadius = SURFEL_GRID_CELL_DIAMETER * 0.5;
+
+    const float3 CellLocalSurfelPos = surfel.Position - CellCenter;
+    const float3 CellLocalClosestPointOnGridCell =
+        clamp(CellLocalSurfelPos, -GridCellRadius, GridCellRadius);
+
+    const float3 PosOffset = CellLocalSurfelPos - CellLocalClosestPointOnGridCell;
+
+    #if 1
+        // Approximate box-ellipsoid culling. Sometimes misses corners,
+        // but greatly improves culling efficiency.
+        // TODO: figure out a precise solution. Warp space before finding the closest point?
+        const float mahalanobis_dist = length(PosOffset) * (1 + abs(dot(PosOffset, surfel.Normal)) * SURFEL_NORMAL_DIRECTION_SQUISH);
+        return mahalanobis_dist < SURFEL_RADIUS;
+    #else
+        return dot(PosOffset, PosOffset) < SURFEL_RADIUS * SURFEL_RADIUS;
+    #endif
+}
+
+#endif

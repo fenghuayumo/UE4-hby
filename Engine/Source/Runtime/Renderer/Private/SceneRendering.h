@@ -916,12 +916,13 @@ struct FSampleGIHistory
 {
 	// Buffer holding a light reservoirs
 	TRefCountPtr<FRDGPooledBuffer> GIReservoirs;
-
+	//TRefCountPtr<FRDGPooledBuffer> GatherBuffer;
 	FIntVector ReservoirDimensions;
 
 	void SafeRelease()
 	{
 		GIReservoirs.SafeRelease();
+		//GatherBuffer.SafeRelease();
 	}
 
 	bool IsValid() const

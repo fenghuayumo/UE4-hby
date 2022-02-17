@@ -26,6 +26,13 @@ TAutoConsoleVariable<bool> CVarVizLightNodeEnable(
 	TEXT("Whether to visualize Light node (default = false)"),
 	ECVF_RenderThreadSafe);
 
+TAutoConsoleVariable<bool> CVarVizMeshLightNodeEnable(
+	TEXT("r.LightCut.VizMeshLightNode"),
+	false,
+	TEXT("Whether to visualize Light node (default = false)"),
+	ECVF_RenderThreadSafe);
+
+
 
 TAutoConsoleVariable<int> CVarVizLightTreeLevel(
 	TEXT("r.LightCut.VizLightTreeLevel"),
@@ -704,7 +711,7 @@ void MeshLightTree::Build(FRDGBuilder& GraphBuilder,
 	RDG_GPU_STAT_SCOPE(GraphBuilder, MeshLightTreeBuild);
 	RDG_EVENT_SCOPE(GraphBuilder, "Build Mesh Ligh Tree");
 
-	bEnableNodeViz = CVarVizLightNodeEnable.GetValueOnRenderThread();
+	bEnableNodeViz = CVarVizMeshLightNodeEnable.GetValueOnRenderThread();
 	NumTriLights = TriLightCount;
 	QuantizationLevels = 1024;
 

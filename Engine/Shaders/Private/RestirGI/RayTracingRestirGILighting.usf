@@ -90,6 +90,17 @@ float TemporalNormalRejectionThreshold;
 uint NeighborOffsetMask;
 Buffer<float2> NeighborOffsets;
 
+#if USE_SURFEL
+#include "../SurfelGI/SurfelCommon.ush"
+ByteAddressBuffer SurfelMetaBuf;
+ByteAddressBuffer SurfelHashKeyBuf;
+ByteAddressBuffer SurfelHashValueBuf;
+StructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+ByteAddressBuffer CellIndexOffsetBuf;
+ByteAddressBuffer SurfelIndexBuf;
+StructuredBuffer<float4> SurfelIrradianceBuf;
+#include "../SurfelGI/SurfelGridHash.ush"
+#endif
 
 //Extended trace types to support miss shader evaluation of light functions
 struct FLightFunctionPayload : FMinimalPayload
@@ -304,7 +315,9 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 		
 		float MaterialPdf = 0.0;
 		uint Bounce = 0;
+		#if !USE_SURFEL
 		while (Bounce < MaxBounces)
+		#endif
 		{
 			// Cast ray
 			uint RayFlags = 0;
@@ -342,7 +355,9 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 				break;
 			}
 
+			#if !USE_SURFEL
 			if (Bounce == 0)
+			#endif
 			{
 				float3 HitPos = Ray.Origin + Ray.Direction * Payload.HitT;
 				// sampleRef.Create( samPos,Payload.WorldNormal, WorldPosition, GBuffer.WorldNormal );
@@ -455,18 +470,13 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 						// Record the contribution
 						float3 ExitantRadianceSample = LightRadianceOverPdf * MaterialThroughput * RayThroughput * SplitFactor / RayPdf;
 
-						// Tonemap for firefly suppression
-						// if (UseFireflySuppression)
-						// {
-						// 	ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
-						// }
-
 						Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
 					}
 				}
 			}
 
 			// Perform material sampling
+#if !USE_SURFEL
 			if (Bounce + 1 < MaxBounces)
 			{
 				float3 Direction;
@@ -523,8 +533,11 @@ void ProduceInitialSample(uint2 PixelCoord, FGBufferData GBuffer, float DeviceZ,
 
 			}
 			Bounce++;
+#else
+			Irradiance += GBufferData.DiffuseColor * GetSurfelGI(Ray.Origin, GBufferData.WorldNormal);
+#endif
 		}
-
+	
 		sampleRef.Irradiance = Irradiance;
 		// float pdfScale = 1.0;
 		// float weight = Luminance(sampleRef.Irradiance);

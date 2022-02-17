@@ -1,0 +1,11 @@
+
+#include "/Engine/Public/Platform.ush"
+ByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer DispatchArgs;
+
+[numthreads(1, 1, 1)]
+void main() 
+{
+    const uint SurfelCount = SurfelMetaBuf.Load(4 * 1);
+    DispatchArgs.Store4(0, uint4(SurfelCount, 1, 1, 0));
+}

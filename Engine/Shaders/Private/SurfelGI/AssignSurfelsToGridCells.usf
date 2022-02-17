@@ -1,0 +1,152 @@
+#ifdef PRE_DISPATCH_SURFEL_ARGS
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "SurfelCommon.ush"
+//#include "SurfelGridHash.ush"
+
+ByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer IndirectDispatchArgs;
+
+[numthreads(1, 1, 1)]
+void PrepareDispatchArgs() 
+{
+    const uint CellCount = SurfelMetaBuf.Load(sizeof(uint)* 0);
+    const uint SurfelCount = SurfelMetaBuf.Load(sizeof(uint) * 1);
+    // Cell clearing args
+    {
+        static const uint ThreadsPerGroup = 64;
+        static const uint EntriesPerThread = 4;
+        static const uint Divisor = ThreadsPerGroup * EntriesPerThread;
+
+        IndirectDispatchArgs.Store3(0 * sizeof(uint3), uint3((CellCount + Divisor - 1) / Divisor, 1, 1));
+    }
+
+    // Surfel binning args
+    {
+        static const uint ThreadsPerGroup = 64;
+        static const uint EntriesPerThread = 1;
+        static const uint Divisor = ThreadsPerGroup * EntriesPerThread;
+
+        IndirectDispatchArgs.Store3(1 * sizeof(uint3), uint3((SurfelCount + Divisor - 1) / Divisor, 1, 1));
+    }
+}
+
+#endif
+
+
+#ifdef CLEAR_SURFEL
+#include "/Engine/Public/Platform.ush"
+RWByteAddressBuffer CellIndexOffsetBuf;
+[numthreads(64, 1, 1)]
+void ClearSurfels(uint thread_index: SV_DispatchThreadID) 
+{
+    CellIndexOffsetBuf.Store4(sizeof(uint4) * thread_index, uint4(0, 0, 0, 0));
+}
+
+#endif
+
+#ifdef SLOT_SURFEL
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "SurfelCommon.ush"
+
+ByteAddressBuffer SurfelMetaBuf;
+ByteAddressBuffer SurfelHashKeyBuf;
+ByteAddressBuffer SurfelHashValueBuf;
+StructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+RWByteAddressBuffer CellIndexOffsetBuf;
+RWByteAddressBuffer SurfelIndexBuf;
+StructuredBuffer<float4> SurfelIrradianceBuf;
+#include "SurfelGridHash.ush"
+
+[numthreads(64, 1, 1)]
+void SlotSurfelIntoCell(uint SurfelIdx: SV_DispatchThreadID) 
+{
+    const uint SurfelCount = SurfelMetaBuf.Load(1 * sizeof(uint));
+    if (SurfelIdx >= SurfelCount) 
+    {
+        return;
+    }
+
+    const SurfelVertex surfel = UnPackVertex(SurfelVertexBuf[SurfelIdx]);
+
+    int3 box_min;
+    int3 box_max;
+    GetSurfelGridBoxMinMax(surfel, box_min, box_max);
+
+    for (int z = box_min.z; z <= box_max.z; ++z) 
+    {
+        for (int y = box_min.y; y <= box_max.y; ++y) 
+        {
+            for (int x = box_min.x; x <= box_max.x; ++x) 
+            {
+                if (!SurfelIntersectsGrid(surfel, int3(x, y, z))) 
+                {
+                    continue;
+                }
+
+                const SurfelGridHashEntry entry = SurfelHashLookupByGridCoord(int3(x, y, z));
+ 
+                 if (entry.found) 
+                 {
+                    const uint cell_idx = SurfelHashValueBuf.Load(sizeof(uint) * entry.idx);
+
+                    uint cell_index_loc_plus_one;
+                    CellIndexOffsetBuf.InterlockedAdd(sizeof(uint) * cell_idx, -1, cell_index_loc_plus_one);
+
+                    SurfelIndexBuf.Store(sizeof(uint) * (cell_index_loc_plus_one - 1), SurfelIdx);
+                }
+           }
+        }
+    }
+}
+
+#endif
+
+#ifdef COUNT_SURFEL
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "SurfelCommon.ush"
+
+ByteAddressBuffer SurfelMetaBuf;
+ByteAddressBuffer SurfelHashKeyBuf;
+ByteAddressBuffer SurfelHashValueBuf;
+StructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+RWByteAddressBuffer CellIndexOffsetBuf;
+RWByteAddressBuffer SurfelIndexBuf;
+StructuredBuffer<float4> SurfelIrradianceBuf;
+#include "SurfelGridHash.ush"
+[numthreads(64, 1, 1)]
+void CountSurfelsPerCell(uint SurfelIdx: SV_DispatchThreadID) 
+{
+    const uint SurfelCount = SurfelMetaBuf.Load(1 * sizeof(uint));
+    if (SurfelIdx >= SurfelCount) 
+        return;
+
+    const SurfelVertex surfel = UnPackVertex(SurfelVertexBuf[SurfelIdx]);
+
+    int3 box_min;
+    int3 box_max;
+    GetSurfelGridBoxMinMax(surfel, box_min, box_max);
+
+    for (int z = box_min.z; z <= box_max.z; ++z) 
+    {
+        for (int y = box_min.y; y <= box_max.y; ++y) 
+        {
+            for (int x = box_min.x; x <= box_max.x; ++x) 
+            {
+                if (!SurfelIntersectsGrid(surfel, int3(x, y, z))) 
+                    continue;
+                const SurfelGridHashEntry entry = SurfelHashLookupByGridCoord(int3(x, y, z));
+
+                if (entry.found) 
+                {
+                    const uint cell_idx = SurfelHashValueBuf.Load(sizeof(uint) * entry.idx);
+                    CellIndexOffsetBuf.InterlockedAdd(sizeof(uint) * cell_idx, 1);
+                }
+            }
+        }
+    }
+}
+
+#endif

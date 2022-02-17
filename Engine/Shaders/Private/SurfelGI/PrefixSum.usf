@@ -1,0 +1,121 @@
+#include "/Engine/Public/Platform.ush"
+#ifdef PREFIX_SCAN
+
+// #define THREAD_GROUP_SIZE 512
+#define SEGMENT_SIZE (THREAD_GROUP_SIZE * 2)
+
+RWByteAddressBuffer InoutBuf;
+
+groupshared uint SharedData[SEGMENT_SIZE];
+
+uint2 LoadInput2(uint idx, uint segment) 
+{
+    return InoutBuf.Load2(sizeof(uint) * (idx + segment * SEGMENT_SIZE));
+}
+
+void StoreOutput2(uint idx, uint segment, uint2 val) 
+{
+    InoutBuf.Store2(sizeof(uint) * (idx + segment * SEGMENT_SIZE), val);
+}
+
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void PrefixScan(uint idx: SV_GroupThreadID, uint segment: SV_GroupID) 
+{
+    const uint STEP_COUNT = uint(log2(THREAD_GROUP_SIZE)) + 1;
+
+    const uint2 input2 = LoadInput2(idx * 2, segment);
+    SharedData[idx * 2] = input2.x;
+    SharedData[idx * 2 + 1]	= input2.y;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for (uint step = 0; step < STEP_COUNT; step++) 
+    {
+        uint mask = (1u << step) - 1;
+        uint rd_idx = ((idx >> step) << (step + 1)) + mask;
+        uint wr_idx = rd_idx + 1 + (idx & mask);
+
+        SharedData[wr_idx] += SharedData[rd_idx];
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    StoreOutput2(idx * 2, segment, uint2(SharedData[idx * 2], SharedData[idx * 2 + 1]));
+}
+#endif
+
+#ifdef PREFIX_SCAN_SEGMENT
+
+// #define THREAD_GROUP_SIZE 512
+#define SEGMENT_SIZE (THREAD_GROUP_SIZE * 2)
+
+ByteAddressBuffer InputBuf;
+RWByteAddressBuffer OutputBuf;
+
+groupshared uint SharedData[SEGMENT_SIZE];
+
+uint load_input(uint idx) 
+{
+    const uint segment_sum_idx = idx * SEGMENT_SIZE + SEGMENT_SIZE - 1;
+    return InputBuf.Load(sizeof(uint) * segment_sum_idx);
+}
+
+void StoreOutput2(uint idx, uint2 val) 
+{
+    OutputBuf.Store2(sizeof(uint) * idx, val);
+}
+
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void PrefixScanSegment(uint idx: SV_GroupThreadID, uint segment: SV_GroupID) 
+{
+    const uint STEP_COUNT = uint(log2(THREAD_GROUP_SIZE)) + 1;
+
+    SharedData[idx * 2] = load_input(idx * 2);
+    SharedData[idx * 2 + 1] = load_input(idx * 2 + 1);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for (uint step = 0; step < STEP_COUNT; step++) 
+    {
+        uint mask = (1u << step) - 1;
+        uint rd_idx = ((idx >> step) << (step + 1)) + mask;
+        uint wr_idx = rd_idx + 1 + (idx & mask);
+
+        SharedData[wr_idx] += SharedData[rd_idx];
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    StoreOutput2(idx * 2, uint2(SharedData[idx * 2], SharedData[idx * 2 + 1]));
+}
+#endif
+
+
+#ifdef PREFIX_SCAN_MERGE
+// #define THREAD_GROUP_SIZE 512
+#define SEGMENT_SIZE (THREAD_GROUP_SIZE * 2)
+
+RWByteAddressBuffer InoutBuf;
+ByteAddressBuffer SegmentSumBuf;
+
+uint2 LoadInput2(uint idx, uint segment) 
+{
+    const uint2 internal_sum = InoutBuf.Load2(sizeof(uint) * (idx + segment * SEGMENT_SIZE));
+    const uint prev_segment_sum = segment == 0 ? 0 : SegmentSumBuf.Load(sizeof(uint) * (segment - 1));
+
+    return internal_sum + prev_segment_sum;
+}
+
+void StoreOutput2(uint idx, uint segment, uint2 val) 
+{
+    InoutBuf.Store2(sizeof(uint) * (idx + segment * SEGMENT_SIZE), val);
+}
+
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void PrefixScanMerge(uint idx: SV_GroupThreadID, uint segment: SV_GroupID) 
+{
+    StoreOutput2(idx * 2, segment, LoadInput2(idx * 2, segment));
+}
+#endif

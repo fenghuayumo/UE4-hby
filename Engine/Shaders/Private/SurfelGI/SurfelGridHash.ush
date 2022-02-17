@@ -1,0 +1,104 @@
+
+struct SurfelGridHashEntry 
+{
+    // True if the entry was found in the hash.
+    bool found;
+
+    // If not found, `vacant` will tell whether idx is an empty location
+    // at which we can insert a new entry.
+    bool vacant;
+
+    // Index into the hash table if found or vacant
+    uint idx;
+
+    // Value if found, checksum of the key that was queried if not found.
+    uint checksum;
+
+    bool acquire();
+
+};
+
+SurfelGridHashEntry SurfelHashLookupByGridCoord(int3 grid_coord) 
+{
+    const uint hash = GetHashFromSurfelGridCoord(grid_coord);
+    const uint checksum = GetHashFromSurfelGridCoord(grid_coord.zyx);
+
+    uint idx = (hash % MAX_SURFEL_CELLS);
+
+    static const uint MAX_COLLISION_COUNT = 8;
+    for (uint i = 0; i < MAX_COLLISION_COUNT; ++i, ++idx) 
+    {
+        const uint entry_checksum = SurfelHashKeyBuf.Load(idx * 4);
+
+        if (0 == entry_checksum) 
+        {
+            SurfelGridHashEntry res;
+            res.found = false;
+            res.vacant = true;
+            res.idx = idx;
+            res.checksum = checksum;
+            return res;
+        }
+
+        if (entry_checksum == checksum) 
+        {
+            SurfelGridHashEntry res;
+            res.found = true;
+            res.vacant = false;
+            res.idx = idx;
+            res.checksum = checksum;
+            return res;
+        }
+    }
+
+    SurfelGridHashEntry res;
+    res.found = false;
+    res.vacant = false;
+    res.idx = idx;
+    res.checksum = 0;
+    return res;
+}
+
+float3 GetSurfelGI(float3 WorldPos, float3 WorldNormal) 
+{
+    const SurfelGridHashEntry entry = SurfelHashLookupByGridCoord(GetSurfelGridCoordFromPos(WorldPos));
+    if (!entry.found) 
+    {
+        return 0.0.xxx;
+    }
+
+    const uint CellIdx = SurfelHashValueBuf.Load(sizeof(uint) * entry.idx);
+    uint2 SurfelIdxRange = CellIndexOffsetBuf.Load2(sizeof(uint) * CellIdx);
+    const uint CellSurfelCount = SurfelIdxRange.y - SurfelIdxRange.x;
+
+    // Make sure we're not iterating over tons of surfels out of bounds
+    SurfelIdxRange.y = min(SurfelIdxRange.y, SurfelIdxRange.x + 128);
+
+    float3 TotalColor = 0.0.xxx;
+    float TotalWeight = 0.0;
+
+    for (uint surfelIdxLoc = SurfelIdxRange.x; surfelIdxLoc < SurfelIdxRange.y; ++surfelIdxLoc)
+    {
+        const uint SurfelIdx = SurfelIndexBuf.Load(sizeof(uint) * surfelIdxLoc);
+        SurfelVertex surfel = UnPackVertex(SurfelVertexBuf[SurfelIdx]);
+
+        const float4 PackedSurfelIrradiance = SurfelIrradianceBuf[SurfelIdx];
+        float3 SurfelColor = PackedSurfelIrradiance.xyz;
+
+        const float3 PosOffset = WorldPos.xyz - surfel.Position.xyz;
+        const float DirWeight = max(0.0, dot(surfel.Normal, WorldNormal));
+        const float Dist = length(PosOffset);
+        const float Dist2 = length(PosOffset) * (1 + abs(dot(PosOffset, surfel.Normal)) * SURFEL_NORMAL_DIRECTION_SQUISH);
+
+        float Weight = smoothstep(
+            SURFEL_RADIUS * RADIUS_OVERSCALE,
+            0.0,
+            Dist2) * DirWeight;
+
+        TotalWeight += Weight;
+        TotalColor += SurfelColor * Weight;
+    }
+
+    TotalColor /= max(0.1, TotalWeight);
+    return TotalColor;
+}

@@ -104,7 +104,8 @@ enum class ERayTracingGlobalIlluminationType : uint8
 	RestirGI    UMETA(DisplayName = "RestirGI"),
 	BruteForce  UMETA(DisplayName = "Brute Force"),
 	FinalGather UMETA(DisplayName = "Final Gather"),
-	DDGIPlus	UMETA(DisplayName = "RayTrace DDGI")
+	DDGIPlus	UMETA(DisplayName = "RayTrace DDGI"),
+	SurfelGI	UMETA(DisplayName = "SurfelGI")
 };
 
 UENUM()
