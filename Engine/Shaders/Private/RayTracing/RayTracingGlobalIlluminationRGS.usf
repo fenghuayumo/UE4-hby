@@ -511,11 +511,11 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 #if MESH_LIGHT_SAMPLING
 
 #ifdef REGIR_SAMPLING
-		float3 RandSample3 = RandContext.GenerateSample3D();
+		// float3 RandSample3 = RandContext.GenerateSample3D();
 		float3 GridCellSize = (LightBoundMax - LightBoundMin) / GridCellDim;
-    	float3 CellRandomOffset = GridCellSize * float3(-0.5f + RandSample3.x,
-                          -0.5f + RandSample3.y,
-                          -0.5f + RandSample3.z);
+    	float3 CellRandomOffset = GridCellSize * float3(-0.5f + RandSample.x,
+                          -0.5f + RandSample.y,
+                          -0.5f + RandSample.z);
 
 		uint3 CellCoord = GetCellIndexFromPos(WorldPosition + CellRandomOffset);
 		uint CellStartIndex = CalcCellLinearIndex(CellCoord, 0) * NumLightSlotsPerCell;
@@ -525,8 +525,8 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 		float3 selectCon = 0.0;
 		for (int i = 0; i < NumCandidatesPerCell; ++i) 
 		{
-			// float2 RandSample2 = RandomSequence_GenerateSample2D(RandSequence);
-			float2 RandSample2 = RandContext.GenerateSample2D();
+			float2 RandSample2 = RandomSequence_GenerateSample2D(RandSequence);
+			//float2 RandSample2 = RandContext.GenerateSample2D();
 			uint lightSlotIdx = CellStartIndex + min(uint(RandSample2.x * NumLightSlotsPerCell), NumLightSlotsPerCell - 1);
 			ReGIR_Reservoir rerservoir = ReGIR_Reservoir::Load(ReadReservoirData(lightSlotIdx, BufferIndex));
 			ReGIR_SampleRef sampleRef = rerservoir.sampleRef;
@@ -836,124 +836,206 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 				Irradiance += Payload.Radiance * RayThroughput / RayPdf;
 			}
 #else
-	// #if LIGHT_SAMPLING_TYPE == LIGHT_CUT
-	// 		for(uint NeeID = 0; NeeID < numPass; ++NeeID)
-	// #else
-	// 		for (uint NeeID = 0; NeeID < NextEventEstimationSamples; ++NeeID)
-	// #endif
-	// 		{
-	// 			float3 LightRadianceOverPdf = 0;
-	// 			float NeePdf = 0.0;
+#ifdef REGIR_SAMPLING
+		float3 CellRandSample = RandomSequence_GenerateSample3D(RandSequence);
+		float3 GridCellSize = (LightBoundMax - LightBoundMin) / GridCellDim;
+    	float3 CellRandomOffset = GridCellSize * float3(-0.5f + CellRandSample.x,
+                          -0.5f + CellRandSample.y,
+                          -0.5f + CellRandSample.z);
 
-	// 			float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
-	// 			RayDesc LightRay;
-	// 			int nodeID = 1;
-	// 		#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
-	// 			if( CutShareGroupSize > 0)
-	// 			{
-	// 				int cutNodeId = NeeID;
+		uint3 CellCoord = GetCellIndexFromPos(WorldPosition + CellRandomOffset);
+		uint CellStartIndex = CalcCellLinearIndex(CellCoord, 0) * NumLightSlotsPerCell;
+		uint BufferIndex = 0;//View.StateFrameIndex % 2;
+		// const uint numResampling = NumCandidatesPerCell;
+		ReGIR_Reservoir state = ReGIR_Reservoir::Empty();
+		float3 selectCon = 0.0;
+		for (int i = 0; i < NumCandidatesPerCell; ++i) 
+		{
+			float2 RandSample2 = RandomSequence_GenerateSample2D(RandSequence);
+			//float2 RandSample2 = RandContext.GenerateSample2D();
+			uint lightSlotIdx = CellStartIndex + min(uint(RandSample2.x * NumLightSlotsPerCell), NumLightSlotsPerCell - 1);
+			ReGIR_Reservoir rerservoir = ReGIR_Reservoir::Load(ReadReservoirData(lightSlotIdx, BufferIndex));
+			ReGIR_SampleRef sampleRef = rerservoir.sampleRef;
+			float3 cont = PerformDirectLighting(WorldPosition, GBufferData, -CameraDirection, sampleRef.Position , sampleRef.Normal, sampleRef.Irradiance);
+			float targetPdf = Luminance(cont);
+			
+			if( state.CombineReservoirs(rerservoir, RandSample2.y,targetPdf) )
+			{
+				selectCon = cont;
+			}
+		}
+		state.FinalizeResampling(1.0, state.M);
 
-	// 				int startId = 0;
-	// 				int endId = MaxCutNodes;
+		if( state.sampleRef.IsValid() )
+		{
+			float3 LightDirection = state.sampleRef.Position - WorldPosition;
+			float3 LightNormal = state.sampleRef.Normal;
+			float LightDist =  sqrt(dot(LightDirection, LightDirection)) - 8e-1;
 
-	// 				if (InterleaveRate > 1)
-	// 				{
-	// 					int interleaveGroupSize = InterleaveRate * InterleaveRate;
-	// 					int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (Pixel.y % InterleaveRate) + (Pixel.x % InterleaveRate)) % interleaveGroupSize;
+			RayDesc LightRay;
+			LightRay.Origin = WorldPosition;
+			LightRay.TMin = 0;
+			LightRay.Direction = normalize(LightDirection);
+			LightRay.TMax = min(LightDist, MaxShadowDistance);
+			bool bTransmission = true;
+			float3 BiasNormal = WorldNormal;
+			if ( dot(BiasNormal, LightRay.Direction) < 0.0)
+			{
+				BiasNormal = -BiasNormal;
+			}
+			ApplyPositionBias(LightRay, BiasNormal, MaxNormalBias);
 
-	// 					float ratio = float(MaxCutNodes) / interleaveGroupSize;
-	// 					startId = int(interleaveSamplingId * ratio);  
-	// 					endId = interleaveSamplingId == interleaveGroupSize - 1 ? MaxCutNodes : int((interleaveSamplingId + 1) * ratio);
+			// Trace visibility ray
+			uint NeeRayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+			const uint NeeInstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
 
-	// 					if (startId + NeeID >= endId) break;
-	// 					else
-	// 					{
-	// 						cutNodeId = startId + NeeID;
-	// 					}
-	// 				}
-	// 				else
-	// 				{
-	// 					if (cutNodeId >= MaxCutNodes) break;
-	// 				}
-	// 				int cutID = cutNodeId + startAddr;
-	// 				nodeID = MeshLightCutBuffer[cutID];
-	// 				if (nodeID < 0) break;
-	// 			}
-	// 		#endif
-	// 			if( SampleMeshLight(RandSample3,
-	// 						Ray.Origin,
-	// 						Payload.WorldNormal,
-	// 						nodeID,
-	// 						LightRay.Direction,
-	// 						LightRay.TMax,
-	// 						LightRadianceOverPdf,
-	// 						NeePdf) )
-	// 			{
-	// 	#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
-	// 		LightRadianceOverPdf *= ( InterleaveRate * InterleaveRate);
-	// 	#endif
-	// 				LightRay.Origin = Ray.Origin;
-	// 				LightRay.TMin = 0;
-	// 				LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
-	// 				bool bTransmission = true;
-	// 				float3 BiasNormal = Payload.WorldNormal;
-	// 				if ( dot(BiasNormal, LightRay.Direction) < 0.0)
-	// 				{
-	// 					BiasNormal = -BiasNormal;
-	// 				}
-	// 				ApplyPositionBias(LightRay, BiasNormal, MaxNormalBias);
-
-	// 				// Trace visibility ray
-	// 				uint NeeRayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
-	// 				const uint NeeInstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
-
-	// #if !ENABLE_TWO_SIDED_GEOMETRY
-	// 				NeeRayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
-	// #endif
-
-	// 				FMinimalPayload NeePayload = TraceVisibilityRay(
-	// 					TLAS,
-	// 					NeeRayFlags,
-	// 					NeeInstanceInclusionMask,
-	// 					PixelCoord,
-	// 					LightRay);
-
-	// 				// No hit indicates successful next-event connection
-	// 				if (NeePayload.IsMiss())
-	// 				{
-	// 					// Evaluate material
-	// 					float3 MaterialThroughput;
-	// #if USE_PATHTRACING_MATERIALS
-	// 					FMaterialEval MaterialEval = EvalMaterial(CameraDirection, LightRay.Direction, Payload, false);
-	// 					MaterialThroughput = MaterialEval.Weight * MaterialEval.Pdf;
-	// #else
-	// 					half3 N = Payload.WorldNormal;
-	// 					half3 V = -Ray.Direction;
-	// 					half3 L = LightRay.Direction;
-	// 					float NoL = saturate(dot(N, L));
-	// 					FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
-	// 					FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
-	// 					MaterialThroughput = LightingSample.Diffuse;
-	// 					if (bTransmission)
-	// 					{
-	// 						MaterialThroughput += LightingSample.Transmission;
-	// 					}
-	// #endif
-
-	// 					// Record the contribution
-	// 					float3 ExitantRadianceSample = LightRadianceOverPdf * MaterialThroughput* RayThroughput * factor / RayPdf;
-	// 					// float3 ExitantRadianceSample = float3(1,0,0);
-	// 					// Tonemap for firefly suppression
-	// 					if (UseFireflySuppression)
-	// 					{
-	// 						ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
-	// 					}
-
-	// 					Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
-	// 				}
-	// 			}
-	// 		}
+#if !ENABLE_TWO_SIDED_GEOMETRY
+			NeeRayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
 #endif
+
+			FMinimalPayload NeePayload = TraceVisibilityRay(
+				TLAS,
+				NeeRayFlags,
+				NeeInstanceInclusionMask,
+				PixelCoord,
+				LightRay);
+
+			// No hit indicates successful next-event connection
+			if (NeePayload.IsMiss())
+			{
+				float3 ExitantRadianceSample =  selectCon * state.weightSum * RayThroughput / RayPdf;;
+				// Tonemap for firefly suppression
+				if (UseFireflySuppression)
+				{
+					ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
+				}
+
+				Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
+				//  Irradiance += state.weightSum;
+			}
+		}
+		// WriteReservoirHistoryData(resStartIndex ,state.Store());
+#else
+	#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
+			for(uint NeeID = 0; NeeID < numPass; ++NeeID)
+	#else
+			for (uint NeeID = 0; NeeID < NextEventEstimationSamples; ++NeeID)
+	#endif
+			{
+				float3 LightRadianceOverPdf = 0;
+				float NeePdf = 0.0;
+
+				float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
+				RayDesc LightRay;
+				int nodeID = 1;
+			#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
+				if( CutShareGroupSize > 0)
+				{
+					int cutNodeId = NeeID;
+
+					int startId = 0;
+					int endId = MaxCutNodes;
+
+					if (InterleaveRate > 1)
+					{
+						int interleaveGroupSize = InterleaveRate * InterleaveRate;
+						int interleaveSamplingId = ( View.StateFrameIndex + InterleaveRate * (Pixel.y % InterleaveRate) + (Pixel.x % InterleaveRate)) % interleaveGroupSize;
+
+						float ratio = float(MaxCutNodes) / interleaveGroupSize;
+						startId = int(interleaveSamplingId * ratio);  
+						endId = interleaveSamplingId == interleaveGroupSize - 1 ? MaxCutNodes : int((interleaveSamplingId + 1) * ratio);
+
+						if (startId + NeeID >= endId) break;
+						else
+						{
+							cutNodeId = startId + NeeID;
+						}
+					}
+					else
+					{
+						if (cutNodeId >= MaxCutNodes) break;
+					}
+					int cutID = cutNodeId + startAddr;
+					nodeID = MeshLightCutBuffer[cutID];
+					if (nodeID < 0) break;
+				}
+			#endif
+				if( SampleMeshLight(RandSample3,
+							Ray.Origin,
+							Payload.WorldNormal,
+							nodeID,
+							LightRay.Direction,
+							LightRay.TMax,
+							LightRadianceOverPdf,
+							NeePdf) )
+				{
+		#if LIGHT_SAMPLING_TYPE == LIGHT_CUT
+			LightRadianceOverPdf *= ( InterleaveRate * InterleaveRate);
+		#endif
+					LightRay.Origin = Ray.Origin;
+					LightRay.TMin = 0;
+					LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
+					bool bTransmission = true;
+					float3 BiasNormal = Payload.WorldNormal;
+					if ( dot(BiasNormal, LightRay.Direction) < 0.0)
+					{
+						BiasNormal = -BiasNormal;
+					}
+					ApplyPositionBias(LightRay, BiasNormal, MaxNormalBias);
+
+					// Trace visibility ray
+					uint NeeRayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+					const uint NeeInstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
+
+	#if !ENABLE_TWO_SIDED_GEOMETRY
+					NeeRayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+	#endif
+
+					FMinimalPayload NeePayload = TraceVisibilityRay(
+						TLAS,
+						NeeRayFlags,
+						NeeInstanceInclusionMask,
+						PixelCoord,
+						LightRay);
+
+					// No hit indicates successful next-event connection
+					if (NeePayload.IsMiss())
+					{
+						// Evaluate material
+						float3 MaterialThroughput;
+	#if USE_PATHTRACING_MATERIALS
+						FMaterialEval MaterialEval = EvalMaterial(CameraDirection, LightRay.Direction, Payload, false);
+						MaterialThroughput = MaterialEval.Weight * MaterialEval.Pdf;
+	#else
+						half3 N = Payload.WorldNormal;
+						half3 V = -Ray.Direction;
+						half3 L = LightRay.Direction;
+						float NoL = saturate(dot(N, L));
+						FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
+						FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
+						MaterialThroughput = LightingSample.Diffuse;
+						if (bTransmission)
+						{
+							MaterialThroughput += LightingSample.Transmission;
+						}
+	#endif
+
+						// Record the contribution
+						float3 ExitantRadianceSample = LightRadianceOverPdf * MaterialThroughput* RayThroughput * factor / RayPdf;
+						// float3 ExitantRadianceSample = float3(1,0,0);
+						// Tonemap for firefly suppression
+						if (UseFireflySuppression)
+						{
+							ExitantRadianceSample *= rcp(1.0 + Luminance(ExitantRadianceSample));
+						}
+
+						Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
+					}
+				}
+			}
+
+#endif // REGIR_RESAMPLING
+#endif //MESH_SAMPLING
 
 #if LIGHT_SAMPLING_TYPE == LIGHT_CUT
 			// uint2 BufferSize = View.BufferSizeAndInvSize.xy;

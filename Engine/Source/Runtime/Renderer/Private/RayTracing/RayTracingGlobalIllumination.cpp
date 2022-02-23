@@ -448,13 +448,13 @@ static TAutoConsoleVariable<float> CVarReGIRLightGridResolution(
 
 static TAutoConsoleVariable<int32> CVarNumLightSlotsPerCell(
 	TEXT("r.RayTracing.ReGIR.NumLightSlotsPerCell"),
-	512,
+	1024,
 	TEXT("Set to ReGIR NumLightSlotsPerCell"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarNumCandidatePerLightSlot(
 	TEXT("r.RayTracing.ReGIR.NumCandidatePerLightSlot"),
-	8,
+	2,
 	TEXT("Set to ReGIR NumCandidatePerLightSlot"),
 	ECVF_RenderThreadSafe);
 
