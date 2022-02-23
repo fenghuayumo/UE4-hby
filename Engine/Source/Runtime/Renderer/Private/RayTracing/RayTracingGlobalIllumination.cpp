@@ -434,6 +434,47 @@ static TAutoConsoleVariable<int> CVarLightSamplingType(
 	TEXT(" 4:	Uniform"),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<float> CVarReGIRLightGridCellSize(
+	TEXT("r.RayTracing.ReGIR.LightGridCellSize"),
+	50.0,
+	TEXT("Set to ReGIR GridCell Size"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarReGIRLightGridResolution(
+	TEXT("r.RayTracing.ReGIR.LightGridResolution"),
+	32,
+	TEXT("Set to ReGIR GridCell Dim"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarNumLightSlotsPerCell(
+	TEXT("r.RayTracing.ReGIR.NumLightSlotsPerCell"),
+	512,
+	TEXT("Set to ReGIR NumLightSlotsPerCell"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarNumCandidatePerLightSlot(
+	TEXT("r.RayTracing.ReGIR.NumCandidatePerLightSlot"),
+	8,
+	TEXT("Set to ReGIR NumCandidatePerLightSlot"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarNumCandidatePerCell(
+	TEXT("r.RayTracing.ReGIR.NumCandidatePerCell"),
+	4,
+	TEXT("Set to ReGIR NumCandidatePerCell"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarReGIRTemporalMaxHistory(
+	TEXT("r.RayTracing.ReGIR.MaxHistory"),
+	64,
+	TEXT("Maximum temporal history for samples (default 10)"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarReGIREnaleTemporal(
+	TEXT("r.RayTracing.ReGIR.TemporalEnable"),
+	1,
+	TEXT("Enable Temporal ReGIR"),
+	ECVF_RenderThreadSafe);
 
 DECLARE_GPU_STAT_NAMED(RayTracingGIBruteForce, TEXT("Ray Tracing GI: Brute Force"));
 DECLARE_GPU_STAT_NAMED(RayTracingGIFinalGather, TEXT("Ray Tracing GI: Final Gather"));
@@ -732,6 +773,140 @@ enum class ELightSamplingType
 	Light_UNIFORM = 4,
 	MAX,
 };
+struct ReGIR_PackedReservoir
+{
+	FIntVector4 HitGeometry;
+	FIntVector4 LightInfo;
+};
+
+BEGIN_SHADER_PARAMETER_STRUCT(FReGIRCommonParameters, )
+SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<ReGIR_PackedReservoir>, RWLightReservoirUAV)
+SHADER_PARAMETER(FIntVector, GridCellDim)
+SHADER_PARAMETER(uint32, NumLightSlotsPerCell)
+SHADER_PARAMETER(int32, NumCandidatesPerLightSlot)
+SHADER_PARAMETER(int32, NumCandidatesPerCell)
+SHADER_PARAMETER(FVector, LightBoundMin)
+SHADER_PARAMETER(FVector, LightBoundMax)
+
+
+END_SHADER_PARAMETER_STRUCT()
+
+
+class FBuildCellReservoirCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FBuildCellReservoirCS)
+	SHADER_USE_PARAMETER_STRUCT(FBuildCellReservoirCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+	}
+
+	static uint32 GetThreadBlockSize()
+	{
+		return 512;
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(int32, LightGridAxis)
+		SHADER_PARAMETER(uint32, LightGridResolution)
+
+		SHADER_PARAMETER_SRV(StructuredBuffer<FVector>, MeshLightVertexBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<uint32>, MeshLightIndexBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstance>, MeshLightInstanceBuffer)
+		SHADER_PARAMETER(uint32, NumLightTriangles)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FReGIRCommonParameters, CommonParameters)
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
+		SHADER_PARAMETER(int32, OutputSlice)
+		END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FBuildCellReservoirCS, "/Engine/Private/ReGIR/BuildCellReservoirs.usf", "BuildCellReservoirCS", SF_Compute);
+
+class FReGIRTemporalResamplingCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FReGIRTemporalResamplingCS)
+	SHADER_USE_PARAMETER_STRUCT(FReGIRTemporalResamplingCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+	}
+
+	static uint32 GetThreadBlockSize()
+	{
+		return 512;
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+
+		SHADER_PARAMETER(int32, LightGridAxis)
+		SHADER_PARAMETER(uint32, LightGridResolution)
+
+		SHADER_PARAMETER_SRV(StructuredBuffer<FVector>, MeshLightVertexBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<uint32>, MeshLightIndexBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
+		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstance>, MeshLightInstanceBuffer)
+		SHADER_PARAMETER(uint32, NumLightTriangles)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<ReGIR_PackedReservoir>, LightReservoirHistory)
+		SHADER_PARAMETER(uint32, MaxTemporalHistory)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FReGIRCommonParameters, CommonParameters)
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
+		SHADER_PARAMETER(int32, InputSlice)
+		SHADER_PARAMETER(int32, OutputSlice)
+		END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FReGIRTemporalResamplingCS, "/Engine/Private/ReGIR/BuildCellReservoirs.usf", "BuildCellReservoirTemporalResamplingCS", SF_Compute);
+
+
+class FWriteHistoryReservoirCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FWriteHistoryReservoirCS)
+	SHADER_USE_PARAMETER_STRUCT(FWriteHistoryReservoirCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+	}
+
+	static uint32 GetThreadBlockSize()
+	{
+		return 512;
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<ReGIR_PackedReservoir>, RWLightReservoirHistoryUAV)
+		SHADER_PARAMETER(int32, InputSlice)
+		SHADER_PARAMETER(int32, OutputSlice)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FReGIRCommonParameters, CommonParameters)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FWriteHistoryReservoirCS, "/Engine/Private/ReGIR/BuildCellReservoirs.usf", "WriteHistoryReservoirCS", SF_Compute);
+
 class FGlobalIlluminationRGS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FGlobalIlluminationRGS)
@@ -801,6 +976,8 @@ class FGlobalIlluminationRGS : public FGlobalShader
 		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
 		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstance>, MeshLightInstanceBuffer)
 		SHADER_PARAMETER(uint32, NumLightTriangles)
+		//SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<ReGIR_PackedReservoir>, RWLightReservoirHistoryUAV)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FReGIRCommonParameters, ReGIRCommonParameters)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -2181,7 +2358,10 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationFinalGathe
 extern LightTree GTree;
 extern MeshLightTree	MeshTree;
 
-void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& GraphBuilder, FGlobalIlluminationRGS::FParameters* PassParameters,float UpscaleFactor)
+DECLARE_GPU_STAT_NAMED(BuilCellReservoir, TEXT("BuilCellReservoir"));
+
+void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& GraphBuilder, FGlobalIlluminationRGS::FParameters* PassParameters,float UpscaleFactor,
+	FBox& OutMeshLightBounds)
 {
 	///mesh light
 	/// The following code should be excuted on the case of scene has been changed for efficiency, such as add meshlight, removemeshlight etc. like path tracer
@@ -2341,6 +2521,8 @@ void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& G
 		PassParameters->MeshLightInstancePrimitiveBuffer);
 
 	MeshTree.FindLightCuts(*Scene, View, GraphBuilder, MeshLightBounds.Min, MeshLightBounds.Max, 1.0 / UpscaleFactor);
+	OutMeshLightBounds = MeshLightBounds;
+
 }
 void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce(
 	FRDGBuilder& GraphBuilder,
@@ -2396,7 +2578,127 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax,
 		1.0 / UpscaleFactor);
 
-	SetupMeshLightParamters(Scene, View, GraphBuilder, PassParameters, UpscaleFactor);
+	FBox MeshLightBounds;
+	SetupMeshLightParamters(Scene, View, GraphBuilder, PassParameters, UpscaleFactor, MeshLightBounds);
+
+	FReGIRCommonParameters	CommonParameter;
+
+	CommonParameter.LightBoundMax = MeshLightBounds.Max;
+	CommonParameter.LightBoundMin = MeshLightBounds.Min;
+	CommonParameter.NumCandidatesPerLightSlot = CVarNumCandidatePerLightSlot.GetValueOnRenderThread();
+	CommonParameter.NumCandidatesPerCell = CVarNumCandidatePerCell.GetValueOnRenderThread();
+	// pick the shortest axis
+	FVector Diag = MeshLightBounds.Max - MeshLightBounds.Min;
+	int LightGridResolution = CVarReGIRLightGridResolution.GetValueOnRenderThread();
+	int LightGridAxis = 0;
+	FIntVector GridCellDim;
+	if (Diag.X < Diag.Y && Diag.X < Diag.Z)
+	{
+		LightGridAxis = 0;
+		GridCellDim = FIntVector(1, LightGridResolution, LightGridResolution);
+	}
+	else if (Diag.Y < Diag.Z)
+	{
+		LightGridAxis = 1;
+		GridCellDim = FIntVector(LightGridResolution, 1, LightGridResolution);
+	}
+	else
+	{
+		GridCellDim = FIntVector(LightGridResolution, LightGridResolution, 1);
+		LightGridAxis = 2;
+	}
+	//GridCellDim = FIntVector(LightGridResolution, LightGridResolution, LightGridResolution);
+	//float GridCellSize = CVarReGIRLightGridCellSize.GetValueOnRenderThread();
+	//FIntVector GridCellDim = FIntVector(FMath::CeilToInt(Diag.X / GridCellSize), FMath::CeilToInt(Diag.Y / GridCellSize), FMath::CeilToInt(Diag.Z / GridCellSize));
+
+	int32 NumLightSlotsPerCell = CVarNumLightSlotsPerCell.GetValueOnRenderThread();
+	CommonParameter.GridCellDim = GridCellDim;
+	CommonParameter.NumLightSlotsPerCell = NumLightSlotsPerCell;
+	FRDGBufferDesc ReservoirDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(ReGIR_PackedReservoir), GridCellDim.X * GridCellDim.Y * GridCellDim.Z * NumLightSlotsPerCell );
+
+	FRDGBufferRef LightReservoirs = GraphBuilder.CreateBuffer(ReservoirDesc, TEXT("ReGIRLightRReservoirs"));
+	CommonParameter.RWLightReservoirUAV = GraphBuilder.CreateUAV(LightReservoirs);
+	FRDGBufferDesc ReservoirHistoryDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(ReGIR_PackedReservoir), GridCellDim.X * GridCellDim.Y * GridCellDim.Z * NumLightSlotsPerCell);
+	FRDGBufferRef ReGIRReservoirsHistory = GraphBuilder.CreateBuffer(ReservoirHistoryDesc, TEXT("ReGIRReservoirsHistory"));
+	if (CVarLightSamplingType.GetValueOnRenderThread() > 1)
+	{
+		RDG_GPU_STAT_SCOPE(GraphBuilder, BuilCellReservoir);
+		RDG_EVENT_SCOPE(GraphBuilder, "BuilCellReservoir");
+		TShaderMapRef<FBuildCellReservoirCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+		FBuildCellReservoirCS::FParameters* BuildPassParameters = GraphBuilder.AllocParameters<FBuildCellReservoirCS::FParameters>();
+		uint32 numLightSlots = CommonParameter.NumLightSlotsPerCell * GridCellDim.X * GridCellDim.Y * GridCellDim.Z;
+
+		BuildPassParameters->CommonParameters = CommonParameter;
+		BuildPassParameters->MeshLightInstancePrimitiveBuffer = PassParameters->MeshLightInstancePrimitiveBuffer;
+		BuildPassParameters->MeshLightInstanceBuffer = PassParameters->MeshLightInstanceBuffer;
+		BuildPassParameters->MeshLightIndexBuffer = PassParameters->MeshLightIndexBuffer;
+		BuildPassParameters->MeshLightVertexBuffer = PassParameters->MeshLightVertexBuffer;
+		BuildPassParameters->NumLightTriangles = PassParameters->NumLightTriangles;
+		BuildPassParameters->LightGridAxis = LightGridAxis;
+		BuildPassParameters->LightGridResolution = LightGridResolution;
+		BuildPassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+		BuildPassParameters->OutputSlice = 0;
+		ClearUnusedGraphResources(ComputeShader, BuildPassParameters);
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("BuilCellReservoir"),
+			ComputeShader,
+			BuildPassParameters,
+			FComputeShaderUtils::GetGroupCount(numLightSlots, FBuildCellReservoirCS::GetThreadBlockSize()));
+	}
+	/*const bool bCameraCut = !(View.ViewState->FrameIndex >= 1) || View.bCameraCut;*/
+	const bool bCameraCut = !View.PrevViewInfo.SampledReGIRHistory.IsValid() || View.bCameraCut;
+	if (!bCameraCut && CVarLightSamplingType.GetValueOnRenderThread() > 1 && CVarReGIREnaleTemporal.GetValueOnRenderThread() > 0)
+	{
+		//RDG_GPU_STAT_SCOPE(GraphBuilder, BuilCellReservoir);
+		//RDG_EVENT_SCOPE(GraphBuilder, "BuilCellReservoir");
+		TShaderMapRef<FReGIRTemporalResamplingCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+		FReGIRTemporalResamplingCS::FParameters* BuildPassParameters = GraphBuilder.AllocParameters<FReGIRTemporalResamplingCS::FParameters>();
+		uint32 numLightSlots = CommonParameter.NumLightSlotsPerCell * GridCellDim.X * GridCellDim.Y * GridCellDim.Z;
+
+		BuildPassParameters->CommonParameters = CommonParameter;
+
+		//BuildPassParameters->RWLightReservoirHistoryUAV = GraphBuilder.CreateUAV(ReGIRReservoirsHistory);
+
+		BuildPassParameters->LightReservoirHistory = GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(View.PrevViewInfo.SampledReGIRHistory.Reservoirs));
+		BuildPassParameters->MeshLightInstancePrimitiveBuffer = PassParameters->MeshLightInstancePrimitiveBuffer;
+		BuildPassParameters->MeshLightInstanceBuffer = PassParameters->MeshLightInstanceBuffer;
+		BuildPassParameters->MeshLightIndexBuffer = PassParameters->MeshLightIndexBuffer;
+		BuildPassParameters->MeshLightVertexBuffer = PassParameters->MeshLightVertexBuffer;
+		BuildPassParameters->NumLightTriangles = PassParameters->NumLightTriangles;
+		BuildPassParameters->LightGridAxis = LightGridAxis;
+		BuildPassParameters->LightGridResolution = LightGridResolution;
+		BuildPassParameters->MaxTemporalHistory = CVarReGIRTemporalMaxHistory.GetValueOnRenderThread();
+		BuildPassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+		BuildPassParameters->OutputSlice = 0;
+		BuildPassParameters->InputSlice = 0;
+		ClearUnusedGraphResources(ComputeShader, BuildPassParameters);
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("BuilCellReservoir"),
+			ComputeShader,
+			BuildPassParameters,
+			FComputeShaderUtils::GetGroupCount(numLightSlots, FReGIRTemporalResamplingCS::GetThreadBlockSize()));
+	}
+
+	{
+		TShaderMapRef<FWriteHistoryReservoirCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5));
+		FWriteHistoryReservoirCS::FParameters* BuildPassParameters = GraphBuilder.AllocParameters<FWriteHistoryReservoirCS::FParameters>();
+		uint32 numLightSlots = CommonParameter.NumLightSlotsPerCell * GridCellDim.X * GridCellDim.Y * GridCellDim.Z;
+
+		BuildPassParameters->CommonParameters = CommonParameter;
+		BuildPassParameters->RWLightReservoirHistoryUAV = GraphBuilder.CreateUAV(ReGIRReservoirsHistory);
+		BuildPassParameters->OutputSlice = 0;
+		BuildPassParameters->InputSlice = 0;
+		ClearUnusedGraphResources(ComputeShader, BuildPassParameters);
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("WriteHistoryReservoirBuffer"),
+			ComputeShader,
+			BuildPassParameters,
+			FComputeShaderUtils::GetGroupCount(numLightSlots, FWriteHistoryReservoirCS::GetThreadBlockSize()));
+	}
+	PassParameters->ReGIRCommonParameters = CommonParameter;
 
 	PassParameters->SceneTextures = SceneTextures;
 	PassParameters->AccumulateEmissive = FMath::Clamp(CVarRayTracingGlobalIlluminationAccumulateEmissive.GetValueOnRenderThread(), 0, 1);
@@ -2506,6 +2808,16 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	}
 	GTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
 	MeshTree.VisualizeNodesLevel(*Scene, View, GraphBuilder);
+
+	if (CVarLightSamplingType.GetValueOnRenderThread() > 1)
+	{
+		if (!View.bStatePrevViewInfoIsReadOnly)
+		{
+			//Extract history feedback here
+			GraphBuilder.QueueBufferExtraction(ReGIRReservoirsHistory, &View.ViewState->PrevFrameViewInfo.SampledReGIRHistory.Reservoirs);
+
+		}
+	}
 }
 #else
 {

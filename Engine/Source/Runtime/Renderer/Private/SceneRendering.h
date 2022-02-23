@@ -931,6 +931,25 @@ struct FSampleGIHistory
 	}
 };
 
+struct FSampleReGIRHistory
+{
+	// Buffer holding a light reservoirs
+	TRefCountPtr<FRDGPooledBuffer>	Reservoirs;
+	//TRefCountPtr<FRDGPooledBuffer> GatherBuffer;
+	FIntVector ReservoirDimensions;
+
+	void SafeRelease()
+	{
+		Reservoirs.SafeRelease();
+		//GatherBuffer.SafeRelease();
+	}
+
+	bool IsValid() const
+	{
+		return Reservoirs.IsValid();
+	}
+};
+
 // Plugins can derive from this and use it for their own purposes
 class RENDERER_API ICustomTemporalAAHistory : public IRefCountedObject
 {
@@ -1025,7 +1044,7 @@ struct FPreviousViewInfo
 	FSampledLightingHistory SampledLightHistory;
 
 	FSampleGIHistory	SampledGIHistory;
-
+	FSampleReGIRHistory	SampledReGIRHistory;
 	// Mobile bloom setup eye adaptation surface.
 	TRefCountPtr<IPooledRenderTarget> MobileBloomSetup_EyeAdaptation;
 	// Mobile temporal AA surface.

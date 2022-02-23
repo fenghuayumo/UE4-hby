@@ -1,0 +1,320 @@
+#define USE_IES_TERM 0 // this shader doesn't bind the IES atlas, so disable the IES term from path tracer lights
+
+#include "../Common.ush"
+#include "../RectLight.ush"
+//#include "../MonteCarlo.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../ShadingModels.ush"
+#include "../SceneTextureParameters.ush"
+// #include "../RayTracing/RayTracingCommon.ush"
+// #include "../RayTracing/RayTracingDeferredShadingCommon.ush"
+// #include "../RayTracing/RayTracingHitGroupCommon.ush"
+
+// #include "../PathTracing/Material/PathTracingMaterialSampling.ush"
+// #include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
+// #include "../PathTracing/Light/PathTracingLightGrid.ush"
+// #include "../PathTracing/Light/PathTracingLightSampling.ush"
+
+#include "ReservoirManagement.ush"
+#include "RandomNumberUtils.ush"
+
+struct MeshLightInstanceTriangle
+{
+	int IndexOffset;
+	int InstanceID;
+};
+
+struct MeshLightInstance
+{
+	float4x4 	Transform;
+	float3 		Emission;
+	float 		Padding0;
+};
+
+StructuredBuffer<float3>       MeshLightVertexBuffer;
+StructuredBuffer<uint>         MeshLightIndexBuffer;
+StructuredBuffer<MeshLightInstanceTriangle>    MeshLightInstancePrimitiveBuffer;
+StructuredBuffer<MeshLightInstance>   MeshLightInstanceBuffer;
+uint 							NumLightTriangles;
+int 							LightGridAxis;
+uint 							LightGridResolution;
+
+uint 		MaxTemporalHistory;
+int			InputSlice;
+int 		OutputSlice;
+bool SampleTriangleLight(float2 RandSample,
+	float3 WorldPos,
+	float3 WorldNormal,
+	int triId,
+	float PickPdf,
+	out float3 LightPos,
+	out float3  LightNormal,
+	out float3 LightRadiance,
+	out float OutPdf)
+{
+	MeshLightInstanceTriangle prim = MeshLightInstancePrimitiveBuffer[triId];
+    const float4x4 transform = MeshLightInstanceBuffer[prim.InstanceID].Transform;
+
+	// const uint v0 = MeshLightIndexBuffer[triId * 3];
+	// const uint v1 = MeshLightIndexBuffer[triId * 3 + 1];
+	// const uint v2 = MeshLightIndexBuffer[triId * 3 + 2];
+	uint v0 = MeshLightIndexBuffer[prim.IndexOffset];
+	uint v1 = MeshLightIndexBuffer[prim.IndexOffset + 1];
+	uint v2 = MeshLightIndexBuffer[prim.IndexOffset + 2];
+
+	const float3 p0 = mul(float4(MeshLightVertexBuffer[v0],1.0f), transform).xyz;
+	const float3 p1 = mul(float4(MeshLightVertexBuffer[v1],1.0f), transform).xyz;
+	const float3 p2 = mul(float4(MeshLightVertexBuffer[v2],1.0f), transform).xyz;
+	
+	float3  Emission = MeshLightInstanceBuffer[prim.InstanceID].Emission;
+
+	float3 LightN = cross(p2 - p0,p1 - p0);
+	float Area = 0.5 * length(LightN);
+	
+	//sample a point in triangle
+	float e1 = RandSample.x;
+	float e2 = RandSample.y;
+	float beta = e2 * sqrt(1 - e1);
+	float gamma = 1 - sqrt(1 - e1);
+
+	float3 SampleLightPos = p0 + beta * (p1 - p0) + gamma * (p2 - p0);
+	LightPos = SampleLightPos;
+	LightNormal = normalize(LightN);
+	LightRadiance = Emission;
+	OutPdf = PickPdf / Area;
+	
+	return true;
+}
+
+bool SampleMeshLight(float3 RandSample,
+	float3 WorldPos,
+	float3 WorldNormal,
+	out float3 LightPos,
+	out float3  LightNormal,
+	out float3 LightRadiance,
+	out float OutPdf)
+{
+	if( NumLightTriangles == 0)
+		return false;
+	// pick a triangle
+	int triId = min(int(floor(RandSample.x * NumLightTriangles)), NumLightTriangles - 1);
+	float LightPickPdf = 1.0 / NumLightTriangles;
+
+	return SampleTriangleLight(
+		RandSample.yz,
+		WorldPos,
+		WorldNormal,
+		triId,
+		LightPickPdf,
+		LightPos,
+		LightNormal,
+		LightRadiance,
+		OutPdf
+	);
+
+}
+
+#define DISTANCE_PDF 1
+
+float GetTargetPdf(float3 WorldPos, float LightPos, float3 LightNormal,float3 LightRadiance)
+{
+	float3 Direction = LightPos - WorldPos;
+	float Dist2 = dot(Direction, Direction) + 1e-4;
+	float3 LightDir = normalize(Direction);
+#if DISTANCE_PDF
+	float3 LightCon = LightRadiance / Dist2;
+	return Luminance(LightCon);
+#elif COS_DISTANCE_PDF
+	float3 LightCon = LightRadiance * abs(dot(LightNormal, LightDir)) / Dist2;
+	return Luminance(LightCon);
+#endif
+	return Luminance(LightRadiance);
+}
+
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
+void BuildCellReservoirCS(uint DTid : SV_DispatchThreadID)
+{
+	if( NumLightTriangles == 0) return;
+	uint SlotCount = NumLightSlotsPerCell * GridCellDim.x * GridCellDim.y * GridCellDim.z;
+	uint LinearThreadIndex = DTid;
+	if( LinearThreadIndex >= SlotCount) return;
+	uint CellLinearIndex = LinearThreadIndex / NumLightSlotsPerCell;
+
+	uint2 DispatchThreadId = uint2(0,0);
+	// figure out dimension of the 3d grid and the current ID to be filled
+	uint3 VoxelId = 0, VoxelRes = 1;
+	switch (LightGridAxis)
+	{
+		case 0:
+		{
+			uint ix = CellLinearIndex  / (GridCellDim.y * GridCellDim.z);
+			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.z)) / GridCellDim.z;
+			uint iz = CellLinearIndex % GridCellDim.z;
+			DispatchThreadId = uint2(iy,iz);
+			VoxelId.yz = DispatchThreadId; VoxelRes.yz = LightGridResolution; 
+			break;
+		}
+		case 1:
+		{
+			uint iy = CellLinearIndex  / (GridCellDim.x * GridCellDim.z);
+			uint ix = (CellLinearIndex % (GridCellDim.x * GridCellDim.z)) / GridCellDim.z;
+			uint iz = CellLinearIndex % GridCellDim.z;
+			DispatchThreadId = uint2(ix,iz);
+			VoxelId.xz = DispatchThreadId; VoxelRes.xz = LightGridResolution; 
+			break;
+		}
+		case 2:
+		{
+			uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
+			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
+			uint ix = CellLinearIndex % GridCellDim.x;
+			DispatchThreadId = uint2(ix,iy);
+			VoxelId.xy = DispatchThreadId; VoxelRes.xy = LightGridResolution; 
+			break;
+		}
+	}
+
+	if (any(DispatchThreadId >= LightGridResolution))
+	{
+		return;
+	}
+	// uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
+	// uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
+	// uint ix = CellLinearIndex % GridCellDim.x;
+	// uint3 VoxelId = uint3(ix, iy,iz);
+	// uint3 VoxelRes = GridCellDim;
+	// get bounding box of current voxel
+	float3 Lo = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 0) / float3(VoxelRes));
+	float3 Hi = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 1) / float3(VoxelRes));
+	float3 CellCenter = 0.5 * (Lo + Hi);
+
+	FRandomContext RandContext = FRandomContext::Create(LinearThreadIndex, View.StateFrameIndex );
+
+	ReGIR_Reservoir state = ReGIR_Reservoir::Empty();
+	// int BufferIndex = View.StateFrameIndex % 2;
+	// ReGIR_Reservoir state = ReGIR_Reservoir::Load(ReadReservoirData(LinearThreadIndex, BufferIndex));
+
+	const uint numCandidates = NumCandidatesPerLightSlot;
+    for (uint candIdx = 0; candIdx < numCandidates; ++candIdx) 
+	{
+		float3 LightRadiance,LightPos;float Pdf;
+		float3 LightNormal;
+		float3 RandSample = RandContext.GenerateSample3D();
+		SampleMeshLight(RandSample, CellCenter, float3(0,1,0),LightPos,LightNormal, LightRadiance,  Pdf);
+
+		// float3 Direction = LightPos - CellCenter;
+		// float Dist2 = dot(Direction, Direction) + 1e-4;
+		// float3 LightDir = normalize(Direction);
+		// float3 LightCon = LightRadiance * abs(dot(LightNormal, LightDir)) / Dist2;
+		float targetPdf = GetTargetPdf(CellCenter, LightPos, LightNormal, LightRadiance);
+		float invSourcePdf = 1.0 / Pdf ;
+		float risRnd = RandContext.GenerateSample1D();
+		ReGIR_SampleRef sampleRef = ReGIR_SampleRef::Create(LightPos,LightNormal,LightRadiance);
+
+		bool selected = state.StreamSample(sampleRef, risRnd, targetPdf, invSourcePdf);
+	}
+
+	//
+	state.FinalizeResampling(1.0, state.M);
+	// state.M = 1;
+	WriteReservoirData(LinearThreadIndex, OutputSlice, state.Store());
+
+}
+
+
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
+void BuildCellReservoirTemporalResamplingCS(uint DTid : SV_DispatchThreadID)
+{
+	if( NumLightTriangles == 0) return;
+	uint SlotCount = NumLightSlotsPerCell * GridCellDim.x * GridCellDim.y * GridCellDim.z;
+	uint LinearThreadIndex = DTid;
+	if( LinearThreadIndex >= SlotCount) return;
+	uint CellLinearIndex = LinearThreadIndex / NumLightSlotsPerCell;
+
+	uint2 DispatchThreadId = uint2(0,0);
+	// figure out dimension of the 3d grid and the current ID to be filled
+	uint3 VoxelId = 0, VoxelRes = 1;
+	switch (LightGridAxis)
+	{
+		case 0:
+		{
+			uint ix = CellLinearIndex  / (GridCellDim.y * GridCellDim.z);
+			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.z)) / GridCellDim.z;
+			uint iz = CellLinearIndex % GridCellDim.z;
+			DispatchThreadId = uint2(iy,iz);
+			VoxelId.yz = DispatchThreadId; VoxelRes.yz = LightGridResolution; 
+			break;
+		}
+		case 1:
+		{
+			uint iy = CellLinearIndex  / (GridCellDim.x * GridCellDim.z);
+			uint ix = (CellLinearIndex % (GridCellDim.x * GridCellDim.z)) / GridCellDim.z;
+			uint iz = CellLinearIndex % GridCellDim.z;
+			DispatchThreadId = uint2(ix,iz);
+			VoxelId.xz = DispatchThreadId; VoxelRes.xz = LightGridResolution; 
+			break;
+		}
+		case 2:
+		{
+			uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
+			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
+			uint ix = CellLinearIndex % GridCellDim.x;
+			DispatchThreadId = uint2(ix,iy);
+			VoxelId.xy = DispatchThreadId; VoxelRes.xy = LightGridResolution; 
+			break;
+		}
+	}
+
+	if (any(DispatchThreadId >= LightGridResolution))
+	{
+		return;
+	}
+	// uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
+	// uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
+	// uint ix = CellLinearIndex % GridCellDim.x;
+	// uint3 VoxelId = uint3(ix, iy,iz);
+	// uint3 VoxelRes = GridCellDim;
+	
+	// get bounding box of current voxel
+	float3 Lo = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 0) / float3(VoxelRes));
+	float3 Hi = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 1) / float3(VoxelRes));
+	float3 CellCenter = 0.5 * (Lo + Hi);
+
+	FRandomContext RandContext = FRandomContext::Create(LinearThreadIndex, View.StateFrameIndex);
+
+	ReGIR_Reservoir state = ReGIR_Reservoir::Empty();
+
+	// int BufferIndex = (View.StateFrameIndex)% 2;
+	ReGIR_Reservoir curSample = ReGIR_Reservoir::Load(ReadReservoirData(LinearThreadIndex, InputSlice));
+	state.CombineReservoirs(curSample, /* random = */ 0.5, curSample.targetPdf);
+	int historyLimit = min(ReGIR_Reservoir::MaxM,MaxTemporalHistory * state.M);
+	
+	// int PrevBufferIndex = (BufferIndex + 1)% 2;
+	ReGIR_Reservoir prevSample = ReGIR_Reservoir::Load(ReadReservoirHistoryData(LinearThreadIndex,InputSlice ));
+	prevSample.M = min(prevSample.M, historyLimit);
+	
+	if (prevSample.sampleRef.IsValid() && prevSample.age < MaxTemporalHistory)
+	{
+		float previousWeight = GetTargetPdf(CellCenter,prevSample.sampleRef.Position, prevSample.sampleRef.Normal, prevSample.sampleRef.Irradiance);
+		// float previousWeight = Luminance(prevSample.sampleRef.Irradiance);
+		prevSample.age += 1;
+		state.CombineReservoirs(prevSample, RandContext.GenerateSample1D(), previousWeight); 
+	}
+
+	state.FinalizeResampling(1.0, state.M);
+	// state.M = 1;
+
+	WriteReservoirData(LinearThreadIndex, OutputSlice, state.Store());
+	// WriteReservoirHistoryData(LinearThreadIndex ,state.Store());
+}
+
+[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
+void WriteHistoryReservoirCS(uint DTid : SV_DispatchThreadID)
+{
+	uint SlotCount = NumLightSlotsPerCell * GridCellDim.x * GridCellDim.y * GridCellDim.z;
+	uint LinearThreadIndex = DTid;
+	if( LinearThreadIndex >= SlotCount) return;
+	ReGIR_Reservoir state = ReGIR_Reservoir::Load(ReadReservoirData(LinearThreadIndex, InputSlice));
+
+	WriteReservoirHistoryData(LinearThreadIndex, OutputSlice, state.Store());
+}
