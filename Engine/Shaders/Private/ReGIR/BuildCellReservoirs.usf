@@ -131,58 +131,42 @@ float GetTargetPdf(float3 WorldPos, float LightPos, float3 LightNormal,float3 Li
 	return Luminance(LightRadiance);
 }
 
-[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
-void BuildCellReservoirCS(uint DTid : SV_DispatchThreadID)
+[numthreads(THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE)]
+void BuildCellReservoirCS(uint3 DTid : SV_DispatchThreadID)
 {
 	if( NumLightTriangles == 0) return;
-	uint SlotCount = NumLightSlotsPerCell * GridCellDim.x * GridCellDim.y * GridCellDim.z;
-	uint LinearThreadIndex = DTid;
-	if( LinearThreadIndex >= SlotCount) return;
-	uint CellLinearIndex = LinearThreadIndex / NumLightSlotsPerCell;
 
-	uint2 DispatchThreadId = uint2(0,0);
+	uint3 DispatchThreadId = 0; 
 	// figure out dimension of the 3d grid and the current ID to be filled
 	uint3 VoxelId = 0, VoxelRes = 1;
 	switch (LightGridAxis)
 	{
 		case 0:
 		{
-			uint ix = CellLinearIndex  / (GridCellDim.y * GridCellDim.z);
-			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.z)) / GridCellDim.z;
-			uint iz = CellLinearIndex % GridCellDim.z;
-			DispatchThreadId = uint2(iy,iz);
-			VoxelId.yz = DispatchThreadId; VoxelRes.yz = LightGridResolution; 
+			VoxelId.yz = DTid.yz; VoxelRes.yz = LightGridResolution; 
+			DispatchThreadId = DTid.yzx;
 			break;
 		}
 		case 1:
 		{
-			uint iy = CellLinearIndex  / (GridCellDim.x * GridCellDim.z);
-			uint ix = (CellLinearIndex % (GridCellDim.x * GridCellDim.z)) / GridCellDim.z;
-			uint iz = CellLinearIndex % GridCellDim.z;
-			DispatchThreadId = uint2(ix,iz);
-			VoxelId.xz = DispatchThreadId; VoxelRes.xz = LightGridResolution; 
+			VoxelId.xz = DTid.xz; VoxelRes.xz = LightGridResolution; 
+			DispatchThreadId = DTid.xzy;
 			break;
 		}
 		case 2:
 		{
-			uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
-			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
-			uint ix = CellLinearIndex % GridCellDim.x;
-			DispatchThreadId = uint2(ix,iy);
-			VoxelId.xy = DispatchThreadId; VoxelRes.xy = LightGridResolution; 
+			VoxelId.xy = DTid.xy; VoxelRes.xy = LightGridResolution; 
+			DispatchThreadId = DTid.xyz;
 			break;
 		}
 	}
 
-	if (any(DispatchThreadId >= LightGridResolution))
+	if (any(DispatchThreadId.xy >= LightGridResolution) || DispatchThreadId.z >= NumLightSlotsPerCell)
 	{
 		return;
 	}
-	// uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
-	// uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
-	// uint ix = CellLinearIndex % GridCellDim.x;
-	// uint3 VoxelId = uint3(ix, iy,iz);
-	// uint3 VoxelRes = GridCellDim;
+	uint LinearThreadIndex = DispatchThreadId.z * GridCellDim.x * GridCellDim.y + DispatchThreadId.y * GridCellDim.x + DispatchThreadId.x;
+
 	// get bounding box of current voxel
 	float3 Lo = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 0) / float3(VoxelRes));
 	float3 Hi = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 1) / float3(VoxelRes));
@@ -222,59 +206,41 @@ void BuildCellReservoirCS(uint DTid : SV_DispatchThreadID)
 }
 
 
-[numthreads(THREAD_BLOCK_SIZE, 1, 1)]
-void BuildCellReservoirTemporalResamplingCS(uint DTid : SV_DispatchThreadID)
+[numthreads(THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE)]
+void BuildCellReservoirTemporalResamplingCS(uint3 DTid : SV_DispatchThreadID)
 {
 	if( NumLightTriangles == 0) return;
-	uint SlotCount = NumLightSlotsPerCell * GridCellDim.x * GridCellDim.y * GridCellDim.z;
-	uint LinearThreadIndex = DTid;
-	if( LinearThreadIndex >= SlotCount) return;
-	uint CellLinearIndex = LinearThreadIndex / NumLightSlotsPerCell;
 
-	uint2 DispatchThreadId = uint2(0,0);
+	uint3 DispatchThreadId = 0; 
 	// figure out dimension of the 3d grid and the current ID to be filled
 	uint3 VoxelId = 0, VoxelRes = 1;
 	switch (LightGridAxis)
 	{
 		case 0:
 		{
-			uint ix = CellLinearIndex  / (GridCellDim.y * GridCellDim.z);
-			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.z)) / GridCellDim.z;
-			uint iz = CellLinearIndex % GridCellDim.z;
-			DispatchThreadId = uint2(iy,iz);
-			VoxelId.yz = DispatchThreadId; VoxelRes.yz = LightGridResolution; 
+			VoxelId.yz = DTid.yz; VoxelRes.yz = LightGridResolution; 
+			DispatchThreadId = DTid.yzx;
 			break;
 		}
 		case 1:
 		{
-			uint iy = CellLinearIndex  / (GridCellDim.x * GridCellDim.z);
-			uint ix = (CellLinearIndex % (GridCellDim.x * GridCellDim.z)) / GridCellDim.z;
-			uint iz = CellLinearIndex % GridCellDim.z;
-			DispatchThreadId = uint2(ix,iz);
-			VoxelId.xz = DispatchThreadId; VoxelRes.xz = LightGridResolution; 
+			VoxelId.xz = DTid.xz; VoxelRes.xz = LightGridResolution; 
+			DispatchThreadId = DTid.xzy;
 			break;
 		}
 		case 2:
 		{
-			uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
-			uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
-			uint ix = CellLinearIndex % GridCellDim.x;
-			DispatchThreadId = uint2(ix,iy);
-			VoxelId.xy = DispatchThreadId; VoxelRes.xy = LightGridResolution; 
+			VoxelId.xy = DTid.xy; VoxelRes.xy = LightGridResolution; 
+			DispatchThreadId = DTid.xyz;
 			break;
 		}
 	}
 
-	if (any(DispatchThreadId >= LightGridResolution))
+	if (any(DispatchThreadId.xy >= LightGridResolution) || DispatchThreadId.z >= NumLightSlotsPerCell)
 	{
 		return;
 	}
-	// uint iz = CellLinearIndex  / (GridCellDim.y * GridCellDim.x);
-	// uint iy = (CellLinearIndex % (GridCellDim.y * GridCellDim.x)) / GridCellDim.x;
-	// uint ix = CellLinearIndex % GridCellDim.x;
-	// uint3 VoxelId = uint3(ix, iy,iz);
-	// uint3 VoxelRes = GridCellDim;
-	
+	uint LinearThreadIndex = DispatchThreadId.z * GridCellDim.x * GridCellDim.y + DispatchThreadId.y * GridCellDim.x + DispatchThreadId.x;
 	// get bounding box of current voxel
 	float3 Lo = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 0) / float3(VoxelRes));
 	float3 Hi = lerp(LightBoundMin, LightBoundMax, float3(VoxelId + 1) / float3(VoxelRes));

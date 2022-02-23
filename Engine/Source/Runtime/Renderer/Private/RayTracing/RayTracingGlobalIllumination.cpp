@@ -811,7 +811,7 @@ class FBuildCellReservoirCS : public FGlobalShader
 
 	static uint32 GetThreadBlockSize()
 	{
-		return 512;
+		return 8;
 	}
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
@@ -850,7 +850,7 @@ class FReGIRTemporalResamplingCS : public FGlobalShader
 
 	static uint32 GetThreadBlockSize()
 	{
-		return 512;
+		return 8;
 	}
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
@@ -894,7 +894,7 @@ class FWriteHistoryReservoirCS : public FGlobalShader
 
 	static uint32 GetThreadBlockSize()
 	{
-		return 512;
+		return 1024;
 	}
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
@@ -2587,31 +2587,34 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	CommonParameter.LightBoundMin = MeshLightBounds.Min;
 	CommonParameter.NumCandidatesPerLightSlot = CVarNumCandidatePerLightSlot.GetValueOnRenderThread();
 	CommonParameter.NumCandidatesPerCell = CVarNumCandidatePerCell.GetValueOnRenderThread();
+	int32 NumLightSlotsPerCell = CVarNumLightSlotsPerCell.GetValueOnRenderThread();
 	// pick the shortest axis
 	FVector Diag = MeshLightBounds.Max - MeshLightBounds.Min;
 	int LightGridResolution = CVarReGIRLightGridResolution.GetValueOnRenderThread();
 	int LightGridAxis = 0;
-	FIntVector GridCellDim;
+	FIntVector GridCellDim, CellDispatchResolution;
 	if (Diag.X < Diag.Y && Diag.X < Diag.Z)
 	{
 		LightGridAxis = 0;
 		GridCellDim = FIntVector(1, LightGridResolution, LightGridResolution);
+		CellDispatchResolution = FIntVector(NumLightSlotsPerCell, LightGridResolution, LightGridResolution);
 	}
 	else if (Diag.Y < Diag.Z)
 	{
 		LightGridAxis = 1;
 		GridCellDim = FIntVector(LightGridResolution, 1, LightGridResolution);
+		CellDispatchResolution = FIntVector(LightGridResolution, NumLightSlotsPerCell, LightGridResolution);
 	}
 	else
 	{
 		GridCellDim = FIntVector(LightGridResolution, LightGridResolution, 1);
+		CellDispatchResolution = FIntVector(LightGridResolution, LightGridResolution, NumLightSlotsPerCell);
 		LightGridAxis = 2;
 	}
 	//GridCellDim = FIntVector(LightGridResolution, LightGridResolution, LightGridResolution);
 	//float GridCellSize = CVarReGIRLightGridCellSize.GetValueOnRenderThread();
 	//FIntVector GridCellDim = FIntVector(FMath::CeilToInt(Diag.X / GridCellSize), FMath::CeilToInt(Diag.Y / GridCellSize), FMath::CeilToInt(Diag.Z / GridCellSize));
 
-	int32 NumLightSlotsPerCell = CVarNumLightSlotsPerCell.GetValueOnRenderThread();
 	CommonParameter.GridCellDim = GridCellDim;
 	CommonParameter.NumLightSlotsPerCell = NumLightSlotsPerCell;
 	FRDGBufferDesc ReservoirDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(ReGIR_PackedReservoir), GridCellDim.X * GridCellDim.Y * GridCellDim.Z * NumLightSlotsPerCell );
@@ -2620,6 +2623,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	CommonParameter.RWLightReservoirUAV = GraphBuilder.CreateUAV(LightReservoirs);
 	FRDGBufferDesc ReservoirHistoryDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(ReGIR_PackedReservoir), GridCellDim.X * GridCellDim.Y * GridCellDim.Z * NumLightSlotsPerCell);
 	FRDGBufferRef ReGIRReservoirsHistory = GraphBuilder.CreateBuffer(ReservoirHistoryDesc, TEXT("ReGIRReservoirsHistory"));
+	
 	if (CVarLightSamplingType.GetValueOnRenderThread() > 1)
 	{
 		RDG_GPU_STAT_SCOPE(GraphBuilder, BuilCellReservoir);
@@ -2628,6 +2632,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 		FBuildCellReservoirCS::FParameters* BuildPassParameters = GraphBuilder.AllocParameters<FBuildCellReservoirCS::FParameters>();
 		uint32 numLightSlots = CommonParameter.NumLightSlotsPerCell * GridCellDim.X * GridCellDim.Y * GridCellDim.Z;
 
+		
 		BuildPassParameters->CommonParameters = CommonParameter;
 		BuildPassParameters->MeshLightInstancePrimitiveBuffer = PassParameters->MeshLightInstancePrimitiveBuffer;
 		BuildPassParameters->MeshLightInstanceBuffer = PassParameters->MeshLightInstanceBuffer;
@@ -2644,7 +2649,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 			RDG_EVENT_NAME("BuilCellReservoir"),
 			ComputeShader,
 			BuildPassParameters,
-			FComputeShaderUtils::GetGroupCount(numLightSlots, FBuildCellReservoirCS::GetThreadBlockSize()));
+			FComputeShaderUtils::GetGroupCount(CellDispatchResolution, FIntVector(FBuildCellReservoirCS::GetThreadBlockSize())));
 	}
 	/*const bool bCameraCut = !(View.ViewState->FrameIndex >= 1) || View.bCameraCut;*/
 	const bool bCameraCut = !View.PrevViewInfo.SampledReGIRHistory.IsValid() || View.bCameraCut;
@@ -2678,7 +2683,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 			RDG_EVENT_NAME("BuilCellReservoir"),
 			ComputeShader,
 			BuildPassParameters,
-			FComputeShaderUtils::GetGroupCount(numLightSlots, FReGIRTemporalResamplingCS::GetThreadBlockSize()));
+			FComputeShaderUtils::GetGroupCount(CellDispatchResolution, FIntVector(FReGIRTemporalResamplingCS::GetThreadBlockSize())));
 	}
 
 	{
