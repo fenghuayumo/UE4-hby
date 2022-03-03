@@ -123,7 +123,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 	float HitCount = 0.0;
 	float AmbientOcclusion = 0.0;
 
-    HitDistance = length(WorldPosition - View.WorldCameraOrigin);
+    HitDistance = length(WorldPosition - View.TranslatedWorldCameraOrigin);
     AmbientOcclusion = 1.0;
     HitCount = 1.0;
 

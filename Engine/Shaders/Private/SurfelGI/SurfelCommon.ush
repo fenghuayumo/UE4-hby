@@ -1,20 +1,16 @@
 #ifndef SURFEL_COMMON_HLSL
 #define SURFEL_COMMON_HLSL
+#include "/Engine/Shared/SurfelTypes.h"
 #include "HashUtil.ush"
 
-#define SURFEL_UNIT_SCALE 200
-// static const uint MAX_SURFEL_GRID_CELLS = 1024 * 256;
-static const float SURFEL_GRID_CELL_DIAMETER = 0.25 * SURFEL_UNIT_SCALE;
-
-static const uint MAX_SURFEL_CELLS  = 1024 * 1024;
-// static const uint MAX_SURFELS  = MAX_SURFEL_CELLS;
-static const uint MAX_SURFELS_PER_CELL  = 32;
+#define SURFEL_UNIT_SCALE 100
 static const uint MAX_SURFEL_COUNT  = MAX_SURFELS_PER_CELL * MAX_SURFEL_CELLS;
 
-static const float SURFEL_RADIUS = 0.3 * SURFEL_UNIT_SCALE;
-static const float SURFEL_NORMAL_DIRECTION_SQUISH = 2;
-static const float RADIUS_OVERSCALE = 1.3;
+static const float SURFEL_GRID_CELL_DIAMETER = 0.25;
 
+static const float SURFEL_RADIUS = 0.3;
+static const float SURFEL_NORMAL_DIRECTION_SQUISH = 2.0;
+static const float RADIUS_OVERSCALE = 1.25;
 struct SurfelVertexPacked
 {
     float4   data0;
@@ -113,8 +109,9 @@ uint GetHashFromSurfelPos(float3 WorldPosition)
 
 void GetSurfelGridBoxMinMax(SurfelVertex surfel, out int3 pMin, out int3 pMax) 
 {
-    const float3 box_min_pos = surfel.Position - SURFEL_RADIUS;
-    const float3 box_max_pos = surfel.Position + SURFEL_RADIUS;
+    float3 SurfelPos = surfel.Position / SURFEL_UNIT_SCALE;
+    const float3 box_min_pos = SurfelPos - SURFEL_RADIUS;
+    const float3 box_max_pos = SurfelPos + SURFEL_RADIUS;
 
     pMin = GetSurfelGridCoordFromPos(box_min_pos);
     pMax = GetSurfelGridCoordFromPos(box_max_pos);
@@ -122,10 +119,10 @@ void GetSurfelGridBoxMinMax(SurfelVertex surfel, out int3 pMin, out int3 pMax)
 
 bool SurfelIntersectsGrid(SurfelVertex surfel, int3 GridCoord) 
 {
+    float3 SurfelPos = surfel.Position / SURFEL_UNIT_SCALE;
     const float3 CellCenter = GetSurfelGridCenter(GridCoord);
     const float GridCellRadius = SURFEL_GRID_CELL_DIAMETER * 0.5;
-
-    const float3 CellLocalSurfelPos = surfel.Position - CellCenter;
+    const float3 CellLocalSurfelPos = SurfelPos - CellCenter;
     const float3 CellLocalClosestPointOnGridCell =
         clamp(CellLocalSurfelPos, -GridCellRadius, GridCellRadius);
 
@@ -135,7 +132,7 @@ bool SurfelIntersectsGrid(SurfelVertex surfel, int3 GridCoord)
         // Approximate box-ellipsoid culling. Sometimes misses corners,
         // but greatly improves culling efficiency.
         // TODO: figure out a precise solution. Warp space before finding the closest point?
-        const float mahalanobis_dist = length(PosOffset) * (1 + abs(dot(PosOffset, surfel.Normal)) * SURFEL_NORMAL_DIRECTION_SQUISH);
+        const float mahalanobis_dist = length(PosOffset) * (1 + abs(dot((PosOffset), surfel.Normal)) * SURFEL_NORMAL_DIRECTION_SQUISH);
         return mahalanobis_dist < SURFEL_RADIUS;
     #else
         return dot(PosOffset, PosOffset) < SURFEL_RADIUS * SURFEL_RADIUS;

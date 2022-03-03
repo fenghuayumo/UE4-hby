@@ -387,6 +387,14 @@ private:
 		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 		int32 UpscaleFactor,
 		// Output
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+		SurfelBufResources* SurfelResource = nullptr);
+
+	void FusionGI(FRDGBuilder& GraphBuilder,
+		FSceneTextureParameters& SceneTextures,
+		FViewInfo& View,
+		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
+		int32 UpscaleFactor,
 		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
 
 	void RenderTestDDGI(

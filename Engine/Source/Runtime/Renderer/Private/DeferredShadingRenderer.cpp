@@ -1262,7 +1262,8 @@ bool FDeferredShadingSceneRenderer::DispatchRayTracingWorldUpdates(FRHICommandLi
 		PreparePathTracing(View, RayGenShaders);
 		PrepareRayTracingSampledDirectLighting(View, RayGenShaders);
 		PrepareRayTracingRestirGI(View, RayGenShaders);
-
+		PrepareRayTracingSurfelGI(View, RayGenShaders);
+		PrepareRayTracingRadianceCacheGI(View, RayGenShaders);
 		View.RayTracingScene.RayTracingSceneRHI = RHICreateRayTracingScene(SceneInitializer);
 
 		// Create ray tracing light list to obtain list of light function materials

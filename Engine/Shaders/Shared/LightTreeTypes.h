@@ -1,7 +1,7 @@
 #pragma once
 
 #define MAX_CUT_NODES 16
-#define LIGHT_CONE
+// #define LIGHT_CONE
 #ifdef __cplusplus
 
 struct FLightNode

@@ -211,10 +211,10 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 			GBufferData.CustomData = Payload.CustomData;
 
 #if !MESH_LIGHT_SAMPLING
-			if (AccumulateEmissive)
-			{
-				Irradiance += Payload.Radiance * RayThroughput / RayPdf;
-			}
+			// if (AccumulateEmissive)
+			// {
+			// 	Irradiance += Payload.Radiance * RayThroughput / RayPdf;
+			// }
 #endif
 			float SplitFactor = 1.0 / NextEventEstimationSamples;
 			for (uint NeeID = 0; NeeID < NextEventEstimationSamples; ++NeeID)
@@ -354,9 +354,9 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 
 	// AmbientOcclusion = saturate(AmbientOcclusion);
 
-#if USE_PREEXPOSURE
-	Irradiance *= View.PreExposure;
-#endif
+// #if USE_PREEXPOSURE
+// 	Irradiance *= View.PreExposure;
+// #endif
 
 	const float TotalSampleCount = PrevRadiancePacked.w + ValidSampleCount;
     const float BlendFactorNew = ValidSampleCount / max(1, TotalSampleCount);
