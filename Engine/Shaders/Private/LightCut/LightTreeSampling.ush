@@ -2,6 +2,8 @@
 #define _LIGHT_TREE_SAMPLING_
 #include "LightCutUtils.ush"
 
+// #define POWER_METRIC
+
 bool SelectChildNode(
     float3 WorldPos, 
     float3 WorldNormal, 
@@ -28,13 +30,13 @@ bool SelectChildNode(
 		Prob0 = 1;
 		return true;
 	}
-
+#ifndef POWER_METRIC
 	float3 c0_boundMin = c0.BoundMin;
 	float3 c0_boundMax = c0.BoundMax;
 	float3 c1_boundMin = c1.BoundMin;
 	float3 c1_boundMax = c1.BoundMax;
 
-	// Compute the weights
+	//Compute the weights
 	
 	float geom0 = 1;
 	float geom1 = 1;
@@ -123,6 +125,9 @@ bool SelectChildNode(
 		Prob0 = 0.5 * (w_max0 + w_min0);
 #ifdef EXPLORE_DISTANCE_TYPE
 	}
+#endif
+#else
+	Prob0 = c0_Intensity / (c0_Intensity + c1_Intensity);
 #endif
 	return true;
 };
