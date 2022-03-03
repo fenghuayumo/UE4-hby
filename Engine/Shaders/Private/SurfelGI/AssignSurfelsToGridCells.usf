@@ -7,6 +7,15 @@
 ByteAddressBuffer SurfelMetaBuf;
 RWByteAddressBuffer IndirectDispatchArgs;
 
+// RWBuffer<uint> IndirectDispatchArgs;
+
+// void WriteArgs1D(uint Index, uint ThreadCount)
+// {
+// 	IndirectDispatchArgs[Index * 3 + 0] = ThreadCount;
+// 	IndirectDispatchArgs[Index * 3 + 1] = 1;
+// 	IndirectDispatchArgs[Index * 3 + 2] = 1;
+// }
+
 [numthreads(1, 1, 1)]
 void PrepareDispatchArgs() 
 {
@@ -19,6 +28,7 @@ void PrepareDispatchArgs()
         static const uint Divisor = ThreadsPerGroup * EntriesPerThread;
 
         IndirectDispatchArgs.Store3(0 * sizeof(uint3), uint3((CellCount + Divisor - 1) / Divisor, 1, 1));
+        //WriteArgs1D(0, (CellCount + Divisor - 1) / Divisor);
     }
 
     // Surfel binning args
@@ -28,6 +38,7 @@ void PrepareDispatchArgs()
         static const uint Divisor = ThreadsPerGroup * EntriesPerThread;
 
         IndirectDispatchArgs.Store3(1 * sizeof(uint3), uint3((SurfelCount + Divisor - 1) / Divisor, 1, 1));
+        //WriteArgs1D(1, (SurfelCount + Divisor - 1) / Divisor);
     }
 }
 
