@@ -137,6 +137,13 @@ StructuredBuffer<float4> SurfelIrradianceBuf;
 #include "../SurfelGI/SurfelGridHash.ush"
 #endif
 
+#define USE_RADIANCE_CACHE	1
+#if USE_RADIANCE_CACHE
+
+#include "../WRC/ProbeLookup.ush"
+
+#endif
+
 
 #if USE_DEFERED_GI
 
@@ -837,8 +844,22 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 		Ray.Direction = GIRay.GetDirection();
 		float3 RayThroughput = 1.0;
 		RayThroughput *= Diffuse_Lambert(GBufferData.DiffuseColor) * saturate(dot(GBufferData.WorldNormal, Ray.Direction)) / GBufferData.DiffuseColor ;
-		FRayIntersectionBookmark Bookmark = BookmarkBuffer[PixelRayIndex];
+		
+		RandomSequence RandSequence;
+		RandomSequence_Initialize(RandSequence, SvPosition, SampleIndex, View.StateFrameIndex, SampleCount);
 
+#if USE_RADIANCE_CACHE
+		FarRadianceFieldQuery FieldQuery = FarRadianceFieldQuery::FromRay(Ray.Origin, Ray.Direction);
+        FieldQuery.QueryNormal = GBufferData.WorldNormal;
+        FieldQuery.InterpolationURand = RandomSequence_GenerateSample3D(RandSequence);
+        FarRadianceField Field = FieldQuery.Query();
+        if (Field.IsHit()) 
+        {
+            Ray.TMax = Field.ProbeHitT;
+        }
+#endif
+
+		FRayIntersectionBookmark Bookmark = BookmarkBuffer[PixelRayIndex];
 		uint RayFlags = 0;
 		const uint InstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
 		const bool bEnableSkyLightContribution = true;
@@ -870,14 +891,21 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 		// Environment hit
 		if (Payload.IsMiss())
 		{
-			// Optional multi-bounce SkyLight contribution
-			if (EvalSkyLight )
+			if (Field.IsHit()) 
+            {
+                Irradiance += Field.Radiance * Field.InvPdf;
+			}
+			else 
 			{
-				uint SkyLightId = 0;
-				RayDesc LightRay = Ray;
-				LightRay.TMax = POSITIVE_INFINITY;
-				float3 EnvironmentRadiance = SkyLight_TraceLight(Ray, SkyLightId).Radiance;
-				Irradiance += EnvironmentRadiance / RayPdf;
+				// Optional multi-bounce SkyLight contribution
+				if (EvalSkyLight )
+				{
+					uint SkyLightId = 0;
+					RayDesc LightRay = Ray;
+					LightRay.TMax = POSITIVE_INFINITY;
+					float3 EnvironmentRadiance = SkyLight_TraceLight(Ray, SkyLightId).Radiance;
+					Irradiance += EnvironmentRadiance / RayPdf;
+				}
 			}
 			break;
 		}
@@ -892,8 +920,6 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 			sampleRef.Normal = Payload.WorldNormal;
 		}
 
-		RandomSequence RandSequence;
-		RandomSequence_Initialize(RandSequence, SvPosition, SampleIndex, View.StateFrameIndex, SampleCount);
 		float2 RandSample = RandomSequence_GenerateSample2D(RandSequence);
 
 		// Create faux GBuffer to use with EvaluateBxDF

@@ -570,11 +570,11 @@ void FDeferredShadingSceneRenderer::RenderRayTracingDeferedGI(
 
 DECLARE_GPU_STAT_NAMED(RayTracingGIRestir, TEXT("Ray Tracing GI: Restir"));
 
-DECLARE_GPU_STAT_NAMED(RestirGenerateSample, TEXT("Ray Tracing GI: GenerateSample"));
-DECLARE_GPU_STAT_NAMED(RestirGenerateSampleDefered, TEXT("Ray Tracing GI: GenerateSampleDefered"));
-DECLARE_GPU_STAT_NAMED(RestirTemporalResampling, TEXT("Ray Tracing GI: TemporalResampling"));
-DECLARE_GPU_STAT_NAMED(RestirSpatioalResampling, TEXT("Ray Tracing GI: SpatioalResampling"));
-DECLARE_GPU_STAT_NAMED(RestirEvaluateGI, TEXT("Ray Tracing GI: EvaluateGI"));
+DECLARE_GPU_STAT_NAMED(RestirGenerateSample, TEXT("RestirGI: GenerateSample"));
+DECLARE_GPU_STAT_NAMED(RestirGenerateSampleDefered, TEXT("RestirGI: GenerateSampleDefered"));
+DECLARE_GPU_STAT_NAMED(RestirTemporalResampling, TEXT("RestirGI: TemporalResampling"));
+DECLARE_GPU_STAT_NAMED(RestirSpatioalResampling, TEXT("RestirGI: SpatioalResampling"));
+DECLARE_GPU_STAT_NAMED(RestirEvaluateGI, TEXT("RestirGI: EvaluateGI"));
 
 struct RTXGI_PackedReservoir
 {
@@ -1128,10 +1128,8 @@ void GenerateInitialSample(FRDGBuilder& GraphBuilder,
 	FIntPoint RayTracingResolution)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, RestirGenerateSample);
-	RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: RestirGenerateSample");
+	RDG_EVENT_SCOPE(GraphBuilder, "RestirGI: GenerateSample");
 	{
-		/*RDG_GPU_STAT_SCOPE(GraphBuilder, RestirGenerateSample);
-		RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: GenerateSample");*/
 		FRestirGIInitialSamplesRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FRestirGIInitialSamplesRGS::FParameters>();
 
 		int32 CVarRayTracingGlobalIlluminationMaxBouncesValue = CVarRayTracingGlobalIlluminationMaxBounces.GetValueOnRenderThread();
@@ -1221,7 +1219,7 @@ void GenerateInitialSampleForDefered(FRDGBuilder& GraphBuilder,
 	const FIntPoint& RayTracingResolution)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, RestirGenerateSampleDefered);
-	RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: RestirGenerateSampleDefered");
+	RDG_EVENT_SCOPE(GraphBuilder, "RestirGI: GenerateSampleDefered");
 
 	const bool bGenerateRaysWithRGS = CVarRayTracingGIGenerateRaysWithRGS.GetValueOnRenderThread() == 1;
 
@@ -1399,7 +1397,7 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 #if RHI_RAYTRACING
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, RayTracingGIRestir);
-	RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: Ressampling");
+	RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: RestirGI");
 
 	float MaxShadowDistance = 1.0e27;
 	if (GRayTracingGlobalIlluminationMaxShadowDistance > 0.0)
@@ -1471,8 +1469,8 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 		//Temporal candidate merge pass, optionally merged with initial candidate pass
 		if (CVarRestirGITemporal.GetValueOnRenderThread() != 0 && !bCameraCut && Reservoir < PrevHistoryCount)
 		{
-			/*	RDG_GPU_STAT_SCOPE(GraphBuilder, RestirTemporalResampling);
-			RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: TemporalResampling");*/
+			RDG_GPU_STAT_SCOPE(GraphBuilder, RestirTemporalResampling);
+			RDG_EVENT_SCOPE(GraphBuilder, "RestirGI: TemporalResampling");
 			{
 				FRestirGITemporalResampling::FParameters* PassParameters = GraphBuilder.AllocParameters<FRestirGITemporalResampling::FParameters>();
 
@@ -1545,8 +1543,8 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 	// Spatial resampling passes, one per reservoir
 	if (CVarRestirGISpatial.GetValueOnRenderThread() != 0)
 	{
-		/*	RDG_GPU_STAT_SCOPE(GraphBuilder, RestirSpatioalResampling);
-			RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: SpatioalResampling");*/
+		RDG_GPU_STAT_SCOPE(GraphBuilder, RestirSpatioalResampling);
+		RDG_EVENT_SCOPE(GraphBuilder, "RestirGI: SpatioalResampling");
 		for (int32 Reservoir = NumReservoirs; Reservoir > 0; Reservoir--)
 		{
 		if (CVarRestirGISpatial.GetValueOnRenderThread() != 0)
@@ -1599,8 +1597,8 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 	}
 	// Shading evaluation pass
 	{
-	//RDG_GPU_STAT_SCOPE(GraphBuilder, RestirEvaluateGI);
-	//RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: EvaluateGI");
+	RDG_GPU_STAT_SCOPE(GraphBuilder, RestirEvaluateGI);
+	RDG_EVENT_SCOPE(GraphBuilder, "RestirGI: EvaluateGI");
 	const bool bUseHairLighting = false;
 	FEvaluateRestirGIRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FEvaluateRestirGIRGS::FParameters>();
 
