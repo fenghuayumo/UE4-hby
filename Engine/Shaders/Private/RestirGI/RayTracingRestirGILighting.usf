@@ -842,11 +842,22 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 		Ray.TMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
 		Ray.Origin    = GIRay.Origin;
 		Ray.Direction = GIRay.GetDirection();
-		float3 RayThroughput = 1.0;
-		RayThroughput *= Diffuse_Lambert(GBufferData.DiffuseColor) * saturate(dot(GBufferData.WorldNormal, Ray.Direction)) / GBufferData.DiffuseColor ;
-		
+
 		RandomSequence RandSequence;
 		RandomSequence_Initialize(RandSequence, SvPosition, SampleIndex, View.StateFrameIndex, SampleCount);
+
+		float3 RayThroughput = 1.0;
+		float3 RandSample = RandomSequence_GenerateSample1D(RandSequence);
+		RayThroughput *= Diffuse_Lambert(GBufferData.DiffuseColor) * saturate(dot(GBufferData.WorldNormal, Ray.Direction)) / GBufferData.DiffuseColor ;
+		
+		if (UseRussianRoulette)
+		{
+			float RRSample = RandSample.x;
+			float ProbabilityOfSuccess = Luminance(GBufferData.DiffuseColor);
+			float ProbabilityOfTermination = 1.0 - ProbabilityOfSuccess;
+			if (RRSample < ProbabilityOfTermination) continue;
+			RayThroughput /= ProbabilityOfSuccess;
+		}
 
 #if USE_RADIANCE_CACHE
 		FarRadianceFieldQuery FieldQuery = FarRadianceFieldQuery::FromRay(Ray.Origin, Ray.Direction);
@@ -919,8 +930,6 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 			sampleRef.Position = HitPos;
 			sampleRef.Normal = Payload.WorldNormal;
 		}
-
-		float2 RandSample = RandomSequence_GenerateSample2D(RandSequence);
 
 		// Create faux GBuffer to use with EvaluateBxDF
 		FGBufferData GBufferData = (FGBufferData)0;

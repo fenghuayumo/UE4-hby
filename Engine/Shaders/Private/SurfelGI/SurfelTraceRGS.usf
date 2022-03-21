@@ -117,6 +117,10 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 	uint2 PixelCoord = surfel.PixelCoord;
     float4 PrevRadiancePacked = min(SurfelIrradianceBuf[SurfelIndex], TARGET_SAMPLE_COUNT);
 	float3 DiffuseColor = surfel.DiffuseColor;
+	if (Luminance(DiffuseColor) < DiffuseThreshold)
+	{
+		return;
+	}
 
 	// uint  SampleCount = 4;
     float  ValidSampleCount = 0;
@@ -129,12 +133,20 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
         ValidSampleCount += 1.0;
 
 		RandomSequence RandSequence;
-		//uint PositionSeed = (SamplesPerPixel * 65536 + SampleIndex + hash1(SurfelIndex) ) % (TARGET_SAMPLE_COUNT * 64);
-		//RandomSequence_Initialize(RandSequence, PositionSeed, View.StateFrameIndex);
 		RandomSequence_Initialize(RandSequence, PixelCoord, SampleIndex, View.StateFrameIndex, SamplesPerPixel);
 
 		float3 RayThroughput = 1.0;
 		float3 RandSample = RandomSequence_GenerateSample3D(RandSequence);
+		
+		if (UseRussianRoulette)
+		{
+			float RRSample = RandSample.x;
+			float ProbabilityOfSuccess = Luminance(DiffuseColor);
+			float ProbabilityOfTermination = 1.0 - ProbabilityOfSuccess;
+			if (RRSample < ProbabilityOfTermination) continue;
+			RayThroughput /= ProbabilityOfSuccess;
+		}
+
 		RayDesc Ray;
 		float RayPdf = 1.0;
 		GenerateCosineNormalRay(surfel.Position, surfel.Normal, RandSample.yz, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
