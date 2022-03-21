@@ -1,0 +1,420 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#define RAY_TRACING_DEFERRED_GI_SHADER_VERSION 0xC1669BC2  // Change to force shader compilation of this shader
+
+// EDeferredMaterialMode
+#define DEFERRED_MATERIAL_MODE_NONE   0
+#define DEFERRED_MATERIAL_MODE_GATHER 1
+#define DEFERRED_MATERIAL_MODE_SHADE  2
+
+#ifndef DIM_DEFERRED_MATERIAL_MODE
+	#define DIM_DEFERRED_MATERIAL_MODE DEFERRED_MATERIAL_MODE_NONE
+#endif
+
+#ifndef DIM_GENERATE_RAYS
+	#define DIM_GENERATE_RAYS 0
+#endif
+
+#define USE_IES_TERM 0 // this shader doesn't bind the IES atlas, so disable the IES term from path tracer lights
+
+#include "../Common.ush"
+#include "../RectLight.ush"
+//#include "../MonteCarlo.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../ShadingModels.ush"
+#include "../SceneTextureParameters.ush"
+#include "RayTracingCommon.ush"
+#include "RayTracingDeferredShadingCommon.ush"
+#include "RayTracingHitGroupCommon.ush"
+
+// #define EXPLORE_DISTANCE_TYPE
+// #define LIGHT_GRID 1
+// #define LIGHT_TREE 2
+// #define LIGHT_CUT  3
+// #define LIGHT_UNIFROM 4
+
+// // #define LIGHT_SAMPLING_TYPE 1
+// #ifndef LIGHT_SAMPLING_TYPE
+// #define LIGHT_SAMPLING_TYPE 0
+// #endif
+
+// #if LIGHT_SAMPLING_TYPE == LIGHT_UNIFROM
+// #define UNIFORM_LIGHT_SELECTION
+// #endif
+// #if LIGHT_SAMPLING_TYPE == LIGHT_GRID
+// #define USE_PATH_TRACING_LIGHT_GRID 1
+// #else
+// #define USE_PATH_TRACING_LIGHT_GRID 0
+// #endif
+
+#include "../PathTracing/Material/PathTracingMaterialSampling.ush"
+#include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
+// #include "../PathTracing/Light/PathTracingLightGrid.ush"
+#include "../PathTracing/Light/PathTracingLightSampling.ush"
+#include "RayTracingDeferredMaterials.ush"
+#include "RayTracingGICommon.ush"
+
+uint2 RayTracingResolution;
+uint2 TileAlignedResolution;
+float TextureMipBias;
+uint UpscaleFactor;
+float MaxNormalBias;
+float MaxRayDistanceForGI;
+float MaxRayDistanceForAO;
+float MaxShadowDistance;
+float NextEventEstimationSamples;
+uint EvalSkyLight;
+uint AccumulateEmissive;
+uint UseFireflySuppression;
+float DiffuseThreshold;
+
+RaytracingAccelerationStructure                 TLAS;
+RWTexture2D<float4> RWGlobalIlluminationUAV;
+RWTexture2D<float2> RWGlobalIlluminationRayDistanceUAV;
+// Buffer of ray intersections aquired during Gather phase and 
+// used during to reduce ray intersection overhead during Shading.
+RWStructuredBuffer<FSortedGIRay>                RayBuffer;
+RWStructuredBuffer<FDeferredMaterialPayload>    MaterialBuffer;
+RWStructuredBuffer<FRayIntersectionBookmark>    BookmarkBuffer;
+
+
+bool ShouldTraceRay(uint2 DispatchThreadId, FGBufferData GBufferData)
+{
+	bool bTraceRay = true;
+
+	// Cull based on shading model
+	uint ShadingModelID = GBufferData.ShadingModelID;
+	if (ShadingModelID == SHADINGMODELID_UNLIT)
+	{
+		bTraceRay = false;
+	}
+
+	// Cull based on diffuse threshold
+	float3 DiffuseColor = GBufferData.DiffuseColor;
+	if (Luminance(DiffuseColor) < DiffuseThreshold)
+	{
+		bTraceRay = false;
+	}
+
+	// Cull based on ViewRect
+	if (any(DispatchThreadId - View.ViewRectMin.xy >= RayTracingResolution))
+	{
+		bTraceRay = false;
+	}
+
+	return bTraceRay;
+}
+
+RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
+{
+	const uint DispatchThreadId = DispatchRaysIndex().x; // This shader is dispatched in 1D configuration
+
+	FDeferredMaterialPayload DeferredMaterialPayload = (FDeferredMaterialPayload)0;
+	DeferredMaterialPayload.SortKey = RAY_TRACING_DEFERRED_MATERIAL_KEY_INVALID;
+
+#if DIM_DEFERRED_MATERIAL_MODE == DEFERRED_MATERIAL_MODE_GATHER
+
+	FSortedGIRay GIRay;
+
+	#if DIM_GENERATE_RAYS
+	{
+		const uint  ThreadGroupSize  = GI_RAY_DIRECTION_SORT_TILE_SIZE * GI_RAY_DIRECTION_SORT_TILE_SIZE;
+		const uint2 TileSize         = uint2(GI_RAY_DIRECTION_SORT_TILE_SIZE, GI_RAY_DIRECTION_SORT_TILE_SIZE);
+		const uint  TileIndex        = DispatchThreadId / ThreadGroupSize;
+		const uint  RayIndexInTile   = DispatchThreadId % ThreadGroupSize;
+		const uint2 NumTiles         = TileAlignedResolution / TileSize;
+		const uint2 TileBasePixelPos = uint2(TileIndex % NumTiles.x, TileIndex / NumTiles.x) * TileSize;
+		const uint2 PixelPos         = View.ViewRectMin.xy + TileBasePixelPos + uint2(RayIndexInTile % TileSize.x, RayIndexInTile / TileSize.x);
+
+		GIRay = GenerateDeferredGIRay(PixelPos, UpscaleFactor, MaxNormalBias);
+        RayBuffer[DispatchThreadId] = GIRay; // Store the ray to be used in shading phase
+	}	
+	#else
+	{
+		 GIRay = RayBuffer[DispatchThreadId];
+	}
+	#endif
+
+	DeferredMaterialPayload.PixelCoordinates = DispatchThreadId; // Store the sorted ray index, not packed 2D pixel coordinates
+	const uint2 PixelCoord = UnpackPixelCoordinates(GIRay.PixelCoordinates);
+
+    uint2 SvPosition = GetPixelCoord(PixelCoord, UpscaleFactor);
+    float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
+    float2 UV = (float2(SvPosition) + 0.5) * InvBufferSize;
+
+    //#dxr-todo: workaround for flickering. UE-87281
+    FGBufferData GBufferData = GetGBufferDataFromSceneTexturesLoad(SvPosition);
+
+    // Remap DiffuseColor when using SubsurfaceProfile (GBuffer decoding replaces with 100% albedo)
+    if (UseSubsurfaceProfile(GBufferData.ShadingModelID))
+    {
+        GBufferData.DiffuseColor = GBufferData.StoredBaseColor;
+    }
+    bool bShouldTrace = ShouldTraceRay(PixelCoord,GBufferData );
+	if ( bShouldTrace )
+	{
+		RayDesc Ray;
+        Ray.TMin = 0.01;
+        Ray.TMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+		Ray.Origin    = GIRay.Origin;
+		Ray.Direction = GIRay.GetDirection();
+
+		DeferredMaterialPayload.SortKey = RAY_TRACING_DEFERRED_MATERIAL_KEY_RAY_MISS;
+		FRayIntersectionBookmark Bookmark = (FRayIntersectionBookmark)0;
+
+        uint RayFlags = 0;
+#if !ENABLE_TWO_SIDED_GEOMETRY
+		RayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+#endif
+
+        TraceDeferredMaterialGatherRay(TLAS,
+            RayFlags,
+            RAY_TRACING_MASK_OPAQUE,
+            Ray,
+            Bookmark,
+            DeferredMaterialPayload
+        );
+		BookmarkBuffer[DispatchThreadId] = Bookmark;
+	}
+
+	MaterialBuffer[DispatchThreadId] = DeferredMaterialPayload;
+    
+    //RWGlobalIlluminationUAV[PixelCoord] = float4( DeferredMaterialPayload.SortKey < RAY_TRACING_DEFERRED_MATERIAL_KEY_RAY_MISS ?  GIRay.GetDirection() * 0.5 + 0.5: 0, 1.0);
+#elif DIM_DEFERRED_MATERIAL_MODE == DEFERRED_MATERIAL_MODE_SHADE
+    
+    DeferredMaterialPayload = MaterialBuffer[DispatchThreadId];
+
+	// Linear ray index is stored in PixelCoordinates (see DEFERRED_MATERIAL_MODE_GATHER above)
+	const uint GIRayIndex = DeferredMaterialPayload.PixelCoordinates;
+
+	FSortedGIRay GIRay = RayBuffer[GIRayIndex];
+	const uint2 PixelCoord = UnpackPixelCoordinates(GIRay.PixelCoordinates);
+    if( all(PixelCoord - View.ViewRectMin.xy < RayTracingResolution) )
+    {
+        RWGlobalIlluminationUAV[PixelCoord] = 0.0;
+        RWGlobalIlluminationRayDistanceUAV[PixelCoord] = float2(-1.0, 0.0);
+    }
+    uint2 SvPosition = GetPixelCoord(PixelCoord, UpscaleFactor);
+    float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
+    float2 UV = (float2(SvPosition) + 0.5) * InvBufferSize;
+
+    //#dxr-todo: workaround for flickering. UE-87281
+    FGBufferData GBufferData = GetGBufferDataFromSceneTexturesLoad(SvPosition);
+
+    // Remap DiffuseColor when using SubsurfaceProfile (GBuffer decoding replaces with 100% albedo)
+    if (UseSubsurfaceProfile(GBufferData.ShadingModelID))
+    {
+        GBufferData.DiffuseColor = GBufferData.StoredBaseColor;
+    }
+
+	bool bTraceRay = ShouldTraceRay(PixelCoord, GBufferData);
+	if ( !bTraceRay) return; 
+
+    float RayPdf = GIRay.Pdf;
+    float3 Irradiance = 0;
+    float HitDistance = 0.0;
+	float HitCount = 0.0;
+	float AmbientOcclusion = 0.0;
+    uint ValidSamplesPerPixel = 0;
+ 
+    if (DeferredMaterialPayload.SortKey < RAY_TRACING_DEFERRED_MATERIAL_KEY_RAY_MISS)
+	{
+        for(uint spp = 0; spp < 1; spp++)
+        {
+            ValidSamplesPerPixel++;
+            
+            RayDesc Ray;
+            Ray.TMin = 0.01;
+            Ray.TMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+            Ray.Origin    = GIRay.Origin;
+            Ray.Direction = GIRay.GetDirection();
+
+            float3 RayThroughput = 1.0;
+	        RayThroughput *= Diffuse_Lambert(GBufferData.DiffuseColor) * saturate(dot(GBufferData.WorldNormal, Ray.Direction)) / GBufferData.DiffuseColor ;
+
+           FRayIntersectionBookmark Bookmark = BookmarkBuffer[DeferredMaterialPayload.PixelCoordinates];
+
+			uint RayFlags = 0;
+			const uint InstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
+			const bool bEnableSkyLightContribution = true;
+			const bool bIgnoreTranslucentMaterials = false;
+
+#if !ENABLE_TWO_SIDED_GEOMETRY
+			RayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+#endif
+
+            FPackedMaterialClosestHitPayload PackedPayload = (FPackedMaterialClosestHitPayload)0;
+            if (bEnableSkyLightContribution)
+            {
+                PackedPayload.SetEnableSkyLightContribution();
+            }
+            PackedPayload.SetPixelCoord(SvPosition);
+            PackedPayload.SetMipBias(TextureMipBias);
+            
+            TraceDeferredMaterialShadingRay(
+                TLAS,
+                RayFlags,
+                InstanceInclusionMask,
+                Ray,
+                Bookmark,
+                PackedPayload);
+
+            //Unpack the payload
+            FMaterialClosestHitPayload Payload = UnpackRayTracingPayload(PackedPayload, Ray);
+            HitDistance += Payload.HitT ;
+            HitCount += 1.0;
+            if (Payload.HitT < MaxRayDistanceForAO)
+            {
+                AmbientOcclusion += 1.0;
+            }
+
+            // Environment hit
+            if (Payload.IsMiss())
+            {
+                // Optional multi-bounce SkyLight contribution
+                if (EvalSkyLight )
+                {
+                    uint SkyLightId = 0;
+                    RayDesc LightRay = Ray;
+                    LightRay.TMax = POSITIVE_INFINITY;
+                    float3 EnvironmentRadiance = SkyLight_TraceLight(Ray, SkyLightId).Radiance;
+                    Irradiance += EnvironmentRadiance / RayPdf;
+                }
+                break;
+            }
+
+            if (Payload.HitT > MaxRayDistanceForGI)
+                break;
+            
+            RandomSequence RandSequence;
+            RandomSequence_Initialize(RandSequence, SvPosition, 0, View.StateFrameIndex, 1);
+            float2 RandSample = RandomSequence_GenerateSample2D(RandSequence);
+
+            // Create faux GBuffer to use with EvaluateBxDF
+            FGBufferData GBufferData = (FGBufferData)0;
+            GBufferData.Depth = 1.f; // Do not use depth
+            GBufferData.WorldNormal = Payload.WorldNormal;
+            GBufferData.BaseColor = Payload.BaseColor;
+            GBufferData.CustomData = Payload.CustomData;
+            GBufferData.GBufferAO = Payload.GBufferAO;
+            GBufferData.IndirectIrradiance = (Payload.IndirectIrradiance.x + Payload.IndirectIrradiance.y + Payload.IndirectIrradiance.z) / 3.f;
+            GBufferData.SpecularColor = Payload.SpecularColor;
+            GBufferData.DiffuseColor = Payload.DiffuseColor;
+            GBufferData.Metallic = Payload.Metallic;
+            GBufferData.Specular = Payload.Specular;
+            GBufferData.Roughness = Payload.Roughness;
+            GBufferData.ShadingModelID = Payload.ShadingModelID;
+            GBufferData.CustomData = Payload.CustomData;
+
+            if (AccumulateEmissive)
+            {
+                Irradiance += Payload.Radiance;
+            }
+
+            float3 Position = Payload.WorldPos;
+            float3 Normal = Payload.WorldNormal;
+            // Irradiance = Payload.Roughness;
+            // Perform next-event estimation
+            float SplitFactor = 1.0 / NextEventEstimationSamples;
+            for (uint NeeTrial = 0; NeeTrial < NextEventEstimationSamples; ++NeeTrial)
+            {
+                // Light selection
+                int LightId;
+                float3 LightRadianceOverPdf = 0;
+                float NeePdf = 0.0;
+
+                float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
+
+                RayDesc LightRay;
+                if (SampleLight(RandSample3,
+                                Position,
+                                Normal,
+                                Payload.PrimitiveLightingChannelMask,
+                                ENABLE_TRANSMISSION,
+                                LightId,
+                                LightRay.Direction,
+                                LightRay.TMax,
+                                LightRadianceOverPdf,
+                                NeePdf))
+                {
+                    LightRay.Origin = Position;
+                    LightRay.TMin = 0;
+                    LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
+                    bool bTransmission = HasTransmission(LightId);
+                    float3 BiasNormal = Payload.WorldNormal;
+                    if (bTransmission && dot(BiasNormal, LightRay.Direction) < 0.0)
+                    {
+                        BiasNormal = -BiasNormal;
+                    }
+                    ApplyPositionBias(LightRay, BiasNormal, MaxNormalBias);
+
+                    // Trace visibility ray
+                    uint NeeRayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+                    const uint NeeInstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
+
+    #if !ENABLE_TWO_SIDED_GEOMETRY
+                    NeeRayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+    #endif
+
+                    FMinimalPayload NeePayload = TraceVisibilityRay(
+                        TLAS,
+                        NeeRayFlags,
+                        NeeInstanceInclusionMask,
+                        SvPosition,
+                        LightRay);
+
+                    // No hit indicates successful next-event connection
+                    if (NeePayload.IsMiss())
+                    {
+                        // Evaluate material
+                        half3 N = Payload.WorldNormal;
+                        half3 V = -Ray.Direction;
+                        half3 L = LightRay.Direction;
+                        float NoL = saturate(dot(N, L));
+                        FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
+                        FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
+                        float3 MaterialThroughput = LightingSample.Diffuse;
+                        if (bTransmission)
+                        {
+                            MaterialThroughput += LightingSample.Transmission;
+                        }
+
+                        // Record the contribution
+                        float3 ExitantRadianceSample = RayThroughput * LightRadianceOverPdf * MaterialThroughput * SplitFactor / RayPdf;
+                        Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
+                    }
+                }
+            }
+        }
+    }
+
+	if (ValidSamplesPerPixel > 0)
+	{
+		Irradiance /= ValidSamplesPerPixel;
+		// Tonemap inversion for firefly suppression
+		if (UseFireflySuppression)
+		{
+			Irradiance *= rcp(1 - Luminance(Irradiance));
+		}
+
+		AmbientOcclusion = HitCount / ValidSamplesPerPixel;
+	}
+
+   	if (HitCount > 0.0)
+	{
+		HitDistance /= HitCount;
+	}
+	else
+	{
+		HitDistance = -1.0;
+	}
+#if USE_PREEXPOSURE
+	Irradiance *= View.PreExposure;
+#endif
+	Irradiance = ClampToHalfFloatRange(Irradiance);
+
+    RWGlobalIlluminationUAV[PixelCoord] = float4(Irradiance, AmbientOcclusion);
+	RWGlobalIlluminationRayDistanceUAV[PixelCoord] = float2(HitDistance, ValidSamplesPerPixel);
+#endif
+
+}

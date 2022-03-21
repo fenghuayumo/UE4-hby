@@ -20,13 +20,13 @@
 
 #include "../DDGI/Irradiance.ush"
 
-#define NUM_X	16
-#define NUM_Y   8
-#define NUM_XY  (NUM_X * NUM_Y)
-struct GuidingEntry
-{
-	uint Luminance[NUM_XY];
-};
+// #define NUM_X	16
+// #define NUM_Y   8
+// #define NUM_XY  (NUM_X * NUM_Y)
+// struct GuidingEntry
+// {
+// 	uint Luminance[NUM_XY];
+// };
 #define USE_PATHTRACING_MATERIALS 0
 
 RaytracingAccelerationStructure TLAS;
@@ -87,8 +87,8 @@ RWTexture2D<float4> RWDebugUAV;
 
 RWTexture2D<float4> DDGIVolumeRayDataUAV;
 
-RWStructuredBuffer<GuidingEntry> RWRayGuidingEntries;
-RWStructuredBuffer<uint> RWRayGuidingMaxQ;
+// RWStructuredBuffer<GuidingEntry> RWRayGuidingEntries;
+// RWStructuredBuffer<uint> RWRayGuidingMaxQ;
 
 float4 ApplyVolumeLightingContribution(
     Texture2D<float4> ProbeIrradiance,
@@ -228,42 +228,42 @@ void GenerateCosineNormalRay(
 //     return CdfSum;
 // }
 
-void SelectRay(float RandSample,int numRays, inout float RayPickCDF[NUM_XY], out int RayID, out float RayPickPdf)
-{
-#if 0
-	// linear search
-	float PreviousCdfValue = 0;
-	for (RayID = 0; RayID < numRays - 1; ++RayID)
-	{
-		if (RandSample < RayPickCDF[RayID])
-		{
-			break;
-		}
-		PreviousCdfValue = RayPickCDF[RayID];
-	}
+// void SelectRay(float RandSample,int numRays, inout float RayPickCDF[NUM_XY], out int RayID, out float RayPickPdf)
+// {
+// #if 0
+// 	// linear search
+// 	float PreviousCdfValue = 0;
+// 	for (RayID = 0; RayID < numRays - 1; ++RayID)
+// 	{
+// 		if (RandSample < RayPickCDF[RayID])
+// 		{
+// 			break;
+// 		}
+// 		PreviousCdfValue = RayPickCDF[RayID];
+// 	}
 
-	RayPickPdf = RayPickCDF[RayID] - PreviousCdfValue;
-#else
-    // binary search
-	RayID = 0;
-	for (int Count = numRays; Count > 0;)
-	{
-		int Step = Count / 2;
-		int Iterator = RayID + Step;
-		if (RandSample < RayPickCDF[Iterator])
-		{
-			Count = Step;
-		}
-		else
-		{
-			RayID = Iterator + 1;
-			Count -= Step + 1;
-		}
-	}
+// 	RayPickPdf = RayPickCDF[RayID] - PreviousCdfValue;
+// #else
+//     // binary search
+// 	RayID = 0;
+// 	for (int Count = numRays; Count > 0;)
+// 	{
+// 		int Step = Count / 2;
+// 		int Iterator = RayID + Step;
+// 		if (RandSample < RayPickCDF[Iterator])
+// 		{
+// 			Count = Step;
+// 		}
+// 		else
+// 		{
+// 			RayID = Iterator + 1;
+// 			Count -= Step + 1;
+// 		}
+// 	}
 
-	RayPickPdf = RayPickCDF[RayID] - ((RayID > 0) ? RayPickCDF[RayID - 1] : 0.0);
-#endif
-}
+// 	RayPickPdf = RayPickCDF[RayID] - ((RayID > 0) ? RayPickCDF[RayID - 1] : 0.0);
+// #endif
+// }
 
 // void GenerateGuidingRay(
 // 	float3 WorldPosition,
@@ -293,86 +293,86 @@ void SelectRay(float RandSample,int numRays, inout float RayPickCDF[NUM_XY], out
 // 	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
 // }
 
-void UpdateGuidingEntry(int entryIndex , uint CellIndex, float value)
-{
-	const float alpha = 0.85;
-	GuidingEntry entry = RWRayGuidingEntries[entryIndex];
-	uint oldValue = entry.Luminance[CellIndex];
-	InterlockedCompareStore(RWRayGuidingEntries[entryIndex].Luminance[CellIndex],  oldValue, asuint((1-alpha) * asfloat(oldValue) + alpha * value) );
-	uint oldMaxQ;
-	InterlockedMax(RWRayGuidingMaxQ[entryIndex], RWRayGuidingEntries[entryIndex].Luminance[CellIndex], oldMaxQ);
-}
+// void UpdateGuidingEntry(int entryIndex , uint CellIndex, float value)
+// {
+// 	const float alpha = 0.85;
+// 	GuidingEntry entry = RWRayGuidingEntries[entryIndex];
+// 	uint oldValue = entry.Luminance[CellIndex];
+// 	InterlockedCompareStore(RWRayGuidingEntries[entryIndex].Luminance[CellIndex],  oldValue, asuint((1-alpha) * asfloat(oldValue) + alpha * value) );
+// 	uint oldMaxQ;
+// 	InterlockedMax(RWRayGuidingMaxQ[entryIndex], RWRayGuidingEntries[entryIndex].Luminance[CellIndex], oldMaxQ);
+// }
 
-float SetupRayGuidingCDF(uint entryIndex, inout float RayPickCDF[NUM_XY])
-{
-	float CdfSum = 0.0;
+// float SetupRayGuidingCDF(uint entryIndex, inout float RayPickCDF[NUM_XY])
+// {
+// 	float CdfSum = 0.0;
 	
-	for (int y = 0; y < NUM_Y; y++)
-	{
-		for (int x = 0; x < NUM_X; x++)
-		{
-			const int idx = x + y * NUM_X;
-			CdfSum += asfloat(RWRayGuidingEntries[entryIndex].Luminance[idx]);
-			RayPickCDF[idx] = CdfSum;
-		}
-	}
+// 	for (int y = 0; y < NUM_Y; y++)
+// 	{
+// 		for (int x = 0; x < NUM_X; x++)
+// 		{
+// 			const int idx = x + y * NUM_X;
+// 			CdfSum += asfloat(RWRayGuidingEntries[entryIndex].Luminance[idx]);
+// 			RayPickCDF[idx] = CdfSum;
+// 		}
+// 	}
 
-	return CdfSum;
-}
+// 	return CdfSum;
+// }
 
-void  GenerateGuidingRay(
-	float3 WorldPosition,
-	float3 WorldNormal,
-	float3 RandSample,
-	int EntryIndex ,
-	out float3 RayOrigin,
-	out float3 RayDirection,
-	out float RayTMin,
-	out float RayTMax,
-	out float RayPdf,
-	out int  CellID,
-	inout float RayPickCDF[NUM_XY])
-{
-	GuidingEntry entry = RWRayGuidingEntries[EntryIndex];
-	float CdfSum = SetupRayGuidingCDF(EntryIndex, RayPickCDF);
-	float CellPdf;
-	SelectRay(RandSample.x * CdfSum, NUM_XY, RayPickCDF,CellID, CellPdf);
-	CellPdf /= CdfSum;
+// void  GenerateGuidingRay(
+// 	float3 WorldPosition,
+// 	float3 WorldNormal,
+// 	float3 RandSample,
+// 	int EntryIndex ,
+// 	out float3 RayOrigin,
+// 	out float3 RayDirection,
+// 	out float RayTMin,
+// 	out float RayTMax,
+// 	out float RayPdf,
+// 	out int  CellID,
+// 	inout float RayPickCDF[NUM_XY])
+// {
+// 	GuidingEntry entry = RWRayGuidingEntries[EntryIndex];
+// 	float CdfSum = SetupRayGuidingCDF(EntryIndex, RayPickCDF);
+// 	float CellPdf;
+// 	SelectRay(RandSample.x * CdfSum, NUM_XY, RayPickCDF,CellID, CellPdf);
+// 	CellPdf /= CdfSum;
 
-	const int thetaIdx = CellID / NUM_X;
-	const int phiIdx = CellID % NUM_X;
-	const float u = ((float)thetaIdx + RandSample.y) / NUM_Y;
-	const float v = ((float)phiIdx + RandSample.z) / NUM_X;
+// 	const int thetaIdx = CellID / NUM_X;
+// 	const int phiIdx = CellID % NUM_X;
+// 	const float u = ((float)thetaIdx + RandSample.y) / NUM_Y;
+// 	const float v = ((float)phiIdx + RandSample.z) / NUM_X;
 
-	float3 localWi = float3(
-		sqrt(1.0f - u * u) * cos(float(RTXGI_2PI) * v),
-		sqrt(1.0f - u * u) * sin(float(RTXGI_2PI) * v),
-		u);
+// 	float3 localWi = float3(
+// 		sqrt(1.0f - u * u) * cos(float(RTXGI_2PI) * v),
+// 		sqrt(1.0f - u * u) * sin(float(RTXGI_2PI) * v),
+// 		u);
 
-	float3 Direction_World = TangentToWorld(localWi.xyz, WorldNormal);
-	RayPdf = (NUM_XY * CellPdf / float(RTXGI_2PI)); // Solid angle probability
+// 	float3 Direction_World = TangentToWorld(localWi.xyz, WorldNormal);
+// 	RayPdf = (NUM_XY * CellPdf / float(RTXGI_2PI)); // Solid angle probability
 
-	RayOrigin = WorldPosition;
-	RayDirection = Direction_World;
-	RayTMin = 0.01;
-	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
-}
+// 	RayOrigin = WorldPosition;
+// 	RayDirection = Direction_World;
+// 	RayTMin = 0.01;
+// 	RayTMax = max(MaxRayDistanceForGI, MaxRayDistanceForAO);
+// }
 
-void InitGuiding(uint entryIndex)
-{
-	// GuidingEntry entry = RWRayGuidingEntries[EntryIndex];
-	// Initialize directinal density as consine weighted diffuse
-	for (int y = 0; y < NUM_Y; y++)
-	{
-		for (int x = 0; x < NUM_X; x++)
-		{
-			const float initDensity = y / float(NUM_Y);
-			const int idx = x + y * NUM_X;
-			RWRayGuidingEntries[entryIndex].Luminance[idx] = asuint(initDensity);
-		}
-	}
-	RWRayGuidingMaxQ[entryIndex] = asuint(0.0);
-}
+// void InitGuiding(uint entryIndex)
+// {
+// 	// GuidingEntry entry = RWRayGuidingEntries[EntryIndex];
+// 	// Initialize directinal density as consine weighted diffuse
+// 	for (int y = 0; y < NUM_Y; y++)
+// 	{
+// 		for (int x = 0; x < NUM_X; x++)
+// 		{
+// 			const float initDensity = y / float(NUM_Y);
+// 			const int idx = x + y * NUM_X;
+// 			RWRayGuidingEntries[entryIndex].Luminance[idx] = asuint(initDensity);
+// 		}
+// 	}
+// 	RWRayGuidingMaxQ[entryIndex] = asuint(0.0);
+// }
 
 RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 {
@@ -441,10 +441,10 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
         DDGIVolume_##x.probeRayRotationTransform = DDGIVolume_##x##_RayRotationTransform;
     VOLUME_LIST
     #undef VOLUME_ENTRY
-    float RayPickCDF[NUM_XY];
+    // float RayPickCDF[NUM_XY];
     // float CdfSum = InitRayCDF(WorldPosition, WorldNormal,CameraDirection, DDGIVolume_0, RayPickCDF);
-	uint entryIndex = DispatchRaysDimensions().x * DispatchRaysIndex().y + DispatchRaysIndex().x;
- 	InitGuiding(entryIndex);
+	// uint entryIndex = DispatchRaysDimensions().x * DispatchRaysIndex().y + DispatchRaysIndex().x;
+ 	//InitGuiding(entryIndex);
     for (uint SampleIndex = 0; SampleIndex < SamplesPerPixel; ++SampleIndex)
 	{
 		float3 PathRadiance = 0;
@@ -467,12 +467,12 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 		// Initialize ray
 		RayDesc Ray;
 		float RayPdf = 1.0;
-		int PrevCellIndex = 0;
+		// int PrevCellIndex = 0;
 #if 1
-		// GenerateCosineNormalRay(WorldPosition, WorldNormal, RandSample.yz, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
+		GenerateCosineNormalRay(WorldPosition, WorldNormal, RandSample.yz, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
 
-        GenerateGuidingRay( WorldPosition, WorldNormal, RandSample,entryIndex,
-            Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf, PrevCellIndex, RayPickCDF);
+        // GenerateGuidingRay( WorldPosition, WorldNormal, RandSample,entryIndex,
+        //     Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf, PrevCellIndex, RayPickCDF);
         half3 N = WorldNormal;
 		half3 V = -CameraDirection;
 		half3 L = Ray.Direction;
@@ -540,54 +540,6 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 				{
 					AmbientOcclusion += 1.0;
 				}
-                // NOTE: if wanting to visualize / debug the blend, it's useful to hard code some colors temporarily.
-                // like have volume zero be red, and volume one be yellow
-
-                float4 AccLightWeight = 0.f;
-
-                // Blending logic:
-                // Probes from overlapping volumes will accumulate very similar irradiance.
-                // Therefore, as long as we are in fade region(-s), keep color from the densest volume, but max() the weight to preserve luminance of the fade.
-                // Finally, if we are in non fade region of a specific volume, lerp() accumulated irradiance with irradiance from that volume.
-                #define VOLUME_ENTRY(x) \
-                if (x < NumVolumes && AccLightWeight.a < 1.f) \
-                { \
-                    float4 LightWeight = ApplyVolumeLightingContribution( \
-                        DDGIVolume_##x##_ProbeIrradiance, \
-                        DDGIVolume_##x##_ProbeDistance, \
-                        DDGIVolume_##x##_ProbeOffsets, \
-                        DDGIVolume_##x##_ProbeStates, \
-                        Ray.Origin, \
-                        Payload.WorldNormal, \
-                        Ray.Direction, \
-                        PixelLightingMask, \
-                        uint(DDGIVolume_##x##_LightingChannelMask), \
-                        DDGIVolume_##x##_Radius, \
-                        DDGIVolume_##x, \
-                        Payload.DiffuseColor, \
-                        DDGIVolume_##x##_BlendDistance, \
-                        DDGIVolume_##x##_BlendDistanceBlack, \
-                        DDGIVolume_##x##_ApplyLighting, \
-                        DDGIVolume_##x##_IrradianceScalar); \
-                    \
-                    if (AccLightWeight.a == 0.f) \
-                    { \
-                        AccLightWeight = LightWeight; \
-                    } \
-                    else if (LightWeight.a < 1.f) \
-                    { \
-                        AccLightWeight.a = max(AccLightWeight.a, LightWeight.a); \
-                    } \
-                    else if (LightWeight.a == 1.f) \
-                    { \
-                        AccLightWeight.rgb = lerp(LightWeight.rgb, AccLightWeight.rgb, AccLightWeight.a); \
-                        AccLightWeight.a = 1.f; \
-                    } \
-                }
-                VOLUME_LIST
-                #undef VOLUME_ENTRY
-                RWDebugUAV[DispatchThreadId] = float4(AccLightWeight.rgb * AccLightWeight.a,1.0);
-                PathRadiance += AccLightWeight.rgb * AccLightWeight.a;
 			}
 			if (Payload.HitT > MaxRayDistanceForGI) break;
 
@@ -702,47 +654,59 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					}
 				}
 			}
-			float maxVal = max(Luminance(PathRadiance * DiffuseColor), asfloat(RWRayGuidingMaxQ[entryIndex]) );
-			UpdateGuidingEntry(entryIndex,  PrevCellIndex, maxVal);
-			// Perform material sampling
-// 			if (Bounce + 1 < MaxBounces)
-// 			{
-// 				float3 Direction;
-// 				float3 Throughput = 1.0;
-// #if USE_PATHTRACING_MATERIALS
-// 				RandSample4 = RandomSequence_GenerateSample4D(RandSequence);
-
-// 				float PositionBiasSign;
-// 				float3 Weight = 0;
-// 				SampleMaterial(Ray.Direction, Payload, RandSample, Direction, Weight, MaterialPdf, PositionBiasSign);
-// 				Throughput = Weight * MaterialPdf;
-// #else
-
-// 				float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
-
-// 				float3 RayOrigin = Ray.Origin;
-// 				GenerateCosineNormalRay(RayOrigin, Payload.WorldNormal, RandSample3.xy, Ray.Origin, Direction, Ray.TMin, Ray.TMax, MaterialPdf);
-				
-// 				half3 N = Payload.WorldNormal;
-// 				half3 V = -Ray.Direction;
-// 				half3 L = Direction;
-// 				float NoL = saturate(dot(N, L));
-// 				FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
-// 				FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
-// 				Throughput = LightingSample.Diffuse;
-// #endif
-// 				if (MaterialPdf <= 0.0)
-// 				{
-// 					break;
-// 				}
-
-// 				// Update ray
-// 				Ray.Direction = Direction;
-// 				RayThroughput *= Throughput;
-// 				RayPdf *= MaterialPdf;
-// 			}
-
+			// float maxVal = max(Luminance(PathRadiance * DiffuseColor), asfloat(RWRayGuidingMaxQ[entryIndex]) );
+			// UpdateGuidingEntry(entryIndex,  PrevCellIndex, maxVal);
 			Bounce++;
+
+			    // NOTE: if wanting to visualize / debug the blend, it's useful to hard code some colors temporarily.
+                // like have volume zero be red, and volume one be yellow
+
+                float4 AccLightWeight = 0.f;
+
+                // Blending logic:
+                // Probes from overlapping volumes will accumulate very similar irradiance.
+                // Therefore, as long as we are in fade region(-s), keep color from the densest volume, but max() the weight to preserve luminance of the fade.
+                // Finally, if we are in non fade region of a specific volume, lerp() accumulated irradiance with irradiance from that volume.
+                #define VOLUME_ENTRY(x) \
+                if (x < NumVolumes && AccLightWeight.a < 1.f) \
+                { \
+                    float4 LightWeight = ApplyVolumeLightingContribution( \
+                        DDGIVolume_##x##_ProbeIrradiance, \
+                        DDGIVolume_##x##_ProbeDistance, \
+                        DDGIVolume_##x##_ProbeOffsets, \
+                        DDGIVolume_##x##_ProbeStates, \
+                        Ray.Origin, \
+                        Payload.WorldNormal, \
+                        Ray.Direction, \
+                        PixelLightingMask, \
+                        uint(DDGIVolume_##x##_LightingChannelMask), \
+                        DDGIVolume_##x##_Radius, \
+                        DDGIVolume_##x, \
+                        Payload.DiffuseColor, \
+                        DDGIVolume_##x##_BlendDistance, \
+                        DDGIVolume_##x##_BlendDistanceBlack, \
+                        DDGIVolume_##x##_ApplyLighting, \
+                        DDGIVolume_##x##_IrradianceScalar); \
+                    \
+                    if (AccLightWeight.a == 0.f) \
+                    { \
+                        AccLightWeight = LightWeight; \
+                    } \
+                    else if (LightWeight.a < 1.f) \
+                    { \
+                        AccLightWeight.a = max(AccLightWeight.a, LightWeight.a); \
+                    } \
+                    else if (LightWeight.a == 1.f) \
+                    { \
+                        AccLightWeight.rgb = lerp(LightWeight.rgb, AccLightWeight.rgb, AccLightWeight.a); \
+                        AccLightWeight.a = 1.f; \
+                    } \
+                }
+                VOLUME_LIST
+                #undef VOLUME_ENTRY
+                RWDebugUAV[DispatchThreadId] = float4(AccLightWeight.rgb * AccLightWeight.a,1.0);
+                PathRadiance += AccLightWeight.rgb * AccLightWeight.a * RayThroughput / RayPdf;
+
 		}
 		Irradiance += PathRadiance;
 	}
