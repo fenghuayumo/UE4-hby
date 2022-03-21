@@ -589,7 +589,8 @@ void FDeferredShadingSceneRenderer::RenderWRC(FRDGBuilder& GraphBuilder,
 	FViewInfo& View,
 	const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 	int32 UpscaleFactor,
-	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs)
+	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+	FRadianceVolumeProbeConfigs& ProbeConfig)
 {
 	if (!View.bIsSceneCapture && !View.bIsReflectionCapture && !View.bIsPlanarReflection)
 	{
@@ -611,15 +612,34 @@ void FDeferredShadingSceneRenderer::RenderWRC(FRDGBuilder& GraphBuilder,
 		//allways use index 0
 		WRCUpdateVolume_RenderThread(*Scene, View, GraphBuilder, SceneTextures, sceneVolumes[0]);
 
+		auto VolProxy = sceneVolumes[0];
+		FIntVector ProbeCounts = VolProxy->ComponentData.ProbeCounts;
+		FVector volumeSize = VolProxy->ComponentData.Transform.GetScale3D() * 200.0f;
+		FVector probeGridSpacing;
+		probeGridSpacing.X = volumeSize.X / float(VolProxy->ComponentData.ProbeCounts.X);
+		probeGridSpacing.Y = volumeSize.Y / float(VolProxy->ComponentData.ProbeCounts.Y);
+		probeGridSpacing.Z = volumeSize.Z / float(VolProxy->ComponentData.ProbeCounts.Z);
+
+		int AtlasProbeCount =  1 << FMath::CeilLogTwo(sqrt(ProbeCounts.X * ProbeCounts.Y * ProbeCounts.Z));
+		int TexelDim = VolProxy->ComponentData.GetProbeTexelDim();
+		ProbeConfig.VolumeProbeOrigin = VolProxy->ComponentData.Origin;
+		FQuat rotation = VolProxy->ComponentData.Transform.GetRotation();
+		ProbeConfig.VolumeProbeRotation = FVector4{ rotation.X, rotation.Y, rotation.Z, rotation.W };
+		ProbeConfig.ProbeGridSpacing = probeGridSpacing;
+		ProbeConfig.ProbeGridCounts = ProbeCounts;
+		ProbeConfig.NumRaysPerProbe = VolProxy->ComponentData.GetNumRaysPerProbe();
+		ProbeConfig.ProbeDim = TexelDim;
+		ProbeConfig.AtlasProbeCount = AtlasProbeCount;
+		ProbeConfig.ProbeMaxRayDistance = VolProxy->ComponentData.ProbeMaxRayDistance;
+		ProbeConfig.ProbesRadiance = VolProxy->ProbesRadiance;
+
 		if (CVarWRCDebugProbeRadiance.GetValueOnRenderThread() > 0)
 		{
-			WRCDebugProbeRadiance(GraphBuilder, SceneTextures, View, *Scene, UpscaleFactor, OutDenoiserInputs, sceneVolumes[0]);
+			//WRCDebugProbeRadiance(GraphBuilder, SceneTextures, View, *Scene, UpscaleFactor, OutDenoiserInputs, sceneVolumes[0]);
 		}
 
 	}
 
 	//
-	
-	
 	WRCProbeRenderDiffuseIndirectVisualizations(*Scene, View, GraphBuilder);
 }

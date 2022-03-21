@@ -606,7 +606,7 @@ void InclusivePrefixScan(FRDGBuilder& GraphBuilder, FRDGBufferRef& InputBuf)
 void FDeferredShadingSceneRenderer::AllocateSurfels(FRDGBuilder& GraphBuilder,
 	FSceneTextureParameters& SceneTextures,
 	FViewInfo& View,
-	SurfelBufResources& SurfelRes)
+	FSurfelBufResources& SurfelRes)
 {
 	auto Size = View.ViewRect.Size();
 	//auto Size = SceneTextures.SceneDepthTexture->Desc.Extent;
@@ -858,7 +858,7 @@ bool FDeferredShadingSceneRenderer::SurfelTrace(FRDGBuilder& GraphBuilder,
 	const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 	int32 UpscaleFactor,
 	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
-	SurfelBufResources& SurfelRes)
+	FSurfelBufResources& SurfelRes)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, TraceSurfel);
 	RDG_EVENT_SCOPE(GraphBuilder, "Surfel GI: SurfelTrace");
@@ -950,103 +950,15 @@ bool FDeferredShadingSceneRenderer::SurfelGI(FRDGBuilder& GraphBuilder,
 	FViewInfo& View,
 	const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 	int32 UpscaleFactor,
-	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs)
+	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+	FSurfelBufResources& SurfelRes)
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, SurfelGITotal);
 	RDG_EVENT_SCOPE(GraphBuilder, "SurfelGI");
 
-	SurfelBufResources SurfelRes;
 	AllocateSurfels(GraphBuilder, SceneTextures, View, SurfelRes);
 
 	SurfelTrace(GraphBuilder, SceneTextures, View, RayTracingConfig, UpscaleFactor, OutDenoiserInputs, SurfelRes);
-
-	//{
-	//	RDG_GPU_STAT_SCOPE(GraphBuilder, ApplySurfel);
-	//	RDG_EVENT_SCOPE(GraphBuilder, "Surfel GI: ApplySurfel");
-	//	int32 RayTracingGISamplesPerPixel = GetRayTracingGlobalIlluminationSamplesPerPixel(View);
-	//	if (RayTracingGISamplesPerPixel <= 0) return false;
-	//	//Apply Surfel
-	//	float MaxShadowDistance = 1.0e27;
-	//	if (GRayTracingGlobalIlluminationMaxShadowDistance > 0.0)
-	//	{
-	//		MaxShadowDistance = GRayTracingGlobalIlluminationMaxShadowDistance;
-	//	}
-	//	else if (Scene->SkyLight)
-	//	{
-	//		// Adjust ray TMax so shadow rays do not hit the sky sphere 
-	//		MaxShadowDistance = FMath::Max(0.0, 0.99 * Scene->SkyLight->SkyDistanceThreshold);
-	//	}
-
-	//	FApplySurfelRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FApplySurfelRGS::FParameters>();
-	//	PassParameters->SamplesPerPixel = RayTracingGISamplesPerPixel;
-	//	int32 CVarRayTracingGlobalIlluminationMaxBouncesValue = CVarRayTracingGlobalIlluminationMaxBounces.GetValueOnRenderThread();
-	//	PassParameters->MaxBounces = CVarRayTracingGlobalIlluminationMaxBouncesValue > -1 ? CVarRayTracingGlobalIlluminationMaxBouncesValue : View.FinalPostProcessSettings.RayTracingGIMaxBounces;
-	//	PassParameters->MaxNormalBias = GetRaytracingMaxNormalBias();
-	//	float MaxRayDistanceForGI = GRayTracingGlobalIlluminationMaxRayDistance;
-	//	if (MaxRayDistanceForGI == -1.0)
-	//	{
-	//		MaxRayDistanceForGI = View.FinalPostProcessSettings.AmbientOcclusionRadius;
-	//	}
-	//	PassParameters->MaxRayDistanceForGI = MaxRayDistanceForGI;
-	//	PassParameters->MaxRayDistanceForAO = View.FinalPostProcessSettings.AmbientOcclusionRadius;
-	//	PassParameters->MaxShadowDistance = MaxShadowDistance;
-	//	PassParameters->UpscaleFactor = UpscaleFactor;
-	//	PassParameters->EvalSkyLight = GRayTracingGlobalIlluminationEvalSkyLight != 0;
-	//	PassParameters->UseRussianRoulette = GRayTracingGlobalIlluminationUseRussianRoulette != 0;
-	//	PassParameters->UseFireflySuppression = CVarRayTracingGlobalIlluminationFireflySuppression.GetValueOnRenderThread() != 0;
-	//	PassParameters->DiffuseThreshold = GRayTracingGlobalIlluminationDiffuseThreshold;
-	//	PassParameters->NextEventEstimationSamples = GRayTracingGlobalIlluminationNextEventEstimationSamples;
-	//	PassParameters->TLAS = View.RayTracingScene.RayTracingSceneRHI->GetShaderResourceView();
-	//	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
-	//	SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters);
-	//	PassParameters->SceneTextures = SceneTextures;
-	//	PassParameters->AccumulateEmissive = FMath::Clamp(CVarRayTracingGlobalIlluminationAccumulateEmissive.GetValueOnRenderThread(), 0, 1);
-	//	// TODO: should be converted to RDG
-	//	TRefCountPtr<IPooledRenderTarget> SubsurfaceProfileRT((IPooledRenderTarget*)GetSubsufaceProfileTexture_RT(GraphBuilder.RHICmdList));
-	//	if (!SubsurfaceProfileRT)
-	//	{
-	//		SubsurfaceProfileRT = GSystemTextures.BlackDummy;
-	//	}
-	//	PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(SubsurfaceProfileRT);
-	//	PassParameters->TransmissionProfilesLinearSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-	//	PassParameters->RWGlobalIlluminationUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->Color);
-	//	PassParameters->RWGlobalIlluminationRayDistanceUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->RayHitDistance);
-	//	PassParameters->RenderTileOffsetX = 0;
-	//	PassParameters->RenderTileOffsetY = 0;
-
-	//	PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateSRV(SurfelRes.SurfelIrradianceBuf);
-	//	PassParameters->CellIndexOffsetBuf = GraphBuilder.CreateSRV(SurfelRes.CellIndexOffsetBuf);
-	//	PassParameters->SurfelIndexBuf = GraphBuilder.CreateSRV(SurfelRes.SurfelIndexBuf);
-
-	//	PassParameters->SurfelHashKeyBuf = GraphBuilder.CreateSRV(SurfelRes.SurfelHashKeyBuf);
-	//	PassParameters->SurfelHashValueBuf = GraphBuilder.CreateSRV(SurfelRes.SurfelHashValueBuf);
-	//	PassParameters->SurfelMetaBuf = GraphBuilder.CreateSRV(SurfelRes.SurfelMetaBuf);
-	//	PassParameters->SurfelVertexBuf = GraphBuilder.CreateSRV(SurfelRes.SurfelVertexBuf);
-
-	//	FApplySurfelRGS::FPermutationDomain PermutationVector;
-	//	PermutationVector.Set<FApplySurfelRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingGlobalIlluminationEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);
-	//	PermutationVector.Set<FApplySurfelRGS::FEnableTransmissionDim>(CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread());
-	//	TShaderMapRef<FApplySurfelRGS> RayGenerationShader(GetGlobalShaderMap(FeatureLevel), PermutationVector);
-	//	ClearUnusedGraphResources(RayGenerationShader, PassParameters);
-
-	//	FIntPoint RayTracingResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), UpscaleFactor);
-	//	//FIntPoint RayTracingResolution = View.ViewRect.Size();
-
-	//	{
-	//		GraphBuilder.AddPass(
-	//			RDG_EVENT_NAME("GlobalIlluminationRayTracing %dx%d", RayTracingResolution.X, RayTracingResolution.Y),
-	//			PassParameters,
-	//			ERDGPassFlags::Compute,
-	//			[PassParameters, this, &View, RayGenerationShader, RayTracingResolution](FRHICommandList& RHICmdList)
-	//			{
-	//				FRHIRayTracingScene* RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI;
-
-	//				FRayTracingShaderBindingsWriter GlobalResources;
-	//				SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters);
-	//				RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenerationShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, RayTracingResolution.X, RayTracingResolution.Y);
-	//			});
-	//	}
-	//}
 
 	// After we are done, make sure we remember our texture for next time so that we can accumulate samples across frames
 	GraphBuilder.QueueBufferExtraction(SurfelRes.SurfelIrradianceBuf, &View.ViewState->SurfelIrradianceBuf);
@@ -1058,7 +970,7 @@ bool FDeferredShadingSceneRenderer::SurfelGI(FRDGBuilder& GraphBuilder,
 	GraphBuilder.QueueBufferExtraction(SurfelRes.SurfelIndexBuf, &View.ViewState->SurfelIndexBuf);
 	//GraphBuilder.QueueBufferExtraction(SurfelRes.SurfelSHBuf, &View.ViewState->SurfelSHBuf);
 
-	RenderRestirGI(GraphBuilder, SceneTextures, View, RayTracingConfig, UpscaleFactor, OutDenoiserInputs, &SurfelRes);
+	//RenderRestirGI(GraphBuilder, SceneTextures, View, RayTracingConfig, UpscaleFactor, OutDenoiserInputs, &SurfelRes);
 	return true;
 }
 

@@ -1340,8 +1340,13 @@ bool FDeferredShadingSceneRenderer::RenderRayTracingGlobalIllumination(
 	}
 	else if (IsSurfelGIEnabled(View))
 	{
-		SurfelGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
-		RenderWRC(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
+		FSurfelBufResources SurfelRes;
+		FRadianceVolumeProbeConfigs RadianceProbeConfig;
+		SurfelGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs, SurfelRes);
+
+		RenderWRC(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs, RadianceProbeConfig);
+	
+		RenderRestirGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs,&SurfelRes, &RadianceProbeConfig);
 	}
 	// Ray generation pass
 	else if (IsFinalGatherEnabled(View))

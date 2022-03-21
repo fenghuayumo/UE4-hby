@@ -137,7 +137,7 @@ StructuredBuffer<float4> SurfelIrradianceBuf;
 #include "../SurfelGI/SurfelGridHash.ush"
 #endif
 
-#define USE_RADIANCE_CACHE	1
+// #define USE_RADIANCE_CACHE	1
 #if USE_RADIANCE_CACHE
 
 #include "../WRC/ProbeLookup.ush"
@@ -902,11 +902,13 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 		// Environment hit
 		if (Payload.IsMiss())
 		{
+		#if USE_RADIANCE_CACHE
 			if (Field.IsHit()) 
             {
                 Irradiance += Field.Radiance * Field.InvPdf;
 			}
 			else 
+		#endif
 			{
 				// Optional multi-bounce SkyLight contribution
 				if (EvalSkyLight )

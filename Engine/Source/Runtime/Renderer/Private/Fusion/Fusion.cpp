@@ -7,5 +7,5 @@ void FDeferredShadingSceneRenderer::FusionGI(FRDGBuilder& GraphBuilder,
 	int32 UpscaleFactor,
 	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs)
 {
-    SurfelGI(GraphBuilder, SceneTextures,  View, RayTracingConfig, UpscaleFactor, OutDenoiserInputs);
+    //SurfelGI(GraphBuilder, SceneTextures,  View, RayTracingConfig, UpscaleFactor, OutDenoiserInputs);
 }

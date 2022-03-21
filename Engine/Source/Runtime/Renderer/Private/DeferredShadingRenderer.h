@@ -47,7 +47,7 @@ public:
 	FRDGTextureRef LightingChannelsTexture;
 };
 
-struct SurfelBufResources
+struct FSurfelBufResources
 {
 	FRDGBufferRef SurfelMetaBuf;
 	FRDGBufferRef SurfelHashKeyBuf;
@@ -59,6 +59,18 @@ struct SurfelBufResources
 	FRDGBufferRef SurfelSHBuf;
 };
 
+struct FRadianceVolumeProbeConfigs
+{
+	FVector 	ProbeGridSpacing;
+	FVector  	VolumeProbeOrigin;
+	int32       NumRaysPerProbe;
+	FVector4    VolumeProbeRotation;
+	float	    ProbeMaxRayDistance;
+	FIntVector  ProbeGridCounts;
+	uint32 		ProbeDim;
+	uint32		AtlasProbeCount;
+	TRefCountPtr<IPooledRenderTarget> ProbesRadiance;
+};
 /**
  * Delegate callback used by global illumination plugins (experimental).
  */
@@ -762,7 +774,8 @@ private:
 		int32 UpscaleFactor,
 		// Output
 		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
-		SurfelBufResources* SurfelResource = nullptr);
+		FSurfelBufResources* SurfelResource = nullptr,
+		FRadianceVolumeProbeConfigs* ProbeConfig = nullptr);
 
 	void FusionGI(FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
@@ -790,7 +803,7 @@ private:
 	void AllocateSurfels(FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
 		FViewInfo& View,
-		SurfelBufResources& SurfelRes);
+		FSurfelBufResources& SurfelRes);
 
 	void WRCTrace(FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
@@ -801,7 +814,8 @@ private:
 		FViewInfo& View,
 		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 		int32 UpscaleFactor,
-		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+		FRadianceVolumeProbeConfigs& ProbeConfig);
 
 	bool SurfelTrace(FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
@@ -809,14 +823,15 @@ private:
 		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 		int32 UpscaleFactor,
 		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
-		SurfelBufResources& SurfelRes);
+		FSurfelBufResources& SurfelRes);
 
 	bool SurfelGI(FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
 		FViewInfo& View,
 		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 		int32 UpscaleFactor,
-		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+		FSurfelBufResources& SurfelResource);
 
 #if RHI_RAYTRACING
 	template <int TextureImportanceSampling>
