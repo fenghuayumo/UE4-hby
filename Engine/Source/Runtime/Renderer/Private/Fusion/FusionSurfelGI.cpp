@@ -671,6 +671,7 @@ void FDeferredShadingSceneRenderer::AllocateSurfels(FRDGBuilder& GraphBuilder,
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(SurfelHashValueBuf), 0);
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(CellIndexOffsetBuf), 0);
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(SurfelIndexBuf), 0);
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(SurfelIrradianceBuf), 0);
 	}
 
 	uint32 ClearValues[4] = { 0, 0, 0, 0 };

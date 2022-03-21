@@ -138,13 +138,13 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 		RayDesc Ray;
 		float RayPdf = 1.0;
 		GenerateCosineNormalRay(surfel.Position, surfel.Normal, RandSample.yz, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
-		RayThroughput *= Diffuse_Lambert(DiffuseColor) * saturate(dot(surfel.Normal, Ray.Direction)) / DiffuseColor ;
+		RayThroughput *= Diffuse_Lambert(DiffuseColor) * saturate(dot(surfel.Normal, Ray.Direction)) / DiffuseColor;
 
 		float MaterialPdf = 0.0;
 		uint Bounce = 0;
 		while (Bounce < MaxBounces)
 		{
-				// Cast ray
+			// Cast ray
 			uint RayFlags = 0;
 			const uint InstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
 			const bool bEnableSkyLightContribution = true;
