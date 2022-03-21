@@ -1,0 +1,68 @@
+
+#include "/Engine/Public/Platform.ush"
+
+#include "ProbeCommon.ush"
+
+SamplerState ProbeSampler;
+
+Texture2D<float4> ProbeRadiances;
+
+float ProbeRadius;
+
+float4x4 WorldToClip;
+float3 CameraPosition;
+float PreExposure;
+uint ShouldUsePreExposure;
+
+struct FVisualizeProbesVSToPS
+{
+    nointerpolation float3 ProbeOrigin : TEXCOORD0;
+    nointerpolation uint InstanceId : TEXCOORD1;
+    float4 WorldPosition : TEXCOORD2;
+};
+
+void VisualizeProbesVS(
+    in float4 InPosition : ATTRIBUTE0,
+    uint InstanceId : SV_InstanceID,
+    out FVisualizeProbesVSToPS Output,
+    out float4 OutPosition : SV_POSITION
+)
+{
+    float3 Translation = GetProbeWorldPosition(InstanceId, VolumeProbeOrigin, ProbeGridCounts, ProbeGridSpacing);
+
+    float4x4 Transform = {	ProbeRadius, 0.f, 0.f, 0.f,
+                            0.f, ProbeRadius, 0.f, 0.f,
+                            0.f, 0.f, ProbeRadius, 0.f,
+                            Translation.x, Translation.y, Translation.z, 1.f};
+
+    Output.ProbeOrigin = Translation;
+    Output.InstanceId = InstanceId;
+    Output.WorldPosition = float4(InPosition.xyz, 1.f);
+    Output.WorldPosition = mul(Output.WorldPosition, Transform);
+
+    OutPosition = mul(Output.WorldPosition, WorldToClip);
+}
+
+void VisualizeProbesPS(
+    in FVisualizeProbesVSToPS Input,
+    out float4 OutColor : SV_Target0)
+{
+    // Compute UVs based on ProbeID and direction of the fragment on the sphere
+    float3 WorldPos = Input.WorldPosition.xyz;
+    float3 Direction = normalize(Input.WorldPosition.xyz - Input.ProbeOrigin);
+    int probeIndex = Input.InstanceId;
+    float3 Output = float3(0.0f, 0.0f, 0.0f);
+
+    //float2 NormalizedOct = OctantCoordinates * 0.5 + 0.5;
+    // uint2 ProbePx = NormalizedOct * ProbeDim;
+    // uint2 ProbeRayIndex = uint2(ProbePx.x + ProbePx.y * ProbeDim, probeIndex);
+    // Output = ProbeRadiances[ProbeRayIndex].xyz;
+    const uint2 Tile = GeProbeAtlasTile(probeIndex, AtlasProbeCount);
+    const float2 TileUV = GetOctahedralCoordinates(Direction) * 0.5 + 0.5;
+    const float2 AtlasUV = float2(Tile + clamp(TileUV, 0.5 / ProbeDim, 1.0 - 0.5 / ProbeDim)) / AtlasProbeCount;
+    Output = ProbeRadiances.SampleLevel(ProbeSampler, AtlasUV, 0).xyz;
+        // const uint2 AtlasPx = uint2((Tile + TileUV) * ProbeDim);
+    // Output = ProbeRadiances[AtlasPx].xyz;
+
+    OutColor = float4(Output, 1.f);
+}

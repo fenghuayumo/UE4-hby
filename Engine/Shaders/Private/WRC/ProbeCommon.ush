@@ -1,0 +1,143 @@
+#ifndef _PROBE_COMMON_HLSL
+#define _PROBE_COMMON_HLSL
+
+#include "Common.ush"
+
+
+#ifndef WRC_PROBE_DIM
+#define WRC_PROBE_DIM 16
+#endif
+
+float3          VolumeProbeOrigin;
+int             NumRaysPerProbe;
+float4          VolumeProbeRotation;
+float3          ProbeGridSpacing;
+float           ProbeMaxRayDistance;
+int3            ProbeGridCounts;
+uint            ProbeDim;
+uint            AtlasProbeCount;
+
+int GetProbesPerPlane(int3 probeGridCounts)
+{
+    return (probeGridCounts.x * probeGridCounts.y);
+}
+
+int GetPlaneIndex(uint2 threadCoords, int3 probeGridCounts, int probeNumTexels)
+{
+    return int(threadCoords.x / (probeGridCounts.y * probeNumTexels));
+}
+
+int GetProbeIndexInPlane(uint2 threadCoords, int planeIndex, int3 probeGridCounts, int probeNumTexels)
+{
+    return int(threadCoords.x / probeNumTexels) - (planeIndex * probeGridCounts.y) + (probeGridCounts.y * int(threadCoords.y / probeNumTexels));
+}
+
+/**
+* Computes the normalized octahedral direction that corresponds to the
+* given normalized coordinates on the [-1, 1] square.
+* The opposite of GetOctahedralCoordinates().
+*/
+float3 GetOctahedralDirection(float2 coords)
+{
+    float3 direction = float3(coords.x, coords.y, 1.f - abs(coords.x) - abs(coords.y));
+    if (direction.z < 0.f)
+    {
+        direction.xy = (1.f - abs(direction.yx)) * WRCSignNotZero(direction.xy);
+    }
+    return normalize(direction);
+}
+
+/**
+* Computes the octant coordinates in the normalized [-1, 1] square, for the given a unit direction vector.
+* The opposite of GetOctahedralDirection().
+*/
+float2 GetOctahedralCoordinates(float3 direction)
+{
+    float l1norm = abs(direction.x) + abs(direction.y) + abs(direction.z);
+    float2 uv = direction.xy * (1.f / l1norm);
+    if (direction.z < 0.f)
+    {
+        uv = (1.f - abs(uv.yx)) * WRCSignNotZero(uv.xy);
+    }
+    return uv;
+}
+
+int GetProbeIndex(int2 texcoord, int3 probeGridCounts)
+{
+    // Compute the probe index for this thread
+    return texcoord.x + (texcoord.y * (probeGridCounts.y * probeGridCounts.z));
+}
+
+int GetProbeIndex(int3 probeCoords, int3 probeGridCounts)
+{
+    return probeCoords.y + (probeGridCounts.y * probeCoords.x) + (probeGridCounts.y * probeGridCounts.x) * probeCoords.z;
+}
+
+/**
+* Computes the 3D grid coordinates for the probe at the given probe index.
+* The opposite of GetProbeIndex().
+*/
+int3 GetProbeCoords(int probeIndex, int3 probeGridCounts)
+{
+    int3 probeCoords;
+    probeCoords.x = (probeIndex / probeGridCounts.y) % probeGridCounts.x;
+    probeCoords.y = probeIndex % probeGridCounts.y;
+    probeCoords.z = probeIndex / (probeGridCounts.x * probeGridCounts.y);
+    return probeCoords;
+}
+
+/**
+* Computes the world space position of a probe at the given 3D grid coordinates.
+*/
+float3 GetProbeWorldPosition(int3 probeCoords, float3 origin, int3 probeGridCounts, float3 probeGridSpacing)
+{
+    // Multiply the grid coordinates by the grid spacing
+    float3 probeGridWorldPosition = (probeCoords * probeGridSpacing);
+
+    // Shift the grid by half of each axis extent to center the volume about its origin
+    float3 probeGridShift = (probeGridSpacing * (probeGridCounts - 1)) * 0.5f;
+
+    // Compute the probe's world position
+    float3 probeWorldPosition = probeGridWorldPosition - probeGridShift;
+    probeWorldPosition += origin;
+    return probeWorldPosition;
+}
+
+
+
+/*
+* Computes the world space position of the probe at the given probe index (without the probe offsets).
+*/
+float3 GetProbeWorldPosition(int probeIndex, float3 origin,int3 probeGridCounts, float3 probeGridSpacing)
+{
+    float3 probeCoords = GetProbeCoords(probeIndex, probeGridCounts);
+    return GetProbeWorldPosition(probeCoords, origin, probeGridCounts, probeGridSpacing);
+}
+
+uint3 GetProbeCoordFromWorldPos(float3 worldPos,float3 origin, int3 probeGridCounts, float3 probeGridSpacing)
+{
+    //ignore rotaion
+    float3 probeGridShift = (probeGridSpacing * (probeGridCounts - 1)) * 0.5f;
+    float3  probeGridWorldPosition = (worldPos - origin) + probeGridShift;
+    uint3 probeCoords = clamp( floor(probeGridWorldPosition / probeGridSpacing), uint3(0,0,0), probeGridCounts-1);
+    return probeCoords;
+}
+
+uint2 GeProbeAtlasTile(uint probe_idx, uint2 atlas_probe_count ) 
+{
+    return uint2(probe_idx % atlas_probe_count.x, probe_idx / atlas_probe_count.x);
+}
+
+float3 GetProbeRayDirection(uint rayIndex, uint probeDim, uint atlasProbeCount, float2 RandOffset)
+{
+    const uint2 ProbePx = uint2(rayIndex % probeDim, rayIndex / probeDim);
+    const uint2 Tile = GeProbeAtlasTile(ProbePx, atlasProbeCount);
+    const uint2 AltrasPx = Tile * probeDim + ProbePx;
+    float2 NormalizedUV = (ProbePx + RandOffset) / probeDim;
+    float2 OctUV = NormalizedUV * 2 - 1;
+    float3 probeRayDirection = GetOctahedralDirection(OctUV);
+
+    return probeRayDirection;
+}
+
+#endif

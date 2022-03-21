@@ -200,6 +200,14 @@ static TAutoConsoleVariable<int32> CVarRayTracingGlobalIlluminationFinalGatherSo
 	TEXT("5: 4096 Elements (Default)\n"),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarRayTracingDeferedGlobalIllumination(
+	TEXT("r.RayTracing.GlobalIllumination.ExperimentalDeferred"),
+	0,
+	TEXT("Sets whether use defered gi shading\n")
+	TEXT("0: Disabled\n ")
+	TEXT("1: Enabled\n"),
+	ECVF_RenderThreadSafe);
+
 static TAutoConsoleVariable<int32> CVarRayTracingGlobalIlluminationFinalGatherEnableNeighborVisbilityTest(
 	TEXT("r.RayTracing.GlobalIllumination.FinalGather.EnableNeighborVisibilityTest"),
 	0,
@@ -586,7 +594,6 @@ bool IsSurfelGIEnabled(const FViewInfo& View)
 
 bool IsFinalGatherEnabled(const FViewInfo& View)
 {
-
 	int32 CVarRayTracingGlobalIlluminationValue = CVarRayTracingGlobalIllumination.GetValueOnRenderThread();
 	if (CVarRayTracingGlobalIlluminationValue >= 0)
 	{
@@ -594,6 +601,14 @@ bool IsFinalGatherEnabled(const FViewInfo& View)
 	}
 
 	return View.FinalPostProcessSettings.RayTracingGIType == ERayTracingGlobalIlluminationType::FinalGather;
+}
+
+bool IsDeferedGIEnabled(const FViewInfo& View)
+{
+	int32 CVarDeferedGIValue = CVarRayTracingDeferedGlobalIllumination.GetValueOnRenderThread();
+	//int32 CVarRayTracingGlobalIlluminationValue = CVarRayTracingGlobalIllumination.GetValueOnRenderThread();
+
+	return CVarDeferedGIValue == 1; 
 }
 
 bool IsRayTracingDDGI(const FViewInfo& View)
@@ -1142,7 +1157,7 @@ class FGlobalIlluminationDDGIRGS : public FGlobalShader
 		SHADER_PARAMETER_STRUCT_ARRAY(FVolumeData, DDGIVolume, [FTestGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES])
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWDebugUAV)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, DDGIVolumeRayDataUAV)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<GuidingEntry>, RWRayGuidingEntries)
+		//SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<GuidingEntry>, RWRayGuidingEntries)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWRayGuidingMaxQ)
 	END_SHADER_PARAMETER_STRUCT()
 };
@@ -1243,12 +1258,14 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIllumination(const FV
 	//}
 
 	//PrepareRayTracingRestirGI(View, OutRayGenShaders);
-
+	PrepareRayTracingDeferedGI(View, OutRayGenShaders);
 	RayTracingDDIGIUpdate::PrepareRayTracingShaders(View, OutRayGenShaders);
 }
 
 void FDeferredShadingSceneRenderer::PrepareRayTracingGlobalIlluminationDeferredMaterial(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
 {
+	PrepareRayTracingDeferredGIDeferredMaterial(View, OutRayGenShaders);
+	
 	const bool bSortMaterials = CVarRayTracingGlobalIlluminationFinalGatherSortMaterials.GetValueOnRenderThread() != 0;
 	int EnableTransmission = CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread();
 
@@ -1324,6 +1341,7 @@ bool FDeferredShadingSceneRenderer::RenderRayTracingGlobalIllumination(
 	else if (IsSurfelGIEnabled(View))
 	{
 		SurfelGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
+		RenderWRC(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
 	}
 	// Ray generation pass
 	else if (IsFinalGatherEnabled(View))
@@ -1336,7 +1354,12 @@ bool FDeferredShadingSceneRenderer::RenderRayTracingGlobalIllumination(
 	}
 	else
 	{
-		RenderRayTracingGlobalIlluminationBruteForce(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
+		if (IsDeferedGIEnabled(View))
+		{
+			RenderRayTracingDeferedGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
+		}
+		else
+			RenderRayTracingGlobalIlluminationBruteForce(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs);
 	}
 	return true;
 }
@@ -2437,13 +2460,13 @@ void FDeferredShadingSceneRenderer::RenderTestDDGI(
 
 	PassParameters->RWDebugUAV = GraphBuilder.CreateUAV(DebugTex);
 	
-	FIntVector GuidingBufferDim = FIntVector(Desc.Extent.X, Desc.Extent.Y, 1);
-	FRDGBufferDesc RayGuidingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(GuidingEntry), GuidingBufferDim.X * GuidingBufferDim.Y * GuidingBufferDim.Z);
-	FRDGBufferRef GIGuidingBuffer = GraphBuilder.CreateBuffer(RayGuidingDesc, TEXT("RayGuidingLuminance"));
-	FRDGBufferRef GIMaxQBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32_t), GuidingBufferDim.X * GuidingBufferDim.Y * GuidingBufferDim.Z), TEXT("RayGuidingMaxQ"));
+	//FIntVector GuidingBufferDim = FIntVector(Desc.Extent.X, Desc.Extent.Y, 1);
+	//FRDGBufferDesc RayGuidingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(GuidingEntry), GuidingBufferDim.X * GuidingBufferDim.Y * GuidingBufferDim.Z);
+	//FRDGBufferRef GIGuidingBuffer = GraphBuilder.CreateBuffer(RayGuidingDesc, TEXT("RayGuidingLuminance"));
+	//FRDGBufferRef GIMaxQBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32_t), GuidingBufferDim.X * GuidingBufferDim.Y * GuidingBufferDim.Z), TEXT("RayGuidingMaxQ"));
 
-	PassParameters->RWRayGuidingEntries = GraphBuilder.CreateUAV(GIGuidingBuffer);
-	PassParameters->RWRayGuidingMaxQ = GraphBuilder.CreateUAV(GIMaxQBuffer);
+	//PassParameters->RWRayGuidingEntries = GraphBuilder.CreateUAV(GIGuidingBuffer);
+	//PassParameters->RWRayGuidingMaxQ = GraphBuilder.CreateUAV(GIMaxQBuffer);
 
 	// Set the shader parameters for the relevant volumes
 	for (int32 volumeIndex = 0; volumeIndex < numVolumes; ++volumeIndex)

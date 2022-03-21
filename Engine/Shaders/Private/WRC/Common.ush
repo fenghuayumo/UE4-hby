@@ -1,0 +1,202 @@
+#ifndef _WRC_COMMON_HLSL
+#define _WRC_COMMON_HLSL
+static const float WRC_PI = 3.1415926535897932f;
+static const float WRC_2PI = 6.2831853071795864f;
+
+
+static const float UNIT_DIST_SCALE = 100;
+static const float WRC_MIN_TRACE_DIST = UNIT_DIST_SCALE* 1.2599210498948731647672106072782283505;
+/**
+* Finds the smallest component of the vector.
+*/
+float WRCMinComponent(float3 a)
+{
+    return min(a.x, min(a.y, a.z));
+}
+
+/**
+* Finds the largest component of the vector.
+*/
+float WRCMaxComponent(float3 a)
+{
+    return max(a.x, max(a.y, a.z));
+}
+
+/**
+* Returns either -1 or 1 based on the sign of the input value.
+* If the input is zero, 1 is returned.
+*/
+float WRCSignNotZero(float v)
+{
+    return (v >= 0.f) ? 1.f : -1.f;
+}
+
+/**
+* 2-component version of WRCSignNotZero.
+*/
+float2 WRCSignNotZero(float2 v)
+{
+    return float2(WRCSignNotZero(v.x), WRCSignNotZero(v.y));
+}
+
+/**
+* Return the given float value as an unsigned integer within the given numerical scale.
+*/
+uint WRCFloatToUint(float v, float scale)
+{
+    return (uint)floor(v * scale + 0.5f);
+}
+
+/**
+* Pack a float3 into a 32-bit unsigned integer.
+* All channels use 10 bits and 2 bits are unused.
+* Compliment of WRCUintToFloat3().
+*/
+uint WRCFloat3ToUint(float3 input)
+{
+    return (WRCFloatToUint(input.r, 1023.f)) | (WRCFloatToUint(input.g, 1023.f) << 10) | (WRCFloatToUint(input.b, 1023.f) << 20);
+}
+
+/**
+* Unpack a packed 32-bit unsigned integer to a float3.
+* Compliment of WRCFloat3ToUint().
+*/
+float3 WRCUintToFloat3(uint input)
+{
+    float3 unpacked;
+    unpacked.x = (float)(input & 0x000003FF) / 1023.f;
+    unpacked.y = (float)((input >> 10) & 0x000003FF) / 1023.f;
+    unpacked.z = (float)((input >> 20) & 0x000003FF) / 1023.f;
+    return unpacked;
+}
+
+/**
+* Rotate vector v with quaternion q.
+*/
+float3 WRCQuaternionRotate(float3 v, float4 q)
+{
+    float3 b = q.xyz;
+    float b2 = dot(b, b);
+    return (v * (q.w * q.w - b2) + b * (dot(v, b) * 2.f) + cross(b, v) * (q.w * 2.f));
+}
+
+/**
+* Quaternion conjugate.
+* For unit quaternions, conjugate equals inverse.
+* Use this to create a quaternion that rotates in the opposite direction.
+*/
+float4 WRCQuaternionConjugate(float4 q)
+{
+    return float4(-q.xyz, q.w);
+}
+
+struct RaySphereIntersection 
+{
+    // `t` will be NaN if no intersection is found
+    float t;
+    float3 normal;
+
+    bool IsHit() 
+    {
+        return t >= 0.0;
+    }
+};
+
+struct Sphere 
+{
+    float3 center;
+    float radius;
+
+    static Sphere FromCenterRadius(float3 center, float radius) 
+    {
+        Sphere res;
+        res.center = center;
+        res.radius = radius;
+        return res;
+    }
+
+    RaySphereIntersection   RayIntersect(float3 ray_origin, float3 ray_dir) 
+    {
+    	float3 oc = ray_origin - center;
+        float a = dot(ray_dir, ray_dir);
+    	float b = 2.0 * dot(oc, ray_dir);
+    	float c = dot(oc, oc) - radius * radius;
+    	float h = b * b - 4.0 * a * c;
+
+        RaySphereIntersection res;
+        res.t = (-b - sqrt(h)) / (2.0 * a);
+        res.normal = normalize(ray_origin + res.t * ray_dir - center);
+        return res;
+    }
+
+    RaySphereIntersection RayIntersectInside(float3 ray_origin, float3 ray_dir) 
+    {
+    	float3 oc = ray_origin - center;
+        float a = dot(ray_dir, ray_dir);
+    	float b = 2.0 * dot(oc, ray_dir);
+    	float c = dot(oc, oc) - radius * radius;
+
+    	float h = b * b - 4.0 * a * c;
+
+        RaySphereIntersection res;
+        // Note: flipped sign compared to the regular version
+        res.t = (-b + sqrt(h)) / (2.0 * a);
+        res.normal = normalize(ray_origin + res.t * ray_dir - center);
+        return res;
+    }
+};
+
+struct RayBoxIntersection 
+{
+    float t_min;
+    float t_max;
+
+    bool IsHit() 
+    {
+        return t_min <= t_max && t_max >= 0.0;
+    }
+};
+
+struct Aabb 
+{
+    float3 pmin;
+    float3 pmax;
+
+    static Aabb FromMinMax(float3 pmin, float3 pmax) 
+    {
+        Aabb res;
+        res.pmin = pmin;
+        res.pmax = pmax;
+        return res;
+    }
+
+    static Aabb FromCenterHalfExtent(float3 center, float3 half_extent) 
+    {
+        Aabb res;
+        res.pmin = center - half_extent;
+        res.pmax = center + half_extent;
+        return res;
+    }
+
+    RayBoxIntersection RayIntersect(float3 ray_origin, float3 ray_dir) 
+    {
+    	float3 min_interval = (pmax.xyz - ray_origin.xyz) / ray_dir;
+    	float3 max_interval = (pmin.xyz - ray_origin.xyz) / ray_dir;
+
+    	float3 a = min(min_interval, max_interval);
+    	float3 b = max(min_interval, max_interval);
+
+        RayBoxIntersection res;
+        res.t_min = max(max(a.x, a.y), a.z);
+        res.t_max = min(min(b.x, b.y), b.z);
+        // return t_min <= t_max && t_min < t && t_max >= 0.0;
+        return res;
+    }
+
+    bool ContainsPoint(float3 p) 
+    {
+        return all(p >= pmin) && all(p <= pmax);
+    }
+};
+
+#endif

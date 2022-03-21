@@ -30,12 +30,12 @@ static TAutoConsoleVariable<int32> CVarRestirGISpatial(
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarRestirGIInitialCandidates(
-	TEXT("r.RayTracing.RestirGI.InitialSamples"), 2,
+	TEXT("r.RayTracing.RestirGI.InitialSamples"), 1,
 	TEXT("How many lights to test sample during the initial candidate search"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarRestirGIInitialCandidatesBoost(
-	TEXT("r.RayTracing.RestirGI.InitialSamplesBoost"), 8,
+	TEXT("r.RayTracing.RestirGI.InitialSamplesBoost"), 4,
 	TEXT("How many lights to test sample during the initial candidate search when history is invalidated"),
 	ECVF_RenderThreadSafe);
 

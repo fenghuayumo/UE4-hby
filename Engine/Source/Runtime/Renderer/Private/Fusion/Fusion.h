@@ -27,4 +27,5 @@ extern void SetupLightParameters(
 extern bool IsRestirGIEnabled(const FViewInfo& View);
 extern bool IsSurfelGIEnabled(const FViewInfo& View);
 
+extern bool IsDeferedGIEnabled(const FViewInfo& View);
 #endif

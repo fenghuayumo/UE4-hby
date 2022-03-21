@@ -1,0 +1,165 @@
+#ifndef _WRC_LOOKUP_HLSL
+#define _WRC_LOOKUP_HLSL
+
+#include "ProbeCommon.ush"
+
+Texture2D    RadianceAtlasTex;
+SamplerState ProbeSampler;
+
+float4 GetRadiance(int3 probeCoord, float3 dir) 
+{
+    const uint ProbeIdx = GetProbeIndex(probeCoord, ProbeGridCounts);
+    const uint2 Tile = GeProbeAtlasTile(ProbeIdx, AtlasProbeCount);
+    const float2 TileUV = GetOctahedralCoordinates(dir) * 0.5 + 0.5;
+    //const uint2 atlas_px = uint2((Tile + TileUv) * ProbeDim);
+    //return wrc_radiance_atlas_tex[atlas_px];
+    const float2 AtlasUV = float2(Tile + clamp(TileUV, 0.5 / ProbeDim, 1.0 - 0.5 / ProbeDim)) / AtlasProbeCount;
+    return RadianceAtlasTex.SampleLevel(ProbeSampler, AtlasUV, 0);
+}
+
+struct FarRadianceField 
+{
+    float3 Radiance;
+    float ProbeHitT;
+    float ApproxSurfaceHitT;
+    float InvPdf;
+
+    static FarRadianceField CreateMiss() 
+    {
+        FarRadianceField res;
+        res.ProbeHitT = -1;
+        return res;
+    }
+
+    bool IsHit() 
+    {
+        return ProbeHitT >= 0;
+    }
+};
+
+struct FarRadianceFieldQuery 
+{
+    float3 RayOrigin;
+    float3 RayDirection;
+    float3 InterpolationURand;
+    float3 QueryNormal;
+
+    static FarRadianceFieldQuery FromRay(float3 RayOrigin, float3 RayDirection) 
+    {
+        FarRadianceFieldQuery res;
+        res.RayOrigin = RayOrigin;
+        res.RayDirection = RayDirection;
+        res.InterpolationURand = 0.5.xxx;
+        res.QueryNormal = 0.0.xxx;
+        return res;
+    }
+
+    FarRadianceField Query()
+    {
+        FarRadianceField res;
+        res.ProbeHitT = -1;
+        res.InvPdf = 1;
+
+
+        float3 probeGridSize = (ProbeGridSpacing * (ProbeGridCounts - 1));
+        Aabb gridBox = Aabb::FromCenterHalfExtent(VolumeProbeOrigin, probeGridSize * 0.5);
+        RayBoxIntersection gridIntersection = gridBox.RayIntersect(RayOrigin, RayDirection);
+
+        if (gridIntersection.IsHit()) 
+        {
+            const float3 posInBox = RayOrigin + RayDirection * max(0.0, gridIntersection.t_min);
+
+            // Stochastic interpolation
+            const float InterpolationExtent = 1.0;
+            const float3 probeOffset = (InterpolationURand - 0.5) * InterpolationExtent;
+
+            const uint3 probeCoord = GetProbeCoordFromWorldPos(posInBox + probeOffset * ProbeGridSpacing, VolumeProbeOrigin, ProbeGridCounts, ProbeGridSpacing);
+            
+            const float3 probeCenter = GetProbeWorldPosition(probeCoord, VolumeProbeOrigin, ProbeGridCounts, ProbeGridSpacing);
+            
+            const Sphere probeSphere = Sphere::FromCenterRadius(probeCenter, WRC_MIN_TRACE_DIST);
+            RaySphereIntersection parallax = probeSphere.RayIntersectInside(RayOrigin, RayDirection);
+           if (parallax.IsHit()) 
+            {
+                float4 outValue = GetRadiance(probeCoord, parallax.normal);
+
+                const float distanceToBox = length(posInBox - RayOrigin);
+                const float3 parallaxPos = RayOrigin + RayDirection * parallax.t;
+                const float3 offsetFromQueryPt = (parallaxPos - RayOrigin);
+                const float3 offsetFromProbeCenter = (parallaxPos - probeCenter);
+                const float parallaxDist2 = dot(offsetFromQueryPt, offsetFromQueryPt);
+
+                // TODO: check all this
+                float jacobian = 1;
+                if (all(QueryNormal) != 0) 
+                {
+                    jacobian *=
+                        parallaxDist2 / pow( (distanceToBox + WRC_MIN_TRACE_DIST), 2)
+                        / dot(RayDirection, normalize(offsetFromProbeCenter));
+
+                    // Also account for the change in the PDF being used in lighting.
+                    jacobian *=
+                        dot(QueryNormal, normalize(offsetFromProbeCenter))
+                        / dot(QueryNormal, RayDirection);
+                }
+
+                res.Radiance = outValue.rgb;
+                res.InvPdf = max(0.0, jacobian);
+
+                const float texelFootPrintFudge = 0.5 * UNIT_DIST_SCALE;
+                res.ProbeHitT = parallax.t  + texelFootPrintFudge;
+                res.ApproxSurfaceHitT = (parallax.t + outValue.a)  - WRC_MIN_TRACE_DIST;
+            }
+
+        }
+
+        return res;
+    }
+};
+
+
+float4 ProbeGridIntersect(float3 RayOrigin, float3 RayDir, float MaxT) 
+{
+    float4 HitColor = 0;
+    float3 probeGridSize = (ProbeGridSpacing * (ProbeGridCounts - 1));
+    Aabb gridBox = Aabb::FromCenterHalfExtent(VolumeProbeOrigin, probeGridSize * 0.5);
+    RayBoxIntersection gridIntersection = gridBox.RayIntersect(RayOrigin, RayDir);
+
+    if (gridIntersection.IsHit()) 
+    {
+        const float3 RayPos = RayOrigin + RayDir * max(0.0, gridIntersection.t_min);
+
+        int3 coord = GetProbeCoordFromWorldPos(RayPos, VolumeProbeOrigin, ProbeGridCounts, ProbeGridSpacing);
+        float3 deltaDist = abs(length(RayDir) / RayDir);
+        int3 rayStep = int3(sign(RayDir));
+        float3 sideDist = (sign(RayDir) * (GetProbeWorldPosition(coord, VolumeProbeOrigin, ProbeGridCounts, ProbeGridSpacing) - 0.5 - RayPos) + (sign(RayDir) * 0.5) + 0.5) * deltaDist;
+        bool3 mask;
+
+        const int max_steps = ProbeGridCounts.x + ProbeGridCounts.y + ProbeGridCounts.z;
+        for (int step = 0; step < max_steps && all(coord == clamp(coord, int3(0, 0, 0), ProbeGridCounts - 1)); ++step) 
+        {
+            Sphere s = Sphere::FromCenterRadius(GetProbeWorldPosition(coord, VolumeProbeOrigin, ProbeGridCounts, ProbeGridSpacing), 0.1);
+            RaySphereIntersection SphereHit = s.RayIntersect(RayOrigin, RayDir);
+
+            if (SphereHit.IsHit()) 
+            {
+                if (SphereHit.t < MaxT) 
+                {
+                    const float3 refl = reflect(RayDir, SphereHit.normal);
+                    HitColor = GetRadiance(coord, refl);
+                }
+
+                break;
+            }
+
+            mask = sideDist.xyz <= min(sideDist.yzx, sideDist.zxy);
+            sideDist += float3(mask) * deltaDist;
+		    coord += int3(float3(mask)) * rayStep;
+        }
+    }
+
+    return HitColor;
+}
+
+
+#endif

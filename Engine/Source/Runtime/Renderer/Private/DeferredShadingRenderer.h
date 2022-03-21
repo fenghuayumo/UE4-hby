@@ -380,32 +380,6 @@ private:
 		FRDGTextureRef SceneColorTexture,
 		FRDGTextureRef LightingChannelsTexture);
 
-	void RenderRestirGI(
-		FRDGBuilder& GraphBuilder,
-		FSceneTextureParameters& SceneTextures,
-		FViewInfo& View,
-		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
-		int32 UpscaleFactor,
-		// Output
-		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
-		SurfelBufResources* SurfelResource = nullptr);
-
-	void FusionGI(FRDGBuilder& GraphBuilder,
-		FSceneTextureParameters& SceneTextures,
-		FViewInfo& View,
-		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
-		int32 UpscaleFactor,
-		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
-
-	void RenderTestDDGI(
-		FRDGBuilder& GraphBuilder,
-		FSceneTextureParameters& SceneTextures,
-		FViewInfo& View,
-		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
-		int32 UpscaleFactor,
-		// Output
-		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
-
 	/** Renders an array of lights for the stationary light overlap viewmode. */
 	void RenderLightArrayForOverlapViewmode(
 		FRHICommandList& RHICmdList,
@@ -779,17 +753,56 @@ private:
 		const FSceneTextureParameters& SceneTextures,
 		FRDGTextureRef* OutAmbientOcclusionTexture);
 	
-
-	void AllocateSurfels(FRDGBuilder& GraphBuilder,
+	
+	void RenderRestirGI(
+		FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
 		FViewInfo& View,
-		SurfelBufResources& SurfelRes);
-	void RadianceCacheTrace(FRDGBuilder& GraphBuilder,
+		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
+		int32 UpscaleFactor,
+		// Output
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+		SurfelBufResources* SurfelResource = nullptr);
+
+	void FusionGI(FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
 		FViewInfo& View,
 		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
 		int32 UpscaleFactor,
 		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+
+	void RenderRayTracingDeferedGI(FRDGBuilder& GraphBuilder,
+		FSceneTextureParameters& SceneTextures,
+		FViewInfo& View,
+		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
+		int32 UpscaleFactor,
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+
+	void RenderTestDDGI(
+		FRDGBuilder& GraphBuilder,
+		FSceneTextureParameters& SceneTextures,
+		FViewInfo& View,
+		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
+		int32 UpscaleFactor,
+		// Output
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+
+	void AllocateSurfels(FRDGBuilder& GraphBuilder,
+		FSceneTextureParameters& SceneTextures,
+		FViewInfo& View,
+		SurfelBufResources& SurfelRes);
+
+	void WRCTrace(FRDGBuilder& GraphBuilder,
+		FSceneTextureParameters& SceneTextures,
+		FViewInfo& View);
+
+	void RenderWRC(FRDGBuilder& GraphBuilder,
+		FSceneTextureParameters& SceneTextures,
+		FViewInfo& View,
+		const IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig& RayTracingConfig,
+		int32 UpscaleFactor,
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+
 	bool SurfelTrace(FRDGBuilder& GraphBuilder,
 		FSceneTextureParameters& SceneTextures,
 		FViewInfo& View,
@@ -896,12 +909,13 @@ private:
 	static void PrepareRayTracingSampledDirectLighting(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
 	static void PrepareRayTracingRestirGI(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
 	static void PrepareRayTracingSurfelGI(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
-	static void PrepareRayTracingRadianceCacheGI(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
+	static void PrepareRayTracingWRCGI(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
+	static void PrepareRayTracingDeferedGI(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
 	// Versions for setting up the deferred material pipeline
 	static void PrepareRayTracingReflectionsDeferredMaterial(const FViewInfo& View, const FScene& Scene, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
 	static void PrepareRayTracingDeferredReflectionsDeferredMaterial(const FViewInfo& View, const FScene& Scene, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
 	static void PrepareRayTracingGlobalIlluminationDeferredMaterial(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
-
+	static void PrepareRayTracingDeferredGIDeferredMaterial(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
 
 	/** Lighting evaluation shader registration */
 	static FRHIRayTracingShader* GetRayTracingLightingMissShader(FViewInfo& View);
