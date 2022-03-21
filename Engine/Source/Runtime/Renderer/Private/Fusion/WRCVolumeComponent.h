@@ -1,3 +1,4 @@
+#pragma once
 // UE4 public interfaces
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"

@@ -49,7 +49,7 @@ static FAutoConsoleVariableRef CVarRayTracingRadianceCacheSamplesPerPixel(
 
 static TAutoConsoleVariable<int> CVarWRCDebugProbeRadiance(
 	TEXT("r.RayTracing.WRC.DebugProbeRadiance"),
-	1,
+	0,
 	TEXT("If 1, will show radiance cache\n"),
 	ECVF_RenderThreadSafe);
 
@@ -595,12 +595,7 @@ void FDeferredShadingSceneRenderer::RenderWRC(FRDGBuilder& GraphBuilder,
 	{
 		RDG_GPU_STAT_SCOPE(GraphBuilder, WRCGI_Update);
 		RDG_EVENT_SCOPE(GraphBuilder, "WRCGI Update");
-		WRCTrace(GraphBuilder, SceneTextures,View);
-	}
-
-	//
-	if (CVarWRCDebugProbeRadiance.GetValueOnRenderThread() > 0)
-	{
+		// WRCTrace(GraphBuilder, SceneTextures,View);
 		TArray<FWRCVolumeSceneProxy*> sceneVolumes;
 		for (FWRCVolumeSceneProxy* proxy : FWRCVolumeSceneProxy::AllProxiesReadyForRender_RenderThread)
 		{
@@ -612,9 +607,19 @@ void FDeferredShadingSceneRenderer::RenderWRC(FRDGBuilder& GraphBuilder,
 
 			sceneVolumes.Add(proxy);
 		}
+		if (sceneVolumes.Num() <= 0) return;
+		//allways use index 0
+		WRCUpdateVolume_RenderThread(*Scene, View, GraphBuilder, SceneTextures, sceneVolumes[0]);
 
-		WRCDebugProbeRadiance(GraphBuilder, SceneTextures, View, *Scene, UpscaleFactor, OutDenoiserInputs, sceneVolumes[0]);
+		if (CVarWRCDebugProbeRadiance.GetValueOnRenderThread() > 0)
+		{
+			WRCDebugProbeRadiance(GraphBuilder, SceneTextures, View, *Scene, UpscaleFactor, OutDenoiserInputs, sceneVolumes[0]);
+		}
+
 	}
+
+	//
+	
 	
 	WRCProbeRenderDiffuseIndirectVisualizations(*Scene, View, GraphBuilder);
 }
