@@ -1099,14 +1099,17 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingDeferedGI(const FViewInfo& 
 		auto RayGenShader = View.ShaderMap->GetShader<FRestirGIInitialSamplesForDeferedRGS>(RestirPermutationVector);
 		OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 	}
-	const bool UseWRC = CVarRestirGIUseRadianceCache.GetValueOnRenderThread() != 0;
+	//const bool UseWRC = CVarRestirGIUseRadianceCache.GetValueOnRenderThread() != 0;
 	for (int UseSurfel = 0; UseSurfel < 2; ++UseSurfel)
 	{
-		RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FDeferredMaterialMode>(EDeferredMaterialMode::Shade);
-		RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseSurfelDim>(UseSurfel == 1);
-		RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseRadianceCache>(UseWRC);
-		TShaderMapRef<FRestirGIInitialSamplesForDeferedRGS> RayGenerationShader(View.ShaderMap, RestirPermutationVector);
-		OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
+		for (int UseWRC = 0; UseWRC < 2; ++UseWRC)
+		{
+			RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FDeferredMaterialMode>(EDeferredMaterialMode::Shade);
+			RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseSurfelDim>(UseSurfel == 1);
+			RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseRadianceCache>(UseWRC == 1);
+			TShaderMapRef<FRestirGIInitialSamplesForDeferedRGS> RayGenerationShader(View.ShaderMap, RestirPermutationVector);
+			OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
+		}
 	}
 }
 
@@ -1389,7 +1392,7 @@ void GenerateInitialSampleForDefered(FRDGBuilder& GraphBuilder,
 			PassParameters->SurfelVertexBuf = GraphBuilder.CreateSRV(SurfelVertexBuf);
 		}
 
-		const bool UseWRC = ProbeConfig && CVarRestirGIUseRadianceCache.GetValueOnRenderThread() != 0;
+		const bool UseWRC = ProbeConfig && ProbeConfig->ProbesRadiance && CVarRestirGIUseRadianceCache.GetValueOnRenderThread() != 0;
 		if( UseWRC)
 		{
 			PassParameters->VolumeProbeOrigin = ProbeConfig->VolumeProbeOrigin;

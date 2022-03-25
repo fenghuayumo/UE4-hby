@@ -185,7 +185,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "GI Probes");
 	bool VisualizeProbes = false;
 
-	/** The radius of the spheres that visualize the ddgi probes */
+	/** The radius of the spheres that visualize the radiance probes */
 	UPROPERTY(config, EditAnywhere, Category="GI Probes")
 	float DebugProbeRadius = 5.0f;
 
