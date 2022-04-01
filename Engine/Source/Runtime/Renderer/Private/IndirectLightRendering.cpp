@@ -16,6 +16,7 @@
 #include "RayTracing/RayTracingReflections.h"
 #include "DistanceFieldAmbientOcclusion.h"
 #include "VolumetricCloudRendering.h"
+#include "Fusion/FusionDenoiser.h"
 
 static TAutoConsoleVariable<bool> CVarGlobalIlluminationExperimentalPluginEnable(
 	TEXT("r.GlobalIllumination.ExperimentalPlugin"),
@@ -25,7 +26,8 @@ static TAutoConsoleVariable<bool> CVarGlobalIlluminationExperimentalPluginEnable
 
 static TAutoConsoleVariable<int32> CVarDiffuseIndirectDenoiser(
 	TEXT("r.DiffuseIndirect.Denoiser"), 1,
-	TEXT("Denoising options (default = 1)"),
+	TEXT("Denoising options (default = 1)")
+	TEXT("2 Fusion Denoiser"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarDenoiseSSR(
@@ -374,7 +376,9 @@ void FDeferredShadingSceneRenderer::RenderDiffuseIndirectAndAmbientOcclusion(
 	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
 	FRDGTextureRef SceneColorTexture,
 	FRDGTextureRef LightingChannelsTexture,
-	FHairStrandsRenderingData* InHairDatas)
+	FHairStrandsRenderingData* InHairDatas,
+	FSurfelBufResources* SurfelResource,
+	FRadianceVolumeProbeConfigs* ProbeConfig)
 {
 	RDG_EVENT_SCOPE(GraphBuilder, "DiffuseIndirectAndAO");
 
@@ -408,7 +412,7 @@ void FDeferredShadingSceneRenderer::RenderDiffuseIndirectAndAmbientOcclusion(
 		IScreenSpaceDenoiser::FDiffuseIndirectInputs DenoiserInputs;
 		if (bApplyRTGI)
 		{
-			bool bIsValid = RenderRayTracingGlobalIllumination(GraphBuilder, SceneTextures, View, /* out */ &RayTracingConfig, /* out */ &DenoiserInputs);
+			bool bIsValid = RenderRayTracingGlobalIllumination(GraphBuilder, SceneTextures, View, /* out */ &RayTracingConfig, /* out */ &DenoiserInputs, SurfelResource, ProbeConfig);
 			if (!bIsValid)
 			{
 				DenoiseMode = 0;
@@ -435,8 +439,8 @@ void FDeferredShadingSceneRenderer::RenderDiffuseIndirectAndAmbientOcclusion(
 		IScreenSpaceDenoiser::FDiffuseIndirectOutputs DenoiserOutputs;
 		if (DenoiseMode != 0)
 		{
-			const IScreenSpaceDenoiser* DefaultDenoiser = IScreenSpaceDenoiser::GetDefaultDenoiser();
-			const IScreenSpaceDenoiser* DenoiserToUse = DenoiseMode == 1 ? DefaultDenoiser : GScreenSpaceDenoiser;
+			const IScreenSpaceDenoiser* DefaultDenoiser = IScreenSpaceDenoiser::GetDefaultDenoiser();	
+			const IScreenSpaceDenoiser* DenoiserToUse = DenoiseMode == 1 ? DefaultDenoiser :  DenoiseMode == 2 ? FFusionDenoiser::GetDenoiser() : GScreenSpaceDenoiser;
 
 			RDG_EVENT_SCOPE(GraphBuilder, "%s%s(DiffuseIndirect) %dx%d",
 				DenoiserToUse != DefaultDenoiser ? TEXT("ThirdParty ") : TEXT(""),
@@ -660,7 +664,10 @@ void FDeferredShadingSceneRenderer::RenderDeferredReflectionsAndSkyLighting(
 	FRDGTextureMSAA SceneColorTexture,
 	FRDGTextureRef DynamicBentNormalAOTexture,
 	FRDGTextureRef VelocityTexture,
-	FHairStrandsRenderingData* HairDatas)
+	FHairStrandsRenderingData* HairDatas,
+	FSurfelBufResources* SurfelResource,
+	FRadianceVolumeProbeConfigs* ProbeConfig
+	)
 {
 	if (ViewFamily.EngineShowFlags.VisualizeLightCulling 
 		|| ViewFamily.EngineShowFlags.RayTracingDebug
@@ -764,7 +771,9 @@ void FDeferredShadingSceneRenderer::RenderDeferredReflectionsAndSkyLighting(
 					View,
 					DenoiserMode,
 					RayTracingReflectionOptions,
-					&DenoiserInputs);
+					&DenoiserInputs,
+					SurfelResource,
+					ProbeConfig);
 			}
 			else if (bScreenSpaceReflections)
 			{

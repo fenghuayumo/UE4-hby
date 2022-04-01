@@ -99,8 +99,8 @@ static TAutoConsoleVariable<int32> CVarRestirGISpatialApplyApproxVisibility(
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarRestirGITemporalMaxHistory(
-	TEXT("r.RayTracing.RestirGI.Temporal.MaxHistory"), 10,
-	TEXT("Maximum temporal history for samples (default 10)"),
+	TEXT("r.RayTracing.RestirGI.Temporal.MaxHistory"), 8,
+	TEXT("Maximum temporal history for samples (default 8)"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarRestirGITemporalNormalRejectionThreshold(
@@ -1473,8 +1473,11 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 	const bool SubsampledView = View.GetSecondaryViewRectSize() != View.ViewRect.Size();
 	const int32 AutoReservoirs = SubsampledView ? MaxReservoirs : MinReservoirs;
 	const int32 NumReservoirs = RequestedReservoirs < 0 ? AutoReservoirs : FMath::Max(RequestedReservoirs, 1);
-	FIntPoint PaddedSize = FMath::DivideAndRoundUp<FIntPoint>(SceneTextures.SceneDepthTexture->Desc.Extent / UpscaleFactor, 4) * 4;
 
+	FIntPoint RayTracingResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), UpscaleFactor);
+	//FIntPoint PaddedSize = FMath::DivideAndRoundUp<FIntPoint>(SceneTextures.SceneDepthTexture->Desc.Extent / UpscaleFactor, 4) * 4;
+	FIntPoint PaddedSize = RayTracingResolution;
+	
 	FIntVector ReservoirBufferDim = FIntVector(PaddedSize.X, PaddedSize.Y, NumReservoirs + 1);
 	FRDGBufferDesc ReservoirDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(RTXGI_PackedReservoir), ReservoirBufferDim.X * ReservoirBufferDim.Y * ReservoirBufferDim.Z);
 
@@ -1496,7 +1499,6 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 	CommonParameters.UpscaleFactor = UpscaleFactor;
 	CommonParameters.MaxShadowDistance = MaxShadowDistance;
 	CommonParameters.DiffuseThreshold = GRayTracingGlobalIlluminationDiffuseThreshold;;
-	FIntPoint RayTracingResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), UpscaleFactor);
 
 	const bool bCameraCut = !View.PrevViewInfo.SampledGIHistory.GIReservoirs.IsValid() || View.bCameraCut;
 	const int32 InitialCandidates = bCameraCut ? CVarRestirGIInitialCandidatesBoost.GetValueOnRenderThread() : CVarRestirGIInitialCandidates.GetValueOnRenderThread();

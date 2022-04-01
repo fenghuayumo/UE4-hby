@@ -233,6 +233,12 @@ static TAutoConsoleVariable<int32> CVarRayTracingReflectionsTiming(
 	TEXT("Time cost of ray traced reflections ( 0 - off, 1 - shaded rays. 2 - material gather, 3 - all"),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarRayTracingReflectionsUseSurfel(
+	TEXT("r.RayTracing.Reflections.UseSurfel"),
+	0,
+	TEXT("Whether to use surfel gi for reflection."),
+	ECVF_RenderThreadSafe);
+
 // ESamplePhase
 enum class ESamplePhase
 {
@@ -270,11 +276,10 @@ class FRayTracingReflectionsRGS : public FGlobalShader
 	class FEnableTwoSidedGeometryForShadowDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
 	class FMissShaderLighting : SHADER_PERMUTATION_BOOL("DIM_MISS_SHADER_LIGHTING");
 	class FRayTraceSkyLightContribution : SHADER_PERMUTATION_BOOL("DIM_RAY_TRACE_SKY_LIGHT_CONTRIBUTION");
-
 	// Permutation to allow common bounce counts to unroll for better code generation and live variable pressure
 	// Presently only specializing for single bounce shows a performance improvement
 	class FBounceCount : SHADER_PERMUTATION_INT("DIM_MAX_BOUNCES", 2);
-
+	class FUseSurfelDim : SHADER_PERMUTATION_BOOL("USE_SURFEL");
 	using FPermutationDomain = TShaderPermutationDomain<
 		FDenoiserOutput,
 		FDeferredMaterialMode,
@@ -282,7 +287,8 @@ class FRayTracingReflectionsRGS : public FGlobalShader
 		FHybrid,
 		FEnableTwoSidedGeometryForShadowDim,
 		FMissShaderLighting,
-		FRayTraceSkyLightContribution>;
+		FRayTraceSkyLightContribution,
+		FUseSurfelDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(int32, SamplesPerPixel)
@@ -341,10 +347,33 @@ class FRayTracingReflectionsRGS : public FGlobalShader
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, RayHitDistanceOutput)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, RayImaginaryDepthOutput)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FImaginaryReflectionGBufferData>, ImaginaryReflectionGBuffer)
+
+		//surfel gi
+		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelMetaBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashKeyBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashValueBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<SurfelVertexPacked>, SurfelVertexBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, CellIndexOffsetBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelIndexBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, SurfelIrradianceBuf)
+	
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
+		FPermutationDomain PermutationVector(Parameters.PermutationId);
+		if (PermutationVector.Get<FDeferredMaterialMode>() != EDeferredMaterialMode::Shade
+			&& PermutationVector.Get<FUseSurfelDim>() == true)
+		{
+			return false;
+		}
+
+		//if (PermutationVector.Get<FDeferredMaterialMode>() == EDeferredMaterialMode::None
+		//	&& PermutationVector.Get<FUseSurfelDim>() == true)
+		//{
+		//	return false;
+		//}
+
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
 	}
 
@@ -476,7 +505,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflections(const FViewInfo
 	const bool bMissShaderLighting = CanUseRayTracingLightingMissShader(View.GetShaderPlatform());
 	const bool bRayTraceSkyLightContribution = ShouldRayTracedReflectionsRayTraceSkyLightContribution(Scene);
 	const int32 Bounces = GetMaxReflectionBounces(View);
-
+	//const bool bUseSurfel = CVarRayTracingReflectionsUseSurfel.GetValueOnRenderThread() != 0;
 	if (bSortMaterials)
 	{
 		{
@@ -487,10 +516,11 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflections(const FViewInfo
 			PermutationVector.Set<FRayTracingReflectionsRGS::FMissShaderLighting>(bMissShaderLighting);
 			PermutationVector.Set<FRayTracingReflectionsRGS::FRayTraceSkyLightContribution>(bRayTraceSkyLightContribution);
 			PermutationVector.Set<FRayTracingReflectionsRGS::FBounceCount>(Bounces <= FRayTracingReflectionsRGS::FBounceCount::MaxValue ? Bounces : 0);
+			PermutationVector.Set<FRayTracingReflectionsRGS::FUseSurfelDim>(false);
 			auto RayGenShader = View.ShaderMap->GetShader<FRayTracingReflectionsRGS>(PermutationVector);
 			OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 		}
-		
+		for(int bUseSurfel = 0; bUseSurfel < 2; bUseSurfel++)
 		{
 			FRayTracingReflectionsRGS::FPermutationDomain PermutationVector;
 			PermutationVector.Set<FRayTracingReflectionsRGS::FEnableTwoSidedGeometryForShadowDim>(EnableRayTracingShadowTwoSidedGeometry());
@@ -499,6 +529,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflections(const FViewInfo
 			PermutationVector.Set<FRayTracingReflectionsRGS::FMissShaderLighting>(bMissShaderLighting);
 			PermutationVector.Set<FRayTracingReflectionsRGS::FRayTraceSkyLightContribution>(bRayTraceSkyLightContribution);
 			PermutationVector.Set<FRayTracingReflectionsRGS::FBounceCount>(Bounces <= FRayTracingReflectionsRGS::FBounceCount::MaxValue ? Bounces : 0);
+			PermutationVector.Set<FRayTracingReflectionsRGS::FUseSurfelDim>(bUseSurfel == 1);
 			auto RayGenShader = View.ShaderMap->GetShader<FRayTracingReflectionsRGS>(PermutationVector);
 			OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 		}
@@ -511,6 +542,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflections(const FViewInfo
 		PermutationVector.Set<FRayTracingReflectionsRGS::FMissShaderLighting>(bMissShaderLighting);
 		PermutationVector.Set<FRayTracingReflectionsRGS::FRayTraceSkyLightContribution>(bRayTraceSkyLightContribution);
 		PermutationVector.Set<FRayTracingReflectionsRGS::FBounceCount>(Bounces <= FRayTracingReflectionsRGS::FBounceCount::MaxValue ? Bounces : 0);
+		PermutationVector.Set<FRayTracingReflectionsRGS::FUseSurfelDim>(false);
 		auto RayGenShader = View.ShaderMap->GetShader<FRayTracingReflectionsRGS>(PermutationVector);
 		OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 	}
@@ -536,7 +568,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflectionsDeferredMaterial
 	const bool bMissShaderLighting = CanUseRayTracingLightingMissShader(View.GetShaderPlatform());
 	const bool bRayTraceSkyLightContribution = ShouldRayTracedReflectionsRayTraceSkyLightContribution(Scene);
 	const int32 Bounces = GetMaxReflectionBounces(View);
-
+	//const bool bUseSurfel = CVarRayTracingReflectionsUseSurfel.GetValueOnRenderThread() != 0;
 	{
 		FRayTracingReflectionsRGS::FPermutationDomain PermutationVector;
 		PermutationVector.Set<FRayTracingReflectionsRGS::FEnableTwoSidedGeometryForShadowDim>(EnableRayTracingShadowTwoSidedGeometry());
@@ -545,6 +577,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflectionsDeferredMaterial
 		PermutationVector.Set<FRayTracingReflectionsRGS::FMissShaderLighting>(bMissShaderLighting);
 		PermutationVector.Set<FRayTracingReflectionsRGS::FRayTraceSkyLightContribution>(bRayTraceSkyLightContribution);
 		PermutationVector.Set<FRayTracingReflectionsRGS::FBounceCount>(Bounces <= FRayTracingReflectionsRGS::FBounceCount::MaxValue ? Bounces : 0);
+		PermutationVector.Set<FRayTracingReflectionsRGS::FUseSurfelDim>(false);
 		auto RayGenShader = View.ShaderMap->GetShader<FRayTracingReflectionsRGS>(PermutationVector);
 		OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 	}
@@ -564,6 +597,7 @@ void FDeferredShadingSceneRenderer::PrepareSingleLayerWaterRayTracingReflections
 	PermutationVector.Set<FRayTracingReflectionsRGS::FMissShaderLighting>(bMissShaderLighting);
 	PermutationVector.Set<FRayTracingReflectionsRGS::FRayTraceSkyLightContribution>(bRayTraceSkyLightContribution);
 	PermutationVector.Set<FRayTracingReflectionsRGS::FBounceCount>(Bounces <= FRayTracingReflectionsRGS::FBounceCount::MaxValue ? Bounces : 0);
+	PermutationVector.Set<FRayTracingReflectionsRGS::FUseSurfelDim>(false);
 	auto RayGenShader = View.ShaderMap->GetShader<FRayTracingReflectionsRGS>(PermutationVector);
 	OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 }
@@ -599,7 +633,9 @@ void FDeferredShadingSceneRenderer::RenderRayTracingReflections(
 	const FViewInfo& View,
 	int DenoiserMode,
 	const FRayTracingReflectionOptions& Options,
-	IScreenSpaceDenoiser::FReflectionsInputs* OutDenoiserInputs)
+	IScreenSpaceDenoiser::FReflectionsInputs* OutDenoiserInputs,
+	FSurfelBufResources* SurfelRes,
+	FRadianceVolumeProbeConfigs* ProbeConfig)
 #if RHI_RAYTRACING
 {
 	if (Options.Algorithm == FRayTracingReflectionOptions::SortedDeferred)
@@ -776,6 +812,26 @@ void FDeferredShadingSceneRenderer::RenderRayTracingReflections(
 
 				PassParameters->MaterialBuffer = GraphBuilder.CreateUAV(DeferredMaterialBuffer);
 			}
+			bool bUseSurfel = SurfelRes && SurfelRes->SurfelIrradianceBuf && CVarRayTracingReflectionsUseSurfel.GetValueOnRenderThread() != 0;
+			if (bUseSurfel)
+			{
+				auto SurfelMetaBuf = SurfelRes->SurfelMetaBuf;
+				auto SurfelHashKeyBuf = SurfelRes->SurfelHashKeyBuf;
+				auto SurfelHashValueBuf = SurfelRes->SurfelHashValueBuf;
+				auto CellIndexOffsetBuf = SurfelRes->CellIndexOffsetBuf;
+				auto SurfelIndexBuf = SurfelRes->SurfelIndexBuf;
+				auto SurfelVertexBuf = SurfelRes->SurfelVertexBuf;
+				auto SurfelIrradianceBuf = SurfelRes->SurfelIrradianceBuf;
+
+				PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateSRV(SurfelIrradianceBuf);
+				PassParameters->CellIndexOffsetBuf = GraphBuilder.CreateSRV(CellIndexOffsetBuf, EPixelFormat::PF_R8_UINT);
+				PassParameters->SurfelIndexBuf = GraphBuilder.CreateSRV(SurfelIndexBuf, EPixelFormat::PF_R8_UINT);
+
+				PassParameters->SurfelHashKeyBuf = GraphBuilder.CreateSRV(SurfelHashKeyBuf, EPixelFormat::PF_R8_UINT);
+				PassParameters->SurfelHashValueBuf = GraphBuilder.CreateSRV(SurfelHashValueBuf, EPixelFormat::PF_R8_UINT);
+				PassParameters->SurfelMetaBuf = GraphBuilder.CreateSRV(SurfelMetaBuf, EPixelFormat::PF_R8_UINT);
+				PassParameters->SurfelVertexBuf = GraphBuilder.CreateSRV(SurfelVertexBuf);
+			}
 
 			FRayTracingReflectionsRGS::FPermutationDomain PermutationVector;
 			PermutationVector.Set<FRayTracingReflectionsRGS::FDeferredMaterialMode>(DeferredMaterialMode);
@@ -784,6 +840,10 @@ void FDeferredShadingSceneRenderer::RenderRayTracingReflections(
 			PermutationVector.Set<FRayTracingReflectionsRGS::FMissShaderLighting>(bLightingMissShader);
 			PermutationVector.Set<FRayTracingReflectionsRGS::FRayTraceSkyLightContribution>(bRayTraceSkyLightContribution);
 			PermutationVector.Set<FRayTracingReflectionsRGS::FBounceCount>(CommonParameters.MaxBounces <= FRayTracingReflectionsRGS::FBounceCount::MaxValue ? CommonParameters.MaxBounces : 0);
+			if(DeferredMaterialMode == EDeferredMaterialMode::Shade)
+				PermutationVector.Set<FRayTracingReflectionsRGS::FUseSurfelDim>(bUseSurfel);
+			else
+				PermutationVector.Set<FRayTracingReflectionsRGS::FUseSurfelDim>(false);
 			auto RayGenShader = View.ShaderMap->GetShader<FRayTracingReflectionsRGS>(PermutationVector);
 
 			ClearUnusedGraphResources(RayGenShader, PassParameters);

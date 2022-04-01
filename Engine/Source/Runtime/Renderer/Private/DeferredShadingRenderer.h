@@ -283,7 +283,9 @@ private:
 		TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
 		FRDGTextureRef SceneColorTexture,
 		FRDGTextureRef LightingChannelsTexture,
-		FHairStrandsRenderingData* HairDatas);
+		FHairStrandsRenderingData* HairDatas,
+		FSurfelBufResources* SurfelResource = nullptr,
+		FRadianceVolumeProbeConfigs* ProbeConfig = nullptr);
 
 	/** Renders sky lighting and reflections that can be done in a deferred pass. */
 	void RenderDeferredReflectionsAndSkyLighting(
@@ -292,7 +294,9 @@ private:
 		FRDGTextureMSAA SceneColorTexture,
 		FRDGTextureRef DynamicBentNormalAOTexture,
 		FRDGTextureRef VelocityTexture,
-		struct FHairStrandsRenderingData* HairDatas);
+		struct FHairStrandsRenderingData* HairDatas,
+		FSurfelBufResources* SurfelResource = nullptr,
+		FRadianceVolumeProbeConfigs* ProbeConfig = nullptr);
 
 	void RenderDeferredReflectionsAndSkyLightingHair(FRDGBuilder& GraphBuilder, struct FHairStrandsRenderingData* HairDatas);
 
@@ -693,7 +697,9 @@ private:
 		const FViewInfo& View,
 		int DenoiserMode,
 		const FRayTracingReflectionOptions& Options,
-		IScreenSpaceDenoiser::FReflectionsInputs* OutDenoiserInputs);
+		IScreenSpaceDenoiser::FReflectionsInputs* OutDenoiserInputs,
+		FSurfelBufResources* SurfelResource = nullptr,
+		FRadianceVolumeProbeConfigs* ProbeConfig = nullptr);
 
 	void RenderRayTracingDeferredReflections(
 		FRDGBuilder& GraphBuilder,
@@ -731,7 +737,9 @@ private:
 		FSceneTextureParameters& SceneTextures,
 		FViewInfo& View,
 		IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig* RayTracingConfig,
-		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs);
+		IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+		FSurfelBufResources* SurfelResource = nullptr,
+		FRadianceVolumeProbeConfigs* ProbeConfig = nullptr);
 	
 	void RenderRayTracingGlobalIlluminationBruteForce(
 		FRDGBuilder& GraphBuilder,

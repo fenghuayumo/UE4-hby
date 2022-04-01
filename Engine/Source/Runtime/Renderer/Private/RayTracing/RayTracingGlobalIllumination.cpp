@@ -1302,7 +1302,9 @@ bool FDeferredShadingSceneRenderer::RenderRayTracingGlobalIllumination(
 	FSceneTextureParameters& SceneTextures,
 	FViewInfo& View,
 	IScreenSpaceDenoiser::FAmbientOcclusionRayTracingConfig* OutRayTracingConfig,
-	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs)
+	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs,
+	FSurfelBufResources* SurfelRes,
+	FRadianceVolumeProbeConfigs* RadianceProbeConfig)
 #if RHI_RAYTRACING
 {
 	if (!View.ViewState) return false;
@@ -1340,13 +1342,11 @@ bool FDeferredShadingSceneRenderer::RenderRayTracingGlobalIllumination(
 	}
 	else if (IsSurfelGIEnabled(View))
 	{
-		FSurfelBufResources SurfelRes;
-		FRadianceVolumeProbeConfigs RadianceProbeConfig;
-		SurfelGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs, SurfelRes);
+		SurfelGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs, *SurfelRes);
 
-		RenderWRC(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs, RadianceProbeConfig);
+		RenderWRC(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs, *RadianceProbeConfig);
 	
-		RenderRestirGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs,&SurfelRes, &RadianceProbeConfig);
+		RenderRestirGI(GraphBuilder, SceneTextures, View, *OutRayTracingConfig, UpscaleFactor, OutDenoiserInputs,SurfelRes, RadianceProbeConfig);
 	}
 	// Ray generation pass
 	else if (IsFinalGatherEnabled(View))

@@ -863,6 +863,26 @@ struct FScreenSpaceDenoiserHistory
 	}
 };
 
+struct FFusionDenoiserHistory
+{
+	// Number of history render target to store.
+	static constexpr int32 RTCount = 3; //0: color hist, 1: variance hist
+	// Render target specific to the history.
+	TStaticArray<TRefCountPtr<IPooledRenderTarget>, RTCount> RT;
+
+	void SafeRelease()
+	{
+		for (int32 i = 0; i < RTCount; i++)
+			RT[i].SafeRelease();
+	}
+
+	bool IsValid() const
+	{
+		return RT[0].IsValid();
+	}
+};
+
+
 
 
 // Structure for storing a frame of GTAO history.
@@ -949,6 +969,8 @@ struct FSampleReGIRHistory
 		return Reservoirs.IsValid();
 	}
 };
+
+
 
 // Plugins can derive from this and use it for their own purposes
 class RENDERER_API ICustomTemporalAAHistory : public IRefCountedObject
@@ -1045,6 +1067,8 @@ struct FPreviousViewInfo
 
 	FSampleGIHistory	SampledGIHistory;
 	FSampleReGIRHistory	SampledReGIRHistory;
+	FFusionDenoiserHistory	FusionDiffuseIndirectHistory;
+
 	// Mobile bloom setup eye adaptation surface.
 	TRefCountPtr<IPooledRenderTarget> MobileBloomSetup_EyeAdaptation;
 	// Mobile temporal AA surface.
