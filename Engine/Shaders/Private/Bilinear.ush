@@ -1,0 +1,51 @@
+// From "Fast Denoising with Self Stabilizing Recurrent Blurs"
+
+struct Bilinear 
+{
+    float2 Origin;
+    float2 Weights;
+
+    int2 Px0() 
+    {
+        return int2(Origin);
+    }
+
+    int2 Px1() 
+    {
+        return int2(Origin) + int2(1, 0);
+    }
+
+    int2 Px2() 
+    {
+        return int2(Origin) + int2(0, 1);
+    }
+
+    int2 Px3() 
+    {
+        return int2(Origin) + int2(1, 1);
+    }
+};
+
+Bilinear GetBilinearFilter(float2 uv, float2 tex_size) 
+{
+	Bilinear result;
+	result.Origin = trunc(uv * tex_size - 0.5);
+	result.Weights = frac(uv * tex_size - 0.5);
+	return result;
+}
+
+float4 GetBilinearCustomWeights(Bilinear f, float4 customWeights) 
+{
+	float4 weights;
+	weights.x = (1.0 - f.Weights.x) * (1.0 - f.Weights.y);
+	weights.y = f.Weights.x * (1.0 - f.Weights.y);
+	weights.z = (1.0 - f.Weights.x) * f.Weights.y;
+	weights.w = f.Weights.x * f.Weights.y;
+	return weights * customWeights;
+}
+
+float4 ApplyBilinearCustomWeights(float4 s00, float4 s10, float4 s01, float4 s11, float4 w, bool normalize = true) 
+{
+	float4 r = s00 * w.x + s10 * w.y + s01 * w.z + s11 * w.w;
+	return r * (normalize ? rcp(dot(w, 1.0) + 1e-10) : 1.0);
+}

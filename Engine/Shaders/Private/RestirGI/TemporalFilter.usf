@@ -1,0 +1,224 @@
+
+
+#include "../Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "../ColorSpace.ush"
+#include "../Bilinear.ush"
+
+Texture2D   DepthTexture;
+Texture2D   VelocityTexture;
+Texture2D   NormalTexture;
+
+Texture2D   DepthHistory;
+Texture2D   NormalHistory;
+
+Texture2D   InputTex;
+Texture2D   HistoryTex;
+Texture2D   VarianceHistoryTex;
+RWTexture2D<float4> RWOutputTex;
+RWTexture2D<float4> RWHistoryTex;
+RWTexture2D<float2> RWVarianceTex;
+
+SamplerState        LinearClampSampler;
+SamplerState        PointClampSampler;  
+float4              BufferTexSize;
+float               TemporalNormalRejectionThreshold;
+float               TemporalDepthRejectionThreshold;
+
+float3 rgb_to_ycbcr(float3 col) 
+{
+    float3x3 m = float3x3(0.2126, 0.7152, 0.0722, -0.1146,-0.3854, 0.5, 0.5,-0.4542,-0.0458);
+    return mul(m, col);
+}
+
+float3 ycbcr_to_rgb(float3 col) 
+{
+    float3x3 m = float3x3(1.0, 0.0, 1.5748, 1.0, -0.1873, -.4681, 1.0, 1.8556, 0.0);
+    return max(0.0, mul(m, col));
+}
+
+
+float4 linear_rgb_to_crunched_luma_chroma(float4 v) 
+{
+    v.rgb = rgb_to_ycbcr(v.rgb);
+    float k = sqrt(v.x) / max(1e-8, v.x);
+    return float4(v.rgb * k, v.a);
+}
+
+float4 crunched_luma_chroma_to_linear_rgb(float4 v) 
+{
+    v.rgb *= v.x;
+    v.rgb = ycbcr_to_rgb(v.rgb);
+    return v;
+}
+
+#define linear_to_working linear_rgb_to_crunched_luma_chroma
+#define working_to_linear crunched_luma_chroma_to_linear_rgb
+float working_luma(float3 v) { return v.x; }
+
+static const int TARGET_COUNT = 32;
+[numthreads(8, 8, 1)]
+void TemporalFilter(uint2 DispatchThreadId: SV_DispatchThreadID) 
+{
+#if RESET_HISTORY   //first frame
+    float4 Current = linear_to_working(InputTex[DispatchThreadId]);
+    const float CurrentLum = working_luma(Current.xyz);
+    const float2 CurrentMoment = float2(max(0,CurrentLum), CurrentLum * CurrentLum);
+    RWVarianceTex[DispatchThreadId] = CurrentMoment;
+    RWHistoryTex[DispatchThreadId] = working_to_linear(float4(Current.xyz, 1.0));
+#else
+    uint2 PixelCoord = DispatchThreadId;
+    // Backproject this pixel to last frame
+    // start by just using our sample position
+    int2 PrevPos = DispatchThreadId;
+
+    float2 ViewUV = (float2(PixelCoord) + 0.5) * BufferTexSize.zw;
+    float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, ViewUV,0).r;
+    const float3 CurrentNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, ViewUV,0).xyz));
+
+    float2 PrevUV = ViewUV;
+    float4 NDC = float4(ViewUV * float2(2, -2) + float2(-1, 1), DeviceZ, 1);
+
+	float4 GVelocity = VelocityTexture.SampleLevel(PointClampSampler, ViewUV, 0);
+
+    float ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ);
+    if (GVelocity.x > 0.0)
+    {
+        float3 Velocity = DecodeVelocityFromTexture(GVelocity);
+        float2 PrevNDC = NDC.xy - Velocity.xy;
+        PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+        PrevPos = PrevUV * BufferTexSize.xy;
+        ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ - Velocity.z);
+    }
+    else
+    {
+        float4 PrevNDC = mul(NDC, View.ClipToPrevClip);
+        PrevNDC.xyz /= PrevNDC.w;
+        PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+        PrevPos = PrevUV * BufferTexSize.xy;
+		ExpectedPrevLinearDepth = ConvertFromDeviceZ(PrevNDC.z);
+    }
+    float3  PrevNormal = CurrentNormal;
+    float   PrevLinearDepth = ExpectedPrevLinearDepth;
+    // Try to find a matching surface in the neighborhood of the reprojected pixel
+    int2 offsets[4] = { int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1) };
+    float4 quadValid = 0.0;
+    for (int i = 0; i < 4; i++)
+    {
+        int2 offset = 0;
+        if (i > 0)
+        {
+            offset = offsets[i];
+        }
+        int2 idx = PrevPos + offset;
+        if( idx.x >= BufferTexSize.x || idx.x < 0 || idx.y >= BufferTexSize.y || idx.y < 0 )
+            continue;
+
+        float PrevDepth = ConvertFromDeviceZ(DepthHistory[idx].r);
+        float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory[idx].xyz));
+        // TODO: refine sample rejection tests
+        if (dot(CurrentNormal, PrevWorldNormal) < TemporalNormalRejectionThreshold)
+        {
+            continue;
+        }
+
+        if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > TemporalDepthRejectionThreshold)
+        {
+            continue;
+        }
+
+        PrevLinearDepth = PrevDepth;
+        PrevNormal = PrevWorldNormal;
+
+        // PrevPos = idx;
+        // PrevUV = (PrevPos + 0.5) * BufferTexSize.zw; 
+        quadValid[i] = 1;
+    }
+ 
+    const Bilinear bilinear = GetBilinearFilter(PrevUV, BufferTexSize.xy);
+    float4 s00 = HistoryTex[int2(bilinear.Origin) + int2(0, 0)];
+    float4 s10 = HistoryTex[int2(bilinear.Origin) + int2(1, 0)];
+    float4 s01 = HistoryTex[int2(bilinear.Origin) + int2(0, 1)];
+    float4 s11 = HistoryTex[int2(bilinear.Origin) + int2(1, 1)];
+
+    float4 weights = GetBilinearCustomWeights(bilinear, quadValid);
+    float4 History = 0.0;
+    if (dot(weights, 1.0) > 1e-5) 
+    {
+        History = linear_to_working(ApplyBilinearCustomWeights(s00, s10, s01, s11, weights));
+    }   
+
+    float4 Current = linear_to_working(InputTex[DispatchThreadId]);
+    //History = linear_to_working(HistoryTex[PrevPos]);
+
+    float4 ValueSum = 0;
+    float4 ValueSum2 = 0;
+    float WeightSum = 0.0;
+    float HistDiff = 0.0;
+    float HistValueSum = 0.0;
+    float HistValueSum2 = 0.0;
+
+    const int Radius = 2;
+    const int Kernel = Radius + 1;
+    for (int y = -Radius; y <= Radius; ++y) 
+    {
+        for (int x = -Radius; x <= Radius; ++x) 
+        {
+            float4 Neighbor = linear_to_working(InputTex[DispatchThreadId + int2(x,y)]);
+            float4 HistNeighbor = linear_to_working(HistoryTex[PrevPos + int2(x,y)]);
+
+            float  NeighLum = working_luma(Neighbor.xyz);
+            float  HistNeighLum = working_luma(HistNeighbor.xyz);
+
+            float Weight = exp(-3.0 * float(x*x + y * y) / float(Kernel * Kernel));
+            ValueSum += Neighbor * Weight;
+            ValueSum2 += Neighbor * Neighbor * Weight;
+            WeightSum += Weight;
+
+            HistDiff += abs(NeighLum - HistNeighLum) / max(1e-5,NeighLum + HistNeighLum ) * Weight;
+            HistValueSum += HistNeighLum * Weight;
+            HistValueSum2 += HistNeighLum * HistNeighLum * Weight;
+        }
+    }
+    //normalize
+    float4 Ex = ValueSum / WeightSum;
+    float4 Ex2 = ValueSum2 / WeightSum;
+    float4 Dev = sqrt(max(0.0.xxxx, Ex2 - Ex * Ex));
+    HistDiff /= WeightSum;
+    HistValueSum /= WeightSum;
+    HistValueSum2 /= WeightSum;
+
+    const float2 HistoryMoment = VarianceHistoryTex.SampleLevel(LinearClampSampler, PrevUV, 0);
+
+    const float CurrentLum = working_luma(Current.xyz) + HistValueSum - working_luma(Ex.rgb);
+    const float2 CurrentMoment = float2(CurrentLum, CurrentLum * CurrentLum);
+    RWVarianceTex[DispatchThreadId] = max(0.0, lerp(HistoryMoment, CurrentMoment, 0.25));
+
+    const float TemporalDev = sqrt(max(0.0, HistoryMoment.y - HistoryMoment.x * HistoryMoment.x));
+
+    //float3 HistDev = sqrt(abs(HistValueSum2 - HistValueSum * HistValueSum));
+    float  TemporalChange = abs(HistValueSum - working_luma(Ex.rgb)) / max(1e-8, HistValueSum + working_luma(Ex.rgb));
+
+    const float VarianceAdjustedTemporalChange = smoothstep(0.1, 1.0, 0.05 * TemporalChange / TemporalDev);
+
+
+    float HistorySpp = min(History.a, TARGET_COUNT);
+    float ClampBoxSize = lerp(0.25, 1.0, pow(saturate(HistorySpp / TARGET_COUNT), 2)) * 3;
+    ClampBoxSize = max(ClampBoxSize, 0.5);
+
+	float4 NMin = Current - Dev * ClampBoxSize;
+	float4 NMax = Current + Dev * ClampBoxSize;
+
+	float4 ClampedHistory = float4(clamp(History.rgb, NMin.rgb, NMax.rgb), History.a);
+
+    float MaxSpp = TARGET_COUNT;
+    MaxSpp = lerp(MaxSpp, 4, VarianceAdjustedTemporalChange);
+
+    float3 BlendColor = lerp(ClampedHistory.rgb, Current.rgb, 1.0 / (1.0 + min(MaxSpp, HistorySpp)));
+
+    const float CurSpp = min(HistorySpp, MaxSpp) + 1;
+    float4 Output = working_to_linear(float4( BlendColor, CurSpp));
+    RWHistoryTex[DispatchThreadId] = Output;
+    RWOutputTex[DispatchThreadId] = float4(Output.rgb, saturate(CurSpp / TARGET_COUNT));
+#endif
+}

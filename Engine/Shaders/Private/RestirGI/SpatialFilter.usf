@@ -1,0 +1,160 @@
+
+#include "../Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "../PositionReconstructionCommon.ush"
+#if DIM_STAGE  ==   PRE_FILTER
+#include "../QuasiRandom.ush"
+#endif
+
+Texture2D   NormalTexture;
+Texture2D    DepthTexture;
+
+Texture2D  SSAOTex;
+Texture2D  InputTex;
+RWTexture2D<float4> RWFilteredTex;
+
+SamplerState        LinearClampSampler;
+SamplerState        PointClampSampler;
+float4 BufferTexSize;
+int     UpscaleFactor;
+float square(float x) { return x * x; }
+// float max3(float x, float y, float z) { return max(x, max(y, z)); }
+
+float3 Crunch(float3 v) 
+{
+    return v * rcp(max3(v.r, v.g, v.b) + 1.0);
+}
+float3 UnCrunch(float3 v) {
+    return v * rcp(1.0 - max3(v.r, v.g, v.b));
+}
+static const float GOLDEN_ANGLE = 2.39996323;
+
+static float GGXNdfUnNorm(float a2, float cos_theta) 
+{
+	float denom_sqrt = cos_theta * cos_theta * (a2 - 1.0) + 1.0;
+	return a2 / (denom_sqrt * denom_sqrt);
+}
+
+
+#define PRE_FILTER  0
+#define POST_FILTER 1
+[numthreads(8, 8, 1)]
+void SpatialFilter(in uint2 DispatchID : SV_DispatchThreadID) 
+{
+#if DIM_STAGE  ==   PRE_FILTER
+
+    float CenterDepth = DepthTexture.Load(int3(DispatchID,0)).r;
+    const float3 CenterNormal = normalize(DecodeNormal(NormalTexture.Load(int3(DispatchID,0)).xyz));
+    const float CenterSSAO = SSAOTex[DispatchID].r;
+
+    float WeightSum = 0.0;
+    const int SubPixelCount = UpscaleFactor * UpscaleFactor;
+   	uint RaySubPixelId = View.StateFrameIndex & (SubPixelCount - 1);
+    float3 WeightedValue = 0.0;
+
+    float3 WorldPos, CameraDirection;
+    ReconstructWorldPositionAndCameraDirectionFromDeviceZ(DispatchID, CenterDepth,WorldPos, CameraDirection );
+    float3 V = -normalize(CameraDirection);
+    float NdotV = dot(CenterNormal, V);
+
+    const uint SamplesPerPixel = 1;
+	FQuasiRandom QuasiRandom;
+	QuasiRandom_Initialize(QuasiRandom, DispatchID, 0, SamplesPerPixel);
+	QuasiRandom_Update(QuasiRandom, /* SampleIndex = */ 0, SamplesPerPixel);
+
+	float RandSample = QuasiRandom_Sample(QuasiRandom);
+    float ResolutionFraction = 1.0 / UpscaleFactor;
+    for(uint SampleIndex = 0; SampleIndex < SubPixelCount; SampleIndex++)
+    {
+        const float Angle = (SampleIndex + RandSample) * GOLDEN_ANGLE + (RaySubPixelId / float(SubPixelCount) ) * 2 * PI;
+        const float Radius = pow(float(SampleIndex), 0.666) * 1.0 + 0.4;
+        const float2 Offset = float2(cos(Angle), sin(Angle)) * Radius;
+        const int2   Px = int2(floor(float2(DispatchID.xy) * ResolutionFraction + Offset));
+        const float2 SampledUV = float2(Px)  * BufferTexSize.zw;
+        const float3 SampledNormal = normalize(DecodeNormal(NormalTexture.SampleLevel( PointClampSampler, SampledUV,0).xyz));
+        const float SampledDepth = DepthTexture.SampleLevel( PointClampSampler,SampledUV,0).r;
+        const float3 SampledValue = InputTex[Px].rgb;
+
+        float w = 1;
+        w *= GGXNdfUnNorm(0.01, saturate(dot(CenterNormal, SampledNormal)));
+        w *= exp2(-200.0 * abs( NdotV * (CenterDepth / SampledDepth - 1.0)));
+
+        WeightedValue += SampledValue * w;
+        WeightSum += w;
+    }
+    WeightedValue /= max(1e-20, WeightSum);
+    RWFilteredTex[DispatchID] = float4(WeightedValue.xyz,1.0);
+#elif DIM_STAGE == POST_FILTER
+    uint2 PixelCoord = DispatchID.xy;
+    float4 Sum = 0;
+
+    const float NormalizedSpp = RWFilteredTex[PixelCoord].a;
+    const float3 CenterValue = RWFilteredTex[PixelCoord].rgb;
+
+    float2 ViewUV = (float2(PixelCoord) + 0.5) * BufferTexSize.zw;
+    float CenterDepth = DepthTexture.SampleLevel(PointClampSampler, ViewUV,0).r;
+    const float3 CenterNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, ViewUV,0).xyz));
+    const float CenterSSAO = SSAOTex.SampleLevel(PointClampSampler, ViewUV,0).r;
+
+    if (NormalizedSpp == 1) 
+    {
+        RWFilteredTex[PixelCoord] = float4(CenterValue, 1.0);
+        return;
+    }
+
+    const float AngleOff = (View.StateFrameIndex * 13) % 32 * 2 * PI;
+
+    const uint MAX_SAMPLE_COUNT = 8;
+    const float MAX_RADIUS_PX = 16.0;
+
+    // Feeds into the `pow` to remap sample index to radius.
+    // At 0.5 (sqrt), it's proper circle sampling, with higher values becoming conical.
+    // Must be constants, so the `pow` can be const-folded.
+    const float KERNEL_SHARPNESS = 0.666;
+
+    const uint Spp = clamp(uint(exp2(4.0 * square(1.0 - NormalizedSpp))), 2, MAX_SAMPLE_COUNT);
+    // float NdotV = dot(CenterNormal, V);
+    {
+        Sum += float4(Crunch(CenterValue), 1);
+
+        const float RADIUS_SAMPLE_MULT = MAX_RADIUS_PX / pow(float(MAX_SAMPLE_COUNT - 1), KERNEL_SHARPNESS);
+
+        for (uint SampleIndex = 1; SampleIndex < Spp; ++SampleIndex) 
+        {
+            float Ang = (SampleIndex + AngleOff) * GOLDEN_ANGLE;
+            float Radius = pow(float(SampleIndex), KERNEL_SHARPNESS) * RADIUS_SAMPLE_MULT;
+            int2 SampleOffset = float2(cos(Ang), sin(Ang)) * Radius;
+            const int2 SamplePixel = PixelCoord + SampleOffset;
+
+            const float2 SampleUV = (float2(SamplePixel) + 0.5) * BufferTexSize.zw;
+            const float3 SampledValue = RWFilteredTex[SamplePixel].rgb;
+            const float SampledSSAO = SSAOTex.SampleLevel(PointClampSampler, SampleUV,0).r;
+            const float3 SampledNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, SampleUV,0).xyz));
+            const float SampleDepth = DepthTexture.SampleLevel(PointClampSampler, SampleUV,0).r;
+
+            if (SampleDepth != 0 && SampleIndex < Spp)
+            {
+                float wt = 1;
+                float Ndot = dot(SampledNormal, CenterNormal);
+                wt *= exp2(-100.0 * abs( Ndot * (CenterDepth / SampleDepth - 1.0)));
+                // const float weightNormal  = pow(saturate(Ndot), 20);
+                // const float weightZ       = abs( CenterDepth/ SampleDepth -1.0);
+                // // const float weightLillum  = abs( Luminance(CenterValue) - Luminance(SampledValue) );
+                // const float weightLillum = 0.0;
+                // wt   *= exp(0.0 - max(weightLillum, 0.0) - max(weightZ, 0.0)) * weightNormal;
+
+                #if USE_SSAO_STEERING
+                    wt *= exp2(-10.0 * abs(SampledSSAO - CenterSSAO));
+                #endif
+
+                Sum += float4(Crunch(SampledValue), 1.0) * wt;
+            }
+        }
+    }
+
+    float NormFactor = 1.0 / max(1e-5, Sum.a);
+    float3 filtered = UnCrunch(Sum.rgb * NormFactor);
+
+    RWFilteredTex[PixelCoord] = float4(filtered, 1.0);
+#endif
+}
