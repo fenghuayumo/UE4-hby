@@ -95,12 +95,12 @@ static TAutoConsoleVariable<float> CVarAOHistoryConvolutionKernelSpreadFactor(
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGIReconstructionSampleCount(
-	TEXT("r.GlobalIllumination.Denoiser.ReconstructionSamples"), 16,
-	TEXT("Maximum number of samples for the reconstruction pass (default = 16)."),
+	TEXT("r.GlobalIllumination.Denoiser.ReconstructionSamples"), 1,
+	TEXT("Maximum number of samples for the reconstruction pass (default = 1)."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGIPreConvolutionCount(
-	TEXT("r.GlobalIllumination.Denoiser.PreConvolution"), 1,
+	TEXT("r.GlobalIllumination.Denoiser.PreConvolution"), 0,
 	TEXT("Number of pre-convolution passes (default = 1)."),
 	ECVF_RenderThreadSafe);
 
@@ -1594,47 +1594,49 @@ static void DenoiseSignalAtConstantPixelDensity(
 	}
 
 	// Spatial pre convolutions
-	for (int32 PreConvolutionId = 0; PreConvolutionId < Settings.PreConvolutionCount; PreConvolutionId++)
+	//if (Settings.SignalProcessing != ESignalProcessing::DiffuseAndAmbientOcclusion)
 	{
-		check(SignalUsesPreConvolution(Settings.SignalProcessing));
+		for (int32 PreConvolutionId = 0; PreConvolutionId < Settings.PreConvolutionCount; PreConvolutionId++)
+		{
+			check(SignalUsesPreConvolution(Settings.SignalProcessing));
 
-		FSSDSignalTextures NewSignalOutput = CreateMultiplexedTextures(
-			GraphBuilder,
-			ReconstructionTextureCount, ReconstructionDescs,
-			GetResourceNames(kPreConvolutionResourceNames));
+			FSSDSignalTextures NewSignalOutput = CreateMultiplexedTextures(
+				GraphBuilder,
+				ReconstructionTextureCount, ReconstructionDescs,
+				GetResourceNames(kPreConvolutionResourceNames));
 
-		FSSDSpatialAccumulationCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FSSDSpatialAccumulationCS::FParameters>();
-		PassParameters->CommonParameters = CommonParameters;
-		PassParameters->ConvolutionMetaData = ConvolutionMetaData;
+			FSSDSpatialAccumulationCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FSSDSpatialAccumulationCS::FParameters>();
+			PassParameters->CommonParameters = CommonParameters;
+			PassParameters->ConvolutionMetaData = ConvolutionMetaData;
 
-		PassParameters->MaxSampleCount = Settings.ReconstructionSamples;
-		PassParameters->PreviousCumulativeMaxSampleCount = FMath::Pow(PassParameters->MaxSampleCount, 1 + PreConvolutionId);
-		PassParameters->KernelSpreadFactor = Settings.KernelSpreadFactor * (1 << PreConvolutionId);
-		PassParameters->SignalInput = SignalHistory;
-		PassParameters->SignalOutput = CreateMultiplexedUAVs(GraphBuilder, NewSignalOutput);
-		
-		PassParameters->DebugOutput = CreateDebugUAV(TEXT("DebugDenoiserPreConvolution"));
+			PassParameters->MaxSampleCount = Settings.ReconstructionSamples;
+			PassParameters->PreviousCumulativeMaxSampleCount = FMath::Pow(PassParameters->MaxSampleCount, 1 + PreConvolutionId);
+			PassParameters->KernelSpreadFactor = Settings.KernelSpreadFactor * (1 << PreConvolutionId);
+			PassParameters->SignalInput = SignalHistory;
+			PassParameters->SignalOutput = CreateMultiplexedUAVs(GraphBuilder, NewSignalOutput);
 
-		FSSDSpatialAccumulationCS::FPermutationDomain PermutationVector;
-		PermutationVector.Set<FSignalProcessingDim>(Settings.SignalProcessing);
-		PermutationVector.Set<FSignalBatchSizeDim>(Settings.SignalBatchSize);
-		PermutationVector.Set<FSSDSpatialAccumulationCS::FStageDim>(FSSDSpatialAccumulationCS::EStage::PreConvolution);
-		PermutationVector.Set<FMultiSPPDim>(true);
+			PassParameters->DebugOutput = CreateDebugUAV(TEXT("DebugDenoiserPreConvolution"));
 
-		TShaderMapRef<FSSDSpatialAccumulationCS> ComputeShader(View.ShaderMap, PermutationVector);
-		FComputeShaderUtils::AddPass(
-			GraphBuilder,
-			RDG_EVENT_NAME(
-				"SSD PreConvolution(MaxSamples=%d Spread=%f)", 
-				PassParameters->MaxSampleCount,
-				PassParameters->KernelSpreadFactor),
-			ComputeShader,
-			PassParameters,
-			FComputeShaderUtils::GetGroupCount(Viewport.Size(), FSSDSpatialAccumulationCS::kGroupSize));
+			FSSDSpatialAccumulationCS::FPermutationDomain PermutationVector;
+			PermutationVector.Set<FSignalProcessingDim>(Settings.SignalProcessing);
+			PermutationVector.Set<FSignalBatchSizeDim>(Settings.SignalBatchSize);
+			PermutationVector.Set<FSSDSpatialAccumulationCS::FStageDim>(FSSDSpatialAccumulationCS::EStage::PreConvolution);
+			PermutationVector.Set<FMultiSPPDim>(true);
 
-		SignalHistory = NewSignalOutput;
+			TShaderMapRef<FSSDSpatialAccumulationCS> ComputeShader(View.ShaderMap, PermutationVector);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME(
+					"SSD PreConvolution(MaxSamples=%d Spread=%f)",
+					PassParameters->MaxSampleCount,
+					PassParameters->KernelSpreadFactor),
+				ComputeShader,
+				PassParameters,
+				FComputeShaderUtils::GetGroupCount(Viewport.Size(), FSSDSpatialAccumulationCS::kGroupSize));
+
+			SignalHistory = NewSignalOutput;
+		}
 	}
-
 	bool bExtractSceneDepth = false;
 	bool bExtractSceneGBufferA = false;
 	bool bExtractSceneGBufferB = false;

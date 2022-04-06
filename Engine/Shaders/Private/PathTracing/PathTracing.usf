@@ -54,11 +54,7 @@ RWTexture2D<float4> NormalTexture;
 RaytracingAccelerationStructure TLAS;
 int3 TileOffset;
 uint SceneVisibleLightCount;
-// RWTexture2D<float4> CurrentRadianceTexture;
-// RWTexture2D<float4> RWSampleRecord;
-// RWTexture2D<uint2> RWSampleSpp;
-// int AdaptiveThresholdSpp;
-// int StepSpp;
+
 void AccumulateRadiance(inout float3 TotalRadiance, float3 PathRadiance, bool bIsCameraRay)
 {
 	// User asked for path contributions to be clamped to reduce fireflies.
@@ -506,27 +502,6 @@ RAY_TRACING_ENTRY_RAYGEN(PathTracingMainRG)
 	}
 	PixelIndex = PixelIndex + TileOffset.xy;
 	uint2 LaunchIndex = PixelIndex + View.ViewRectMin.xy;
-
-// #if ENABLE_ADAPTIVE
-//     //   基本的思想是： 
-// 	//        1.  首先渲染过程是分为一个迭代过程的，每次迭代的时候判断一下是否启用了自适应如果用了自适应算法就计算tile内误差，并根据误差分配spp
-// 	//		      否则，每个tile分配的spp是一样的.
-// 	//        2.  然后渲染每个tile内的像素，读取每个tile分配的spp， 对tile内的每个像素执行spp 次trace 过程计算
-// 	//		  
-
-// 	//判断当前spp是否到达开启自适应阈值的spp, 如果是的话，则读取RWSampleSpp中存取的当前迭代的spp和需要的spp数量（每个tile不同）
-// 	//如果当前spp 已经大于NextSpp说明当前tile内的像素已经执行完当前迭代过程，
-// 	if( Iteration >= AdaptiveThresholdSpp )
-// 	{
-// 		uint2 VarPixelIndex = uint2(PixelIndex.x /VARIANCE_TILE_SIZE, PixelIndex.y/VARIANCE_TILE_SIZE);
-// 		float Error = RWSampleRecord[VarPixelIndex].w;
-// 		// if( Error < AdaptiveErrorThrehold) return;
-// 		uint2 CurrentAndNextSpp = RWSampleSpp[VarPixelIndex].xy;
-// 		uint CurrentSpp = CurrentAndNextSpp.x; uint NextSpp = CurrentAndNextSpp.y;
-// 		if( CurrentSpp >= NextSpp)
-// 			return;
-// 	}
-// #endif
 	// Initialize random sequence 
 	RandomSequence RandSequence;
 
@@ -819,15 +794,7 @@ RAY_TRACING_ENTRY_RAYGEN(PathTracingMainRG)
 
 	// Accumulate radiance and update pixel variance
 	uint NumSamples = Iteration + 1;
-	// #if ENABLE_ADAPTIVE
-	// 	uint2 VarPixelIndex = uint2(PixelIndex.x /VARIANCE_TILE_SIZE, PixelIndex.y/VARIANCE_TILE_SIZE);
-	// 	float sampleCount = RWSampleRecord[VarPixelIndex].x;
-	// 	float spp = sampleCount / (VARIANCE_TILE_SIZE * VARIANCE_TILE_SIZE);
-	// 	float BlendFactor = 1.0 / (1+spp);
-	//	// CurrentRadianceTexture[PixelIndex] = float4(Radiance, 0);
-	// #else
 	float BlendFactor = 1.0 / float(NumSamples);
-	// #endif
 
 	// Avoid reading the old pixel on the first sample on the off-chance there is a NaN/Inf pixel ...
 	float4 OldPixel = NumSamples > 1 ? RadianceTexture[PixelIndex] : 0;

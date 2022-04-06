@@ -69,17 +69,17 @@ static TAutoConsoleVariable<int32> CVarRayTracingRestirGIEnableTemporalBias(
 );
 
 static TAutoConsoleVariable<float> CVarRestirGISpatialSamplingRadius(
-	TEXT("r.RayTracing.RestirGI.Spatial.SamplingRadius"), 32.0f,
-	TEXT("Spatial radius for sampling in pixels (Default 32.0)"),
+	TEXT("r.RayTracing.RestirGI.Spatial.SamplingRadius"), 16.0f,
+	TEXT("Spatial radius for sampling in pixels (Default 16.0)"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarRestirGISpatialSamples(
-	TEXT("r.RayTracing.RestirGI.Spatial.Samples"), 1,
+	TEXT("r.RayTracing.RestirGI.Spatial.Samples"), 2,
 	TEXT("Spatial samples per pixel"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarRestirGISpatialSamplesBoost(
-	TEXT("r.RayTracing.RestirGI.Spatial.SamplesBoost"), 8,
+	TEXT("r.RayTracing.RestirGI.Spatial.SamplesBoost"), 4,
 	TEXT("Spatial samples per pixel when invalid history is detected"),
 	ECVF_RenderThreadSafe);
 
@@ -203,6 +203,12 @@ static TAutoConsoleVariable<float> CVarRayTracingGIMipBias(
 	TEXT("Improves ray tracing globalIllumination performance at the cost of lower resolution textures in gi. Values are clamped to range [0..15].\n"),
 	ECVF_RenderThreadSafe
 );
+
+static TAutoConsoleVariable<float> CVarPlaneDistanceRejectionThreshold(
+	TEXT("r.Fusion.Temporal.PlaneDistanceRejectionThreshold"), 50.0f,
+	TEXT("Rejection threshold for rejecting samples based on plane distance differences (default 50.0)"),
+	ECVF_RenderThreadSafe);
+
 
 DECLARE_GPU_STAT_NAMED(RayTracingDeferedGI, TEXT("Ray Tracing GI: Defered"));
 
@@ -910,7 +916,7 @@ class FRestirGISpatialResampling : public FGlobalShader
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
 
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
-
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSAOTex)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FRestirGICommonParameters, RestirGICommonParameters)
 
 		SHADER_PARAMETER_SRV(Buffer<float2>, NeighborOffsets)
@@ -1142,6 +1148,103 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingDeferredGIDeferredMaterial(
 
 #else
 #endif
+
+
+class FReprojectionMapCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FReprojectionMapCS)
+	SHADER_USE_PARAMETER_STRUCT(FReprojectionMapCS, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		//OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.CompilerFlags.Add(CFLAG_ForceDXC);
+		OutEnvironment.SetDefine(TEXT("THREAD_BLOCK_SIZE"), GetThreadBlockSize());
+	}
+
+	static uint32 GetThreadBlockSize()
+	{
+		return 8;
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+      
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D, NormalTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthTexture)
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D, VelocityTexture)
+
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthHistory)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, NormalHistory)
+        SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWReprojectionTex)
+
+		SHADER_PARAMETER_SAMPLER(SamplerState, PointClampSampler)
+		SHADER_PARAMETER_SAMPLER(SamplerState, LinearClampSampler)
+		SHADER_PARAMETER(FVector4, BufferTexSize)
+        SHADER_PARAMETER(float, TemporalNormalRejectionThreshold)
+        SHADER_PARAMETER(float, TemporalDepthRejectionThreshold)
+        SHADER_PARAMETER(float, PlaneDistanceRejectionThrehold)
+        
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
+
+	END_SHADER_PARAMETER_STRUCT()
+};
+IMPLEMENT_GLOBAL_SHADER(FReprojectionMapCS, "/Engine/Private/RestirGI/ReprojectionMap.usf", "ReprojectionMapCS", SF_Compute);
+
+void CalculateProjectionMap(FRDGBuilder& GraphBuilder, FViewInfo& View,  const FSceneTextureParameters& SceneTextures)
+{
+	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
+   
+    FRDGTextureRef GBufferATexture = SceneTextures.GBufferATexture;
+    FRDGTextureRef GBufferBTexture = SceneTextures.GBufferBTexture;
+    FRDGTextureRef GBufferCTexture = SceneTextures.GBufferCTexture;
+    FRDGTextureRef SceneDepthTexture = SceneTextures.SceneDepthTexture;
+    FRDGTextureRef SceneVelocityTexture = SceneTextures.GBufferVelocityTexture;
+
+	FIntPoint TexSize = SceneTextures.SceneDepthTexture->Desc.Extent;
+	//FIntPoint TexSize = FIntPoint(SceneTextures.SceneDepthTexture->Desc.Extent.X* Config.ResolutionFraction, SceneTextures.SceneDepthTexture->Desc.Extent.Y * Config.ResolutionFraction);
+    FVector4 BufferTexSize = FVector4(TexSize.X, TexSize.Y, 1.0 / TexSize.X, 1.0 / TexSize.Y);
+
+    FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(
+        SceneTextures.SceneDepthTexture->Desc.Extent,
+        PF_FloatRGBA,
+        FClearValueBinding::None,
+        TexCreate_ShaderResource | TexCreate_RenderTargetable | TexCreate_UAV);
+	auto ReprojectionTex =  GraphBuilder.CreateTexture(Desc, TEXT("ReprojectionTex"));
+
+	FReprojectionMapCS::FPermutationDomain PermutationVector;
+	TShaderMapRef<FReprojectionMapCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5), PermutationVector);
+	FReprojectionMapCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReprojectionMapCS::FParameters>();
+	
+	PassParameters->NormalHistory = RegisterExternalTextureWithFallback(GraphBuilder, View.PrevViewInfo.GBufferA, GSystemTextures.BlackDummy);
+	PassParameters->DepthHistory = RegisterExternalTextureWithFallback(GraphBuilder, View.PrevViewInfo.DepthBuffer, GSystemTextures.BlackDummy);
+
+	PassParameters->NormalTexture = GBufferATexture;
+	PassParameters->DepthTexture = SceneDepthTexture;
+	PassParameters->VelocityTexture = SceneVelocityTexture;
+	PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+	PassParameters->TemporalNormalRejectionThreshold = CVarRestirGISpatialNormalRejectionThreshold.GetValueOnRenderThread();
+	PassParameters->TemporalDepthRejectionThreshold = CVarRestirGISpatialDepthRejectionThreshold.GetValueOnRenderThread();
+	PassParameters->PlaneDistanceRejectionThrehold = CVarPlaneDistanceRejectionThreshold.GetValueOnRenderThread();
+	PassParameters->RWReprojectionTex = GraphBuilder.CreateUAV(ReprojectionTex);
+	PassParameters->BufferTexSize = BufferTexSize;
+	ClearUnusedGraphResources(ComputeShader, PassParameters);
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("ReprojectionMapCS"),
+		ComputeShader,
+		PassParameters,
+		FComputeShaderUtils::GetGroupCount(TexSize, FReprojectionMapCS::GetThreadBlockSize()));
+	View.ProjectionMapTexture = ReprojectionTex;
+}
 
 void GenerateInitialSample(FRDGBuilder& GraphBuilder, 
 	FSceneTextureParameters& SceneTextures,
@@ -1443,6 +1546,7 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 {
 	RDG_GPU_STAT_SCOPE(GraphBuilder, RayTracingGIRestir);
 	RDG_EVENT_SCOPE(GraphBuilder, "Ray Tracing GI: RestirGI");
+	CalculateProjectionMap(GraphBuilder, View, SceneTextures);
 
 	float MaxShadowDistance = 1.0e27;
 	if (GRayTracingGlobalIlluminationMaxShadowDistance > 0.0)
@@ -1596,6 +1700,8 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 		{
 		if (CVarRestirGISpatial.GetValueOnRenderThread() != 0)
 		{
+			FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
+
 			FRestirGISpatialResampling::FParameters* PassParameters = GraphBuilder.AllocParameters<FRestirGISpatialResampling::FParameters>();
 
 			PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
@@ -1615,6 +1721,7 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 			PassParameters->NeighborOffsetMask = GRestirGIDiscSampleBuffer.NumSamples - 1;
 			PassParameters->NeighborOffsets = GRestirGIDiscSampleBuffer.DiscSampleBufferSRV;
 
+			PassParameters->SSAOTex	= GraphBuilder.RegisterExternalTexture(SceneContext.ScreenSpaceAO);
 			PassParameters->RestirGICommonParameters = CommonParameters;
 
 			FRestirGISpatialResampling::FPermutationDomain PermutationVector;

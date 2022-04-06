@@ -137,7 +137,7 @@ struct RTXGI_SampleRef
 
 // Use 24-bit unsigned float to enable extra precision and keep the reservior in a single 128-bit quantity
 #define CUSTOM_FLOAT 1
-
+#define RESTIR_RESERVOIR_W_CLAMP 5.0
 struct RTXGI_Reservoir
 {
 	static const uint MaxM = 0xffff;
@@ -210,6 +210,7 @@ struct RTXGI_Reservoir
 		float denominator = targetPdf * normalizationDenominator;
 
 		weightSum = (denominator == 0.0) ? 0.0 : (weightSum * normalizationNumerator) / denominator;
+		weightSum = min(weightSum, RESTIR_RESERVOIR_W_CLAMP);
 	}
 
 	bool StreamSample(RTXGI_SampleRef newSampleRef, float random, float newTargetPdf, float invSourcePdf)

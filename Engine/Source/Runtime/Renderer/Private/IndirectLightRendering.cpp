@@ -25,7 +25,7 @@ static TAutoConsoleVariable<bool> CVarGlobalIlluminationExperimentalPluginEnable
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarDiffuseIndirectDenoiser(
-	TEXT("r.DiffuseIndirect.Denoiser"), 1,
+	TEXT("r.DiffuseIndirect.Denoiser"), 2,
 	TEXT("Denoising options (default = 1)")
 	TEXT("2 Fusion Denoiser"),
 	ECVF_RenderThreadSafe);

@@ -850,7 +850,7 @@ void RenderScreenSpaceDiffuseIndirect(
 	IScreenSpaceDenoiser::FDiffuseIndirectInputs* OutDenoiserInputs)
 {
 	check(ShouldRenderScreenSpaceDiffuseIndirect(View));
-
+	RDG_GPU_STAT_SCOPE(GraphBuilder, ScreenSpaceDiffuseIndirect);
 	const int32 Quality = FMath::Clamp( CVarSSGIQuality.GetValueOnRenderThread(), 1, 4 );
 
 	bool bHalfResolution = IsSSGIHalfRes();

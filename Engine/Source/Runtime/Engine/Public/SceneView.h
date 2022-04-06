@@ -1193,7 +1193,9 @@ public:
 	FIESLightProfileResource* IESLightProfileResource;
 	FIESLightProfile2DResource* IESLightProfile2DResource;
 #endif
-
+	//
+	// TRefCountPtr<IPooledRenderTarget>	ProjectionMapTexture;
+	FRDGTextureRef	ProjectionMapTexture;
 protected:
 	friend class FSceneRenderer;
 

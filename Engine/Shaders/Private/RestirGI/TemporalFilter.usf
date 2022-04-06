@@ -19,11 +19,14 @@ RWTexture2D<float4> RWOutputTex;
 RWTexture2D<float4> RWHistoryTex;
 RWTexture2D<float2> RWVarianceTex;
 
+Texture2D   ReprojectionTex;
+
 SamplerState        LinearClampSampler;
 SamplerState        PointClampSampler;  
 float4              BufferTexSize;
 float               TemporalNormalRejectionThreshold;
 float               TemporalDepthRejectionThreshold;
+
 
 float3 rgb_to_ycbcr(float3 col) 
 {
@@ -56,16 +59,112 @@ float4 crunched_luma_chroma_to_linear_rgb(float4 v)
 #define working_to_linear crunched_luma_chroma_to_linear_rgb
 float working_luma(float3 v) { return v.x; }
 
+
+// [numthreads(8, 8, 1)]
+// void main(uint2 px: SV_DispatchThreadID) 
+// {
+//     float2 uv = (float2(px) + 0.5) * BufferTexSize.zw;
+//     float4 center = HistoryTex[px];
+//     float4 reproj = ReprojectionTex[px];
+//     float2 prev_uv = uv - reproj.xy;
+
+//     uint QuadReprojValidPacked = uint(reproj.z * 15.0 + 0.5);
+
+//     // For the sharpening (4x4) kernel, we need to know whether our neighbors are valid too,
+//     // as otherwise we end up over-sharpening with fake history (moving edges rather than scene features).
+//     const uint4 ReprojValidNeigh =
+//         uint4(ReprojectionTex.GatherBlue(PointClampSampler, uv + 0.5 * sign(prev_uv) * BufferTexSize.zw) * 15.0 + 0.5);
+
+//     float4 history = 0.0.xxxx;
+
+//     if (0 == QuadReprojValidPacked) {
+//         // Everything invalid
+//     } else if (15 == QuadReprojValidPacked) {
+//         if (all(ReprojValidNeigh == 15)) {
+//             history = max(0.0.xxxx, ImageSampleCatmullRom(HistoryTex, prev_uv,BufferTexSize.xy));
+//         } else {
+//             history = HistoryTex.SampleLevel(LinearClampSampler, prev_uv, 0);
+//         }
+//     } else {
+//         // Only some samples are valid. Only include those, and don't do a sharpening fetch here.
+
+//         float4 quad_reproj_valid = (QuadReprojValidPacked & uint4(1, 2, 4, 8)) != 0;
+
+//         const Bilinear bilinear = GetBilinearFilter(prev_uv, BufferTexSize.xy);
+//         float4 s00 = HistoryTex[int2(bilinear.Origin) + int2(0, 0)];
+//         float4 s10 = HistoryTex[int2(bilinear.Origin) + int2(1, 0)];
+//         float4 s01 = HistoryTex[int2(bilinear.Origin) + int2(0, 1)];
+//         float4 s11 = HistoryTex[int2(bilinear.Origin) + int2(1, 1)];
+
+//         float4 weights = GetBilinearCustomWeights(bilinear, quad_reproj_valid);
+
+//         if (dot(weights, 1.0) > 1e-5) {
+//             history = ApplyBilinearCustomWeights(s00, s10, s01, s11, weights);
+//         }
+//     }
+
+//     RWHistoryTex[px] = history;
+// }
+
+#define RESET_HISTORY 0
+#define REPROJECT_HISTORY 1
 static const int TARGET_COUNT = 32;
 [numthreads(8, 8, 1)]
 void TemporalFilter(uint2 DispatchThreadId: SV_DispatchThreadID) 
 {
-#if RESET_HISTORY   //first frame
+#if DIM_STAGE == RESET_HISTORY   //first frame
     float4 Current = linear_to_working(InputTex[DispatchThreadId]);
     const float CurrentLum = working_luma(Current.xyz);
     const float2 CurrentMoment = float2(max(0,CurrentLum), CurrentLum * CurrentLum);
     RWVarianceTex[DispatchThreadId] = CurrentMoment;
     RWHistoryTex[DispatchThreadId] = working_to_linear(float4(Current.xyz, 1.0));
+#elif DIM_STAGE == REPROJECT_HISTORY
+    uint2 px = DispatchThreadId;
+    float2 uv = (float2(px) + 0.5) * BufferTexSize.zw;
+    float4 center = HistoryTex[px];
+    float4 reproj = ReprojectionTex[px];
+    float2 prev_uv = uv + reproj.xy;
+
+    uint QuadReprojValidPacked = uint(reproj.z * 15.0 + 0.5);
+
+    // For the sharpening (4x4) kernel, we need to know whether our neighbors are valid too,
+    // as otherwise we end up over-sharpening with fake history (moving edges rather than scene features).
+    const uint4 ReprojValidNeigh =
+        uint4(ReprojectionTex.GatherBlue(PointClampSampler, uv + 0.5 * sign(prev_uv) * BufferTexSize.zw) * 15.0 + 0.5);
+
+    float4 history = 0.0.xxxx;
+
+    if (0 == QuadReprojValidPacked) 
+    {
+        // Everything invalid
+    } 
+    else if (15 == QuadReprojValidPacked) 
+    {
+        if (all(ReprojValidNeigh == 15)) 
+            history = max(0.0.xxxx, ImageSampleCatmullRom(HistoryTex, prev_uv,BufferTexSize.xy));
+        else
+            history = HistoryTex.SampleLevel(LinearClampSampler, prev_uv, 0);
+
+    }
+    else 
+    {
+        // Only some samples are valid. Only include those, and don't do a sharpening fetch here.
+
+        float4 quad_reproj_valid = (QuadReprojValidPacked & uint4(1, 2, 4, 8)) != 0;
+
+        const Bilinear bilinear = GetBilinearFilter(saturate(prev_uv), BufferTexSize.xy);
+        float4 s00 = HistoryTex[int2(bilinear.Origin) + int2(0, 0)];
+        float4 s10 = HistoryTex[int2(bilinear.Origin) + int2(1, 0)];
+        float4 s01 = HistoryTex[int2(bilinear.Origin) + int2(0, 1)];
+        float4 s11 = HistoryTex[int2(bilinear.Origin) + int2(1, 1)];
+
+        float4 weights = GetBilinearCustomWeights(bilinear, quad_reproj_valid);
+
+        if (dot(weights, 1.0) > 1e-5) 
+            history = ApplyBilinearCustomWeights(s00, s10, s01, s11, weights);
+    }
+
+    RWHistoryTex[px] = history;
 #else
     uint2 PixelCoord = DispatchThreadId;
     // Backproject this pixel to last frame
@@ -73,83 +172,82 @@ void TemporalFilter(uint2 DispatchThreadId: SV_DispatchThreadID)
     int2 PrevPos = DispatchThreadId;
 
     float2 ViewUV = (float2(PixelCoord) + 0.5) * BufferTexSize.zw;
-    float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, ViewUV,0).r;
-    const float3 CurrentNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, ViewUV,0).xyz));
+    float4 Reproject = ReprojectionTex[PixelCoord];
+    float2 PrevUV = ViewUV + Reproject.xy;
+    // float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, ViewUV,0).r;
+    // const float3 CurrentNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, ViewUV,0).xyz));
 
-    float2 PrevUV = ViewUV;
-    float4 NDC = float4(ViewUV * float2(2, -2) + float2(-1, 1), DeviceZ, 1);
+    // float2 PrevUV = ViewUV ;
+    // float4 NDC = float4(ViewUV * float2(2, -2) + float2(-1, 1), DeviceZ, 1);
 
-	float4 GVelocity = VelocityTexture.SampleLevel(PointClampSampler, ViewUV, 0);
+	// float4 GVelocity = VelocityTexture.SampleLevel(PointClampSampler, ViewUV, 0);
 
-    float ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ);
-    if (GVelocity.x > 0.0)
-    {
-        float3 Velocity = DecodeVelocityFromTexture(GVelocity);
-        float2 PrevNDC = NDC.xy - Velocity.xy;
-        PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
-        PrevPos = PrevUV * BufferTexSize.xy;
-        ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ - Velocity.z);
-    }
-    else
-    {
-        float4 PrevNDC = mul(NDC, View.ClipToPrevClip);
-        PrevNDC.xyz /= PrevNDC.w;
-        PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
-        PrevPos = PrevUV * BufferTexSize.xy;
-		ExpectedPrevLinearDepth = ConvertFromDeviceZ(PrevNDC.z);
-    }
-    float3  PrevNormal = CurrentNormal;
-    float   PrevLinearDepth = ExpectedPrevLinearDepth;
-    // Try to find a matching surface in the neighborhood of the reprojected pixel
-    int2 offsets[4] = { int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1) };
-    float4 quadValid = 0.0;
-    for (int i = 0; i < 4; i++)
-    {
-        int2 offset = 0;
-        if (i > 0)
-        {
-            offset = offsets[i];
-        }
-        int2 idx = PrevPos + offset;
-        if( idx.x >= BufferTexSize.x || idx.x < 0 || idx.y >= BufferTexSize.y || idx.y < 0 )
-            continue;
+    // float ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ);
+    // if (GVelocity.x > 0.0)
+    // {
+    //     float3 Velocity = DecodeVelocityFromTexture(GVelocity);
+    //     float2 PrevNDC = NDC.xy - Velocity.xy;
+    //     PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+    //     PrevPos = PrevUV * BufferTexSize.xy;
+    //     ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ - Velocity.z);
+    // }
+    // else
+    // {
+    //     float4 PrevNDC = mul(NDC, View.ClipToPrevClip);
+    //     PrevNDC.xyz /= PrevNDC.w;
+    //     PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+    //     PrevPos = PrevUV * BufferTexSize.xy;
+	// 	ExpectedPrevLinearDepth = ConvertFromDeviceZ(PrevNDC.z);
+    // }
+    // float3  PrevNormal = CurrentNormal;
+    // float   PrevLinearDepth = ExpectedPrevLinearDepth;
+    // // Try to find a matching surface in the neighborhood of the reprojected pixel
+    // int2 offsets[4] = { int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1) };
+    // float4 quadValid = 0.0;
+    // for (int i = 0; i < 4; i++)
+    // {
+    //     int2 offset = offsets[i];
+    //     int2 idx = PrevPos + offset;
+    //     if( idx.x >= BufferTexSize.x || idx.x < 0 || idx.y >= BufferTexSize.y || idx.y < 0 )
+    //         continue;
+        
+    //     float2 IdxUV = (idx + 0.5) * BufferTexSize.zw;
+    //     float PrevDepth = ConvertFromDeviceZ(DepthHistory.SampleLevel(PointClampSampler, IdxUV,0).r);
+    //     float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory.SampleLevel(PointClampSampler, IdxUV,0).xyz));
+    //     // TODO: refine sample rejection tests
+    //     if (dot(CurrentNormal, PrevWorldNormal) < TemporalNormalRejectionThreshold)
+    //     {
+    //         continue;
+    //     }
 
-        float PrevDepth = ConvertFromDeviceZ(DepthHistory[idx].r);
-        float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory[idx].xyz));
-        // TODO: refine sample rejection tests
-        if (dot(CurrentNormal, PrevWorldNormal) < TemporalNormalRejectionThreshold)
-        {
-            continue;
-        }
+    //     if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > TemporalDepthRejectionThreshold)
+    //     {
+    //         continue;
+    //     }
 
-        if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > TemporalDepthRejectionThreshold)
-        {
-            continue;
-        }
+    //     PrevLinearDepth = PrevDepth;
+    //     PrevNormal = PrevWorldNormal;
 
-        PrevLinearDepth = PrevDepth;
-        PrevNormal = PrevWorldNormal;
-
-        // PrevPos = idx;
-        // PrevUV = (PrevPos + 0.5) * BufferTexSize.zw; 
-        quadValid[i] = 1;
-    }
+    //     // PrevPos = idx;
+    //     // PrevUV = (PrevPos + 0.5) * BufferTexSize.zw; 
+    //     quadValid[i] = 1;
+    // }
  
-    const Bilinear bilinear = GetBilinearFilter(PrevUV, BufferTexSize.xy);
-    float4 s00 = HistoryTex[int2(bilinear.Origin) + int2(0, 0)];
-    float4 s10 = HistoryTex[int2(bilinear.Origin) + int2(1, 0)];
-    float4 s01 = HistoryTex[int2(bilinear.Origin) + int2(0, 1)];
-    float4 s11 = HistoryTex[int2(bilinear.Origin) + int2(1, 1)];
+    // const Bilinear bilinear = GetBilinearFilter(PrevUV, BufferTexSize.xy);
+    // float4 s00 = HistoryTex[int2(bilinear.Origin) + int2(0, 0)];
+    // float4 s10 = HistoryTex[int2(bilinear.Origin) + int2(1, 0)];
+    // float4 s01 = HistoryTex[int2(bilinear.Origin) + int2(0, 1)];
+    // float4 s11 = HistoryTex[int2(bilinear.Origin) + int2(1, 1)];
 
-    float4 weights = GetBilinearCustomWeights(bilinear, quadValid);
-    float4 History = 0.0;
-    if (dot(weights, 1.0) > 1e-5) 
-    {
-        History = linear_to_working(ApplyBilinearCustomWeights(s00, s10, s01, s11, weights));
-    }   
+    // float4 weights = GetBilinearCustomWeights(bilinear, quadValid);
+    // float4 History = 0.0;
+    // if (dot(weights, 1.0) > 1e-5) 
+    // {
+    //     History = linear_to_working(ApplyBilinearCustomWeights(s00, s10, s01, s11, weights));
+    // }   
 
     float4 Current = linear_to_working(InputTex[DispatchThreadId]);
-    //History = linear_to_working(HistoryTex[PrevPos]);
+    float4 History = linear_to_working(HistoryTex[PrevPos]);
 
     float4 ValueSum = 0;
     float4 ValueSum2 = 0;
@@ -201,9 +299,8 @@ void TemporalFilter(uint2 DispatchThreadId: SV_DispatchThreadID)
 
     const float VarianceAdjustedTemporalChange = smoothstep(0.1, 1.0, 0.05 * TemporalChange / TemporalDev);
 
-
     float HistorySpp = min(History.a, TARGET_COUNT);
-    float ClampBoxSize = lerp(0.25, 1.0, pow(saturate(HistorySpp / TARGET_COUNT), 2)) * 3;
+    float ClampBoxSize = lerp(0.25, 1.0, pow(saturate(HistorySpp / TARGET_COUNT), 2)) * 4;
     ClampBoxSize = max(ClampBoxSize, 0.5);
 
 	float4 NMin = Current - Dev * ClampBoxSize;

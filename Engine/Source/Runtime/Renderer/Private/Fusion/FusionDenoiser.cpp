@@ -23,6 +23,11 @@ static TAutoConsoleVariable<int32> CVarFusionSpatialEnabled(
 	TEXT("whether use spatial filter."),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarFusionTemporalEnabled(
+	TEXT("r.Fusion.GIDenoiser.Temporal"), 1,
+	TEXT("whether use Temporal filter."),
+	ECVF_RenderThreadSafe);
+
 static TAutoConsoleVariable<float> CVarDenoiserTemporalNormalRejectionThreshold(
 	TEXT("r.Fusion.GIDenoiser.Temporal.NormalRejectionThreshold"), 0.5f,
 	TEXT("Rejection threshold for rejecting samples based on normal differences (default 0.5)"),
@@ -33,14 +38,30 @@ static TAutoConsoleVariable<float> CVarDenoiserTemporalDepthRejectionThreshold(
 	TEXT("Rejection threshold for rejecting samples based on depth differences (default 0.1)"),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<float> CVarPlaneDistanceRejectionThreshold(
+	TEXT("r.Fusion.Temporal.PlaneDistanceRejectionThreshold"), 50.0f,
+	TEXT("Rejection threshold for rejecting samples based on plane distance differences (default 50.0)"),
+	ECVF_RenderThreadSafe);
+
+enum class ETemporalFilterStage
+{
+    ResetHistory = 0,
+    ReprojectHistory = 1,
+    TemporalAccum = 2,
+	MAX
+};
 
 class FDiffuseInDirectTemporalFilterCS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FDiffuseInDirectTemporalFilterCS)
 	SHADER_USE_PARAMETER_STRUCT(FDiffuseInDirectTemporalFilterCS, FGlobalShader)
 
-    class FResetHistoryDim : SHADER_PERMUTATION_BOOL("RESET_HISTORY");
-	using FPermutationDomain = TShaderPermutationDomain<FResetHistoryDim>;
+    // class FResetHistoryDim : SHADER_PERMUTATION_BOOL("RESET_HISTORY");
+    // class FReprojectHistoryDim : SHADER_PERMUTATION_BOOL("REPROJECT_HISTORY");
+	// using FPermutationDomain = TShaderPermutationDomain<FResetHistoryDim, FReprojectHistoryDim>;
+	class FStageDim : SHADER_PERMUTATION_ENUM_CLASS("DIM_STAGE", ETemporalFilterStage);
+    using FPermutationDomain = TShaderPermutationDomain<FStageDim>;
+
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
@@ -71,6 +92,7 @@ class FDiffuseInDirectTemporalFilterCS : public FGlobalShader
         SHADER_PARAMETER_RDG_TEXTURE(Texture2D, NormalTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthTexture)
         SHADER_PARAMETER_RDG_TEXTURE(Texture2D, VelocityTexture)
+         SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ReprojectionTex)
 
         SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthHistory)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, NormalHistory)
@@ -207,11 +229,12 @@ IScreenSpaceDenoiser::FDiffuseIndirectOutputs FFusionDenoiser::DenoiseDiffuseInd
     auto PreOutputTex =  GraphBuilder.CreateTexture(Desc, TEXT("DiffuseIndirectPreConvolution0"));
     auto OutputTex =  GraphBuilder.CreateTexture(Desc, TEXT("DenoisedDiffuse"));
     auto TemporalOutTex =  GraphBuilder.CreateTexture(Desc, TEXT("DiffuseIndirectTemporalAccumulation0"));
+    auto ReprojectedHistoryTex =  GraphBuilder.CreateTexture(Desc, TEXT("DiffuseIndirectReprojected"));
     Desc.Format = PF_G32R32F;
     auto VarianceTex = GraphBuilder.CreateTexture(Desc, TEXT("DiffuseVariance"));
     FRDGTextureRef TemporalHistTex = nullptr, VarianceHistTex = nullptr;
     bool ResetHistory = !PreviousViewInfos->FusionDiffuseIndirectHistory.RT[0];
- 
+    FRDGTextureRef OutputSignal = Inputs.Color;
     // else
     // {
     //     Desc.Format = PF_FloatRGBA;
@@ -239,7 +262,6 @@ IScreenSpaceDenoiser::FDiffuseIndirectOutputs FFusionDenoiser::DenoiseDiffuseInd
     CommonParameters.HaltonIteration = CreateUniformBufferImmediate(HaltonIteration, EUniformBufferUsage::UniformBuffer_SingleFrame);
     CommonParameters.HaltonPrimes = CreateUniformBufferImmediate(HaltonPrimes, EUniformBufferUsage::UniformBuffer_SingleFrame);
     CommonParameters.BlueNoise = CreateUniformBufferImmediate(BlueNoise, EUniformBufferUsage::UniformBuffer_SingleFrame);
-
     {
         FDiffuseInDirectSpatialFilterCS::FPermutationDomain PermutationVector;
 		PermutationVector.Set<FDiffuseInDirectSpatialFilterCS::FUseSSAODim>(CVarFusionSpatialUseSSAO.GetValueOnRenderThread() > 0);
@@ -267,48 +289,101 @@ IScreenSpaceDenoiser::FDiffuseIndirectOutputs FFusionDenoiser::DenoiseDiffuseInd
             ComputeShader,
             PassParameters,
             FComputeShaderUtils::GetGroupCount(TexSize, FDiffuseInDirectSpatialFilterCS::GetThreadBlockSize()));
+        OutputSignal = PreOutputTex;
     }
 
+    if( CVarFusionTemporalEnabled.GetValueOnRenderThread() > 0)
     {
-       
-        FDiffuseInDirectTemporalFilterCS::FPermutationDomain PermutationVector;
-        PermutationVector.Set<FDiffuseInDirectTemporalFilterCS::FResetHistoryDim>(ResetHistory);
-        TShaderMapRef<FDiffuseInDirectTemporalFilterCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5), PermutationVector);
-        FDiffuseInDirectTemporalFilterCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDiffuseInDirectTemporalFilterCS::FParameters>();
-        
-        if( !ResetHistory)
+        if( ResetHistory )
         {
-            PassParameters->HistoryTex = GraphBuilder.RegisterExternalTexture(PreviousViewInfos->FusionDiffuseIndirectHistory.RT[0]);
-            PassParameters->VarianceHistoryTex = GraphBuilder.RegisterExternalTexture(PreviousViewInfos->FusionDiffuseIndirectHistory.RT[1]);
+            FDiffuseInDirectTemporalFilterCS::FPermutationDomain PermutationVector;
+            PermutationVector.Set<FDiffuseInDirectTemporalFilterCS::FStageDim>(ETemporalFilterStage::ResetHistory);
+            TShaderMapRef<FDiffuseInDirectTemporalFilterCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5), PermutationVector);
+            FDiffuseInDirectTemporalFilterCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDiffuseInDirectTemporalFilterCS::FParameters>();
+            PassParameters->InputTex = PreOutputTex;
+            PassParameters->RWHistoryTex = GraphBuilder.CreateUAV(TemporalOutTex);
+            PassParameters->RWVarianceTex =  GraphBuilder.CreateUAV(VarianceTex);
+            ClearUnusedGraphResources(ComputeShader, PassParameters);
+            FComputeShaderUtils::AddPass(
+                GraphBuilder,
+                RDG_EVENT_NAME("FDiffuseIndirectTemporalFilter"),
+                ComputeShader,
+                PassParameters,
+                FComputeShaderUtils::GetGroupCount(TexSize, FDiffuseInDirectTemporalFilterCS::GetThreadBlockSize()));
+            OutputSignal = OutputTex;
+
         }
-        PassParameters->InputTex = PreOutputTex;
-        PassParameters->RWHistoryTex = GraphBuilder.CreateUAV(TemporalOutTex);
-        PassParameters->RWOutputTex = GraphBuilder.CreateUAV(OutputTex);
-        PassParameters->RWVarianceTex =  GraphBuilder.CreateUAV(VarianceTex);
-    
-        PassParameters->NormalHistory = RegisterExternalTextureWithFallback(GraphBuilder, View.PrevViewInfo.GBufferA, GSystemTextures.BlackDummy);
-		PassParameters->DepthHistory = RegisterExternalTextureWithFallback(GraphBuilder, View.PrevViewInfo.DepthBuffer, GSystemTextures.BlackDummy);
+        else
+        {
+            {
+                FDiffuseInDirectTemporalFilterCS::FPermutationDomain PermutationVector;
+                PermutationVector.Set<FDiffuseInDirectTemporalFilterCS::FStageDim>(ETemporalFilterStage::ReprojectHistory);
+                TShaderMapRef<FDiffuseInDirectTemporalFilterCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5), PermutationVector);
+                FDiffuseInDirectTemporalFilterCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDiffuseInDirectTemporalFilterCS::FParameters>();
+                PassParameters->HistoryTex = GraphBuilder.RegisterExternalTexture(PreviousViewInfos->FusionDiffuseIndirectHistory.RT[0]);
+                PassParameters->VarianceHistoryTex = GraphBuilder.RegisterExternalTexture(PreviousViewInfos->FusionDiffuseIndirectHistory.RT[1]);
 
-        PassParameters->NormalTexture = GBufferATexture;
-        PassParameters->DepthTexture = SceneDepthTexture;
-        PassParameters->VelocityTexture = SceneVelocityTexture;
-        PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-        PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-        PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
-        PassParameters->TemporalNormalRejectionThreshold = CVarDenoiserTemporalNormalRejectionThreshold.GetValueOnRenderThread();
-        PassParameters->TemporalDepthRejectionThreshold = CVarDenoiserTemporalDepthRejectionThreshold.GetValueOnRenderThread();
+                PassParameters->InputTex = PreOutputTex;
+                PassParameters->RWHistoryTex = GraphBuilder.CreateUAV(ReprojectedHistoryTex);
 
-        PassParameters->BufferTexSize = BufferTexSize;
-        ClearUnusedGraphResources(ComputeShader, PassParameters);
-        FComputeShaderUtils::AddPass(
-            GraphBuilder,
-            RDG_EVENT_NAME("FDiffuseIndirectTemporalFilter"),
-            ComputeShader,
-            PassParameters,
-            FComputeShaderUtils::GetGroupCount(TexSize, FDiffuseInDirectTemporalFilterCS::GetThreadBlockSize()));
+                PassParameters->ReprojectionTex = View.ProjectionMapTexture;
+
+                PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+                PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+                PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+           
+                PassParameters->BufferTexSize = BufferTexSize;
+                ClearUnusedGraphResources(ComputeShader, PassParameters);
+                FComputeShaderUtils::AddPass(
+                    GraphBuilder,
+                    RDG_EVENT_NAME("FDiffuseIndirectTemporalReproject"),
+                    ComputeShader,
+                    PassParameters,
+                    FComputeShaderUtils::GetGroupCount(TexSize, FDiffuseInDirectTemporalFilterCS::GetThreadBlockSize()));
+                OutputSignal = OutputTex;
+            }
+
+            {
+                FDiffuseInDirectTemporalFilterCS::FPermutationDomain PermutationVector;
+                PermutationVector.Set<FDiffuseInDirectTemporalFilterCS::FStageDim>(ETemporalFilterStage::TemporalAccum);
+                TShaderMapRef<FDiffuseInDirectTemporalFilterCS> ComputeShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5), PermutationVector);
+                FDiffuseInDirectTemporalFilterCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDiffuseInDirectTemporalFilterCS::FParameters>();
+                PassParameters->HistoryTex = ReprojectedHistoryTex;
+                //PassParameters->HistoryTex = GraphBuilder.RegisterExternalTexture(PreviousViewInfos->FusionDiffuseIndirectHistory.RT[0]);
+                PassParameters->VarianceHistoryTex = GraphBuilder.RegisterExternalTexture(PreviousViewInfos->FusionDiffuseIndirectHistory.RT[1]);
+            
+                PassParameters->InputTex = PreOutputTex;
+                PassParameters->RWHistoryTex = GraphBuilder.CreateUAV(TemporalOutTex);
+                PassParameters->RWOutputTex = GraphBuilder.CreateUAV(OutputTex);
+                PassParameters->RWVarianceTex =  GraphBuilder.CreateUAV(VarianceTex);
+            
+                PassParameters->NormalHistory = RegisterExternalTextureWithFallback(GraphBuilder, View.PrevViewInfo.GBufferA, GSystemTextures.BlackDummy);
+                PassParameters->DepthHistory = RegisterExternalTextureWithFallback(GraphBuilder, View.PrevViewInfo.DepthBuffer, GSystemTextures.BlackDummy);
+                PassParameters->ReprojectionTex = View.ProjectionMapTexture;
+
+                PassParameters->NormalTexture = GBufferATexture;
+                PassParameters->DepthTexture = SceneDepthTexture;
+                PassParameters->VelocityTexture = SceneVelocityTexture;
+                PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+                PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+                PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
+                PassParameters->TemporalNormalRejectionThreshold = CVarDenoiserTemporalNormalRejectionThreshold.GetValueOnRenderThread();
+                PassParameters->TemporalDepthRejectionThreshold = CVarDenoiserTemporalDepthRejectionThreshold.GetValueOnRenderThread();
+
+                PassParameters->BufferTexSize = BufferTexSize;
+                ClearUnusedGraphResources(ComputeShader, PassParameters);
+                FComputeShaderUtils::AddPass(
+                    GraphBuilder,
+                    RDG_EVENT_NAME("FDiffuseIndirectAccum"),
+                    ComputeShader,
+                    PassParameters,
+                    FComputeShaderUtils::GetGroupCount(TexSize, FDiffuseInDirectTemporalFilterCS::GetThreadBlockSize()));
+                OutputSignal = OutputTex;
+            }
+        }
     }
 
-    if (!View.bStatePrevViewInfoIsReadOnly)
+    if (!View.bStatePrevViewInfoIsReadOnly && CVarFusionTemporalEnabled.GetValueOnRenderThread() > 0)
 	{
 		//Extract history feedback here
 		GraphBuilder.QueueTextureExtraction(TemporalOutTex, &View.ViewState->PrevFrameViewInfo.FusionDiffuseIndirectHistory.RT[0]);
@@ -326,7 +401,7 @@ IScreenSpaceDenoiser::FDiffuseIndirectOutputs FFusionDenoiser::DenoiseDiffuseInd
         PassParameters->SSAOTex = GraphBuilder.RegisterExternalTexture(SceneContext.ScreenSpaceAO);
         PassParameters->NormalTexture = GBufferATexture;
         PassParameters->DepthTexture = SceneDepthTexture;
-        PassParameters->RWFilteredTex =  GraphBuilder.CreateUAV(OutputTex);
+        PassParameters->RWFilteredTex =  GraphBuilder.CreateUAV(OutputSignal);
         PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
         PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
         PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
@@ -340,11 +415,12 @@ IScreenSpaceDenoiser::FDiffuseIndirectOutputs FFusionDenoiser::DenoiseDiffuseInd
             ComputeShader,
             PassParameters,
             FComputeShaderUtils::GetGroupCount(TexSize, FDiffuseInDirectSpatialFilterCS::GetThreadBlockSize()));
+         OutputSignal = OutputTex;
     }
 
 
     FDiffuseIndirectOutputs GlobalIlluminationOutputs;
-    GlobalIlluminationOutputs.Color = OutputTex;
+    GlobalIlluminationOutputs.Color = OutputSignal;
     return GlobalIlluminationOutputs;
     //TODO: add restir gi denoiser, now use default denoiser
 	//return WrappedDenoiser->DenoiseDiffuseIndirect(GraphBuilder, View, PreviousViewInfos, SceneTextures, Inputs, Config);

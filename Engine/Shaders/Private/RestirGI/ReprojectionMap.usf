@@ -1,0 +1,144 @@
+#include "../Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "../ColorSpace.ush"
+#include "../Bilinear.ush"
+#include "../PositionReconstructionCommon.ush"
+
+Texture2D   DepthTexture;
+Texture2D   VelocityTexture;
+Texture2D   NormalTexture;
+
+Texture2D   DepthHistory;
+Texture2D   NormalHistory;
+RWTexture2D<float4> RWReprojectionTex;
+
+SamplerState        LinearClampSampler;
+SamplerState        PointClampSampler;  
+float4              BufferTexSize;
+float               TemporalNormalRejectionThreshold;
+float               TemporalDepthRejectionThreshold;
+float               PlaneDistanceRejectionThrehold;
+[numthreads(8, 8, 1)]
+void ReprojectionMapCS(uint2 px: SV_DispatchThreadID) 
+{
+    if ( any(px >= uint2(BufferTexSize.xy)) ) 
+        return;
+    float2 ViewUV = (float2(px) + 0.5) * BufferTexSize.zw;
+    float DeviceZ = DepthTexture[px].r;
+    float ViewZ = ConvertFromDeviceZ(DeviceZ);
+    bool bIsSky = ViewZ > 100 * 1000;
+    float4 NDC = float4(ViewUV * float2(2, -2) + float2(-1, 1), DeviceZ, 1);
+
+    if (DeviceZ <= 0.0 || bIsSky) 
+    {
+        float4 ViewPos = mul(NDC, View.ClipToView);
+        ViewPos.xyz /= ViewPos.w;
+
+        float4 PrevViewPos = ViewPos;
+        
+        float4 PrevClipPos = mul(PrevViewPos,View.ViewToClip);
+        float4 PrevNDC = mul(PrevClipPos, View.ClipToPrevClip);
+
+        float2 PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+        float2 uv_diff = PrevUV - ViewUV;
+        // float2 uv_diff = NDC - PrevNDC;
+        RWReprojectionTex[px] = float4(uv_diff,0, 0);
+        return;
+    }
+   
+    float2 PrevUV = ViewUV;
+    float4 GVelocity = VelocityTexture[px];
+    float2 PrevNDC = NDC.xy;
+    if (GVelocity.x > 0.0)
+    {
+        float3 Velocity = DecodeVelocityFromTexture(GVelocity);
+        PrevNDC = NDC.xy - Velocity.xy;
+        PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+    }
+    else
+    {
+        float4 PrevNDC = mul(NDC, View.ClipToPrevClip);
+        PrevNDC.xyz /= PrevNDC.w;
+        PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+    }
+    // float2 uv_diff = NDC - PrevNDC;
+    //PrevUV = saturate(PrevUV);
+    float2 uv_diff = PrevUV - ViewUV;
+    // uv_diff = floor(uv_diff * 32767.0 + 0.5) / 32767.0;
+
+    const float3 CurrentNormal = normalize(DecodeNormal(NormalTexture[px].xyz));
+      
+    const Bilinear BilinearAtPrev = GetBilinearFilter(saturate(PrevUV), BufferTexSize.xy);
+    float2 PrevGatherUV = (BilinearAtPrev.Origin + 1.0) * BufferTexSize.zw;
+    // float2 PrevGatherUV = PrevUV;
+    float4 PrevDepth = DepthHistory.GatherRed(PointClampSampler, PrevGatherUV).wzxy;
+    float4 PrevViewZ = float4(ConvertFromDeviceZ(PrevDepth.x), ConvertFromDeviceZ(PrevDepth.y), 
+                      ConvertFromDeviceZ(PrevDepth.z), ConvertFromDeviceZ(PrevDepth.w));
+    float4 QuadValidity = 1.0;
+
+    // QuadValidity *= step(abs(ViewZ - PrevViewZ) / ViewZ, TemporalDepthRejectionThreshold);
+    // float4 PrevWorldNormalX = NormalHistory.GatherRed(PointClampSampler, PrevGatherUV).wzxy;
+    // float4 PrevWorldNormalY = NormalHistory.GatherGreen(PointClampSampler, PrevGatherUV).wzxy;
+    // float4 PrevWorldNormalZ = NormalHistory.GatherBlue(PointClampSampler, PrevGatherUV).wzxy;
+    // QuadValidity.x *= step(TemporalNormalRejectionThreshold, dot(CurrentNormal, normalize(DecodeNormal(float3(PrevWorldNormalX.x, PrevWorldNormalY.x, PrevWorldNormalZ.x)))));
+    // QuadValidity.y *= step(TemporalNormalRejectionThreshold, dot(CurrentNormal, normalize(DecodeNormal(float3(PrevWorldNormalX.y, PrevWorldNormalY.y, PrevWorldNormalZ.y)))));
+    // QuadValidity.z *= step(TemporalNormalRejectionThreshold, dot(CurrentNormal, normalize(DecodeNormal(float3(PrevWorldNormalX.z, PrevWorldNormalY.z, PrevWorldNormalZ.z)))));
+    // QuadValidity.w *= step(TemporalNormalRejectionThreshold, dot(CurrentNormal, normalize(DecodeNormal(float3(PrevWorldNormalX.w, PrevWorldNormalY.w, PrevWorldNormalZ.w)))));
+
+    PrevGatherUV = saturate(PrevGatherUV);
+    float3 HistoryPos0 = ReconstructWorldPositionFromDepth(PrevGatherUV, PrevViewZ.x);
+    float3 HistoryPos1 = ReconstructWorldPositionFromDepth(PrevGatherUV, PrevViewZ.y);
+    float3 HistoryPos2 = ReconstructWorldPositionFromDepth(PrevGatherUV, PrevViewZ.z);
+    float3 HistoryPos3 = ReconstructWorldPositionFromDepth(PrevGatherUV, PrevViewZ.w);
+    float3 CurrentPos = ReconstructWorldPositionFromDepth(ViewUV, ViewZ);
+
+    QuadValidity.x  *= step( abs(dot(CurrentPos - HistoryPos0, CurrentNormal)), PlaneDistanceRejectionThrehold);
+    QuadValidity.y  *= step( abs(dot(CurrentPos - HistoryPos1, CurrentNormal)), PlaneDistanceRejectionThrehold);
+    QuadValidity.z  *= step( abs(dot(CurrentPos - HistoryPos2, CurrentNormal)), PlaneDistanceRejectionThrehold);
+    QuadValidity.w  *= step( abs(dot(CurrentPos - HistoryPos3, CurrentNormal)), PlaneDistanceRejectionThrehold);
+
+    // float3 ViewSpaceNormal = normalize(mul(CurrentNormal, (float3x3)View.TranslatedWorldToView));
+
+    // float4 ViewPos = mul(NDC, View.ClipToView);
+    // ViewPos.xyz /= ViewPos.w;
+
+    // float4 PrevViewPos = mul(PrevNDC, View.PrevClipToView);
+    // PrevViewPos.xyz /= ViewPos.w;
+
+    // float DistToPint = (ViewPos.z / ViewPos.w);
+    // float PlaneDistPrevDZ = min(-0.2, ViewSpaceNormal.z);
+
+    // // float4 PrevViewZ = rcp(PrevDepth * -View.PrevClipToView[3][2]);
+
+    // // Note: departure from the quoted technique: linear offset from zero distance at previous position instead of scaling.
+    // float4 QuadDists = abs(PlaneDistPrevDZ * (PrevViewZ - PrevViewPos.z));
+    // // Resolution-dependent. Was tweaked for 1080p
+    // const float AccThrehold = 0.001 * (1080 / BufferTexSize.y);
+    // // Reduce strictness at grazing angles, where distances grow due to perspective
+    // const float3 ViewPosNorm = normalize(ViewPos.xyz / ViewPos.w);
+    // const float ndotv = dot(ViewSpaceNormal, ViewPosNorm);
+
+    // QuadValidity *= step(QuadDists, AccThrehold * DistToPint / ndotv);
+
+    QuadValidity.x *= all(BilinearAtPrev.Px0() >= 0) && all(BilinearAtPrev.Px0() < uint2(BufferTexSize.xy));
+    QuadValidity.y *= all(BilinearAtPrev.Px1() >= 0) && all(BilinearAtPrev.Px1() < uint2(BufferTexSize.xy));
+    QuadValidity.z *= all(BilinearAtPrev.Px2() >= 0) && all(BilinearAtPrev.Px2() < uint2(BufferTexSize.xy));
+    QuadValidity.w *= all(BilinearAtPrev.Px3() >= 0) && all(BilinearAtPrev.Px3() < uint2(BufferTexSize.xy));
+
+    float validity = dot(QuadValidity, float4(1, 2, 4, 8)) / 15.0;
+
+    float2 TexelCenterOffset = abs(0.5 - frac(PrevUV * BufferTexSize.xy));
+    float accuracy = 1.0 - TexelCenterOffset.x - TexelCenterOffset.y;
+
+    // Mark off-screen reprojections
+    if (any(saturate(PrevUV) != PrevUV)) {
+        accuracy = 0;
+    }
+
+    RWReprojectionTex[px] = float4(
+        uv_diff,
+        validity,
+        accuracy
+    );
+
+}

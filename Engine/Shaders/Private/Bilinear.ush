@@ -49,3 +49,69 @@ float4 ApplyBilinearCustomWeights(float4 s00, float4 s10, float4 s01, float4 s11
 	float4 r = s00 * w.x + s10 * w.y + s01 * w.z + s11 * w.w;
 	return r * (normalize ? rcp(dot(w, 1.0) + 1e-10) : 1.0);
 }
+
+float4 CubicHermite(float4 A, float4 B, float4 C, float4 D, float t) 
+{
+	float t2 = t*t;
+    float t3 = t*t*t;
+    float4 a = -A/2.0 + (3.0*B)/2.0 - (3.0*C)/2.0 + D/2.0;
+    float4 b = A - (5.0*B)/2.0 + 2.0*C - D / 2.0;
+    float4 c = -A/2.0 + C/2.0;
+   	float4 d = B;
+    
+    return a*t3 + b*t2 + c*t + d;
+}
+
+float MitchellNetravali(float x) 
+{
+    float B = 1.0 / 3.0;
+    float C = 1.0 / 3.0;
+
+    float ax = abs(x);
+    if (ax < 1) 
+    {
+        return ((12 - 9 * B - 6 * C) * ax * ax * ax + (-18 + 12 * B + 6 * C) * ax * ax + (6 - 2 * B)) / 6;
+    } else if ((ax >= 1) && (ax < 2)) {
+        return ((-B - 6 * C) * ax * ax * ax + (6 * B + 30 * C) * ax * ax + (-12 * B - 48 * C) * ax + (8 * B + 24 * C)) / 6;
+    } else {
+        return 0;
+    }
+}
+
+float4 ImageSampleCatmullRom(Texture2D<float4> img, float2 P, int2 TexSize) 
+{
+    // https://www.shadertoy.com/view/MllSzX
+
+    float2 pixel = P * TexSize + 0.5;
+    
+    float2 frc = frac(pixel);
+    int2 ipixel = int2(pixel) - 1;
+    
+    float4 C00 = img[ipixel + int2(-1 ,-1)];
+    float4 C10 = img[ipixel + int2( 0, -1)];
+    float4 C20 = img[ipixel + int2( 1, -1)];
+    float4 C30 = img[ipixel + int2( 2,-1)];
+    
+    float4 C01 = img[ipixel + int2(-1 , 0)];
+    float4 C11 = img[ipixel + int2( 0, 0)];
+    float4 C21 = img[ipixel + int2( 1, 0)];
+    float4 C31 = img[ipixel + int2( 2, 0)];
+    
+    float4 C02 = img[ipixel + int2(-1 , 1)];
+    float4 C12 = img[ipixel + int2( 0, 1)];
+    float4 C22 = img[ipixel + int2( 1, 1)];
+    float4 C32 = img[ipixel + int2( 2, 1)];
+    
+    float4 C03 = img[ipixel + int2(-1 , 2)];
+    float4 C13 = img[ipixel + int2( 0, 2)];
+    float4 C23 = img[ipixel + int2( 1 , 2)];
+    float4 C33 = img[ipixel + int2( 2, 2)];
+    
+    float4 CP0X = CubicHermite(C00, C10, C20, C30, frc.x);
+    float4 CP1X = CubicHermite(C01, C11, C21, C31, frc.x);
+    float4 CP2X = CubicHermite(C02, C12, C22, C32, frc.x);
+    float4 CP3X = CubicHermite(C03, C13, C23, C33, frc.x);
+    
+    return CubicHermite(CP0X, CP1X, CP2X, CP3X, frc.y);
+}
+
