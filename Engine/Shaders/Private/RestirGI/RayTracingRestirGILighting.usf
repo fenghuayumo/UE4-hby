@@ -70,6 +70,8 @@ RWStructuredBuffer<FRayIntersectionBookmark>    BookmarkBuffer;
 
 // RWTexture2D<float4> RWDebugDiffuseUAV;
 // RWTexture2D<float2> RWDebugRayDistanceUAV;
+#define 	USE_SCREEN_GI_REPROJECTION 1
+Texture2D	ReprojectedHistory;
 
 #endif
 
@@ -969,74 +971,101 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 		float3 Position = Payload.WorldPos;
 		Ray.Origin = Position;
 		float3 Normal = Payload.WorldNormal;
-		// Perform next-event estimation
-		float SplitFactor = 1.0 / NextEventEstimationSamples;
-		for (uint NeeTrial = 0; NeeTrial < NextEventEstimationSamples; ++NeeTrial)
+#if USE_SCREEN_GI_REPROJECTION
+		float4 HitClipPos =  mul( float4( Position, 1 ), View.TranslatedWorldToClip );
+		HitClipPos.xyz *= rcp(HitClipPos.w);
+		float2 HitUV = (HitClipPos.xy * float2(1, -1) + 1) * 0.5;
+		uint2 HitPixelCoord = HitUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy;
+		float HitScreenDepth = SceneDepthTexture.Load(int3(HitPixelCoord, 0)).r;
+		bool IsOnScreen = true && all(abs(HitClipPos.xy) < 1.0)
+            && abs((HitClipPos.z - HitScreenDepth) / HitClipPos.z) < 0.1;
+        // If it is on-screen, we'll try to use its reprojected radiance from the previous frame
+        float4 ProjectedRadiance = 0;
+        if (IsOnScreen) 
 		{
-			// Light selection
-			int LightId;
-			float3 LightRadianceOverPdf = 0;
-			float NeePdf = 0.0;
+            // ProjectedRadiance = ReprojectedHistory.SampleLevel(LinearSampler, HitUV, 0);
+			ProjectedRadiance = ReprojectedHistory[HitPixelCoord];
+            // Check if the temporal reprojection is valid.
+            IsOnScreen = ProjectedRadiance.w > 0;
+        }
 
-			float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
-
-			RayDesc LightRay;
-			if (SampleLight(RandSample3,
-							Position,
-							Normal,
-							Payload.PrimitiveLightingChannelMask,
-							ENABLE_TRANSMISSION,
-							LightId,
-							LightRay.Direction,
-							LightRay.TMax,
-							LightRadianceOverPdf,
-							NeePdf))
+		if( IsOnScreen )
+		{
+			Irradiance += ProjectedRadiance.xyz;
+			//RWDebugDiffuseUAV[PixelCoord] = float4(ProjectedRadiance.xyz, 1.0);
+		}
+		else
+#endif
+		{
+			// Perform next-event estimation
+			float SplitFactor = 1.0 / NextEventEstimationSamples;
+			for (uint NeeTrial = 0; NeeTrial < NextEventEstimationSamples; ++NeeTrial)
 			{
-				LightRay.Origin = Position;
-				LightRay.TMin = 0;
-				LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
-				bool bTransmission = HasTransmission(LightId);
-				float3 BiasNormal = Payload.WorldNormal;
-				if (bTransmission && dot(BiasNormal, LightRay.Direction) < 0.0)
+				// Light selection
+				int LightId;
+				float3 LightRadianceOverPdf = 0;
+				float NeePdf = 0.0;
+
+				float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
+
+				RayDesc LightRay;
+				if (SampleLight(RandSample3,
+								Position,
+								Normal,
+								Payload.PrimitiveLightingChannelMask,
+								ENABLE_TRANSMISSION,
+								LightId,
+								LightRay.Direction,
+								LightRay.TMax,
+								LightRadianceOverPdf,
+								NeePdf))
 				{
-					BiasNormal = -BiasNormal;
-				}
-				ApplyPositionBias(LightRay, BiasNormal, MaxNormalBias);
-
-				// Trace visibility ray
-				uint NeeRayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
-				const uint NeeInstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
-
-	#if !ENABLE_TWO_SIDED_GEOMETRY
-				NeeRayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
-	#endif
-
-				FMinimalPayload NeePayload = TraceVisibilityRay(
-					TLAS,
-					NeeRayFlags,
-					NeeInstanceInclusionMask,
-					SvPosition,
-					LightRay);
-
-				// No hit indicates successful next-event connection
-				if (NeePayload.IsMiss())
-				{
-					// Evaluate material
-					half3 N = Payload.WorldNormal;
-					half3 V = -Ray.Direction;
-					half3 L = LightRay.Direction;
-					float NoL = saturate(dot(N, L));
-					FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
-					FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
-					float3 MaterialThroughput = LightingSample.Diffuse;
-					if (bTransmission)
+					LightRay.Origin = Position;
+					LightRay.TMin = 0;
+					LightRay.TMax = min(LightRay.TMax, MaxShadowDistance);
+					bool bTransmission = HasTransmission(LightId);
+					float3 BiasNormal = Payload.WorldNormal;
+					if (bTransmission && dot(BiasNormal, LightRay.Direction) < 0.0)
 					{
-						MaterialThroughput += LightingSample.Transmission;
+						BiasNormal = -BiasNormal;
 					}
+					ApplyPositionBias(LightRay, BiasNormal, MaxNormalBias);
 
-					// Record the contribution
-					float3 ExitantRadianceSample = RayThroughput * LightRadianceOverPdf * MaterialThroughput * SplitFactor / RayPdf;
-					Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
+					// Trace visibility ray
+					uint NeeRayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+					const uint NeeInstanceInclusionMask = RAY_TRACING_MASK_OPAQUE;
+
+		#if !ENABLE_TWO_SIDED_GEOMETRY
+					NeeRayFlags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+		#endif
+
+					FMinimalPayload NeePayload = TraceVisibilityRay(
+						TLAS,
+						NeeRayFlags,
+						NeeInstanceInclusionMask,
+						SvPosition,
+						LightRay);
+
+					// No hit indicates successful next-event connection
+					if (NeePayload.IsMiss())
+					{
+						// Evaluate material
+						half3 N = Payload.WorldNormal;
+						half3 V = -Ray.Direction;
+						half3 L = LightRay.Direction;
+						float NoL = saturate(dot(N, L));
+						FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
+						FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
+						float3 MaterialThroughput = LightingSample.Diffuse;
+						if (bTransmission)
+						{
+							MaterialThroughput += LightingSample.Transmission;
+						}
+
+						// Record the contribution
+						float3 ExitantRadianceSample = RayThroughput * LightRadianceOverPdf * MaterialThroughput * SplitFactor / RayPdf;
+						Irradiance += isfinite(ExitantRadianceSample) ? ExitantRadianceSample : 0.0;
+					}
 				}
 			}
 		}

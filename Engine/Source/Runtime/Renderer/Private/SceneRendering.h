@@ -1068,7 +1068,6 @@ struct FPreviousViewInfo
 	FSampleGIHistory	SampledGIHistory;
 	FSampleReGIRHistory	SampledReGIRHistory;
 	FFusionDenoiserHistory	FusionDiffuseIndirectHistory;
-
 	// Mobile bloom setup eye adaptation surface.
 	TRefCountPtr<IPooledRenderTarget> MobileBloomSetup_EyeAdaptation;
 	// Mobile temporal AA surface.
@@ -1391,7 +1390,8 @@ public:
 	// Furthest and closest Hierarchical Z Buffer
 	TRefCountPtr<IPooledRenderTarget> HZB;
 	TRefCountPtr<IPooledRenderTarget> ClosestHZB;
-
+	TRefCountPtr<IPooledRenderTarget> ProjectedRestirGITexture;
+	
 	int32 NumBoxReflectionCaptures;
 	int32 NumSphereReflectionCaptures;
 	float FurthestReflectionCaptureDistance;

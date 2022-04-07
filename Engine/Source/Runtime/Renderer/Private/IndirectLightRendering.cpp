@@ -41,6 +41,7 @@ static TAutoConsoleVariable<float> CVarSkySpecularOcclusionStrength(
 	TEXT("Strength of skylight specular occlusion from DFAO (default is 1.0)"),
 	ECVF_RenderThreadSafe);
 
+extern TAutoConsoleVariable<int32> CVarRestirGIDenoiser;
 
 DECLARE_GPU_STAT_NAMED(ReflectionEnvironment, TEXT("Reflection Environment"));
 DECLARE_GPU_STAT_NAMED(RayTracingReflections, TEXT("Ray Tracing Reflections"));
@@ -437,11 +438,11 @@ void FDeferredShadingSceneRenderer::RenderDiffuseIndirectAndAmbientOcclusion(
 		}
 		
 		IScreenSpaceDenoiser::FDiffuseIndirectOutputs DenoiserOutputs;
-		if (DenoiseMode != 0)
+		if (DenoiseMode != 0 && CVarRestirGIDenoiser.GetValueOnAnyThread() == 0)
 		{
 			const IScreenSpaceDenoiser* DefaultDenoiser = IScreenSpaceDenoiser::GetDefaultDenoiser();	
-			const IScreenSpaceDenoiser* DenoiserToUse = DenoiseMode == 1 ? DefaultDenoiser :  DenoiseMode == 2 ? FFusionDenoiser::GetDenoiser() : GScreenSpaceDenoiser;
-
+			const IScreenSpaceDenoiser* DenoiserToUse = DenoiseMode == 1 ? DefaultDenoiser : DenoiseMode == 2 ? FFusionDenoiser::GetDenoiser() : GScreenSpaceDenoiser;
+			//   DenoiseMode == 2 ? FFusionDenoiser::GetDenoiser() :
 			RDG_EVENT_SCOPE(GraphBuilder, "%s%s(DiffuseIndirect) %dx%d",
 				DenoiserToUse != DefaultDenoiser ? TEXT("ThirdParty ") : TEXT(""),
 				DenoiserToUse->GetDebugName(),
