@@ -508,7 +508,17 @@ void WRCDebugProbeRadiance(FRDGBuilder& GraphBuilder,
 	PassParameters->ProbeSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 
 	PassParameters->UpscaleFactor = UpscaleFactor;
-	PassParameters->RWDebugGIUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->Color);
+	
+	FIntPoint RayTracingResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), UpscaleFactor);
+	FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(
+							RayTracingResolution,
+							PF_FloatRGBA,
+							FClearValueBinding::None,
+							TexCreate_ShaderResource | TexCreate_UAV);
+
+	FRDGTextureRef Diffuse = GraphBuilder.CreateTexture(Desc, TEXT("DebugRadianceCache"));
+
+	PassParameters->RWDebugGIUAV = GraphBuilder.CreateUAV(Diffuse);
 	PassParameters->RWGIRayDistanceUAV = GraphBuilder.CreateUAV(OutDenoiserInputs->RayHitDistance);
 	bool UseSurfel = IsSurfelGIEnabled(View) && CVarWRCUseSurfel.GetValueOnRenderThread() != 0 && View.ViewState->SurfelIrradianceBuf;
 	if ( UseSurfel)
@@ -540,7 +550,6 @@ void WRCDebugProbeRadiance(FRDGBuilder& GraphBuilder,
 	TShaderMapRef<FDebugProbeRadianceRGS> RayGenerationShader(ShaderMap, PermutationVector);
 	ClearUnusedGraphResources(RayGenerationShader, PassParameters);
 
-	FIntPoint RayTracingResolution = FIntPoint::DivideAndRoundUp(View.ViewRect.Size(), UpscaleFactor);
 	GraphBuilder.AddPass(
 		RDG_EVENT_NAME("DebugProbeRadiance %dx%d", RayTracingResolution.X, RayTracingResolution.Y),
 		PassParameters,
@@ -635,7 +644,7 @@ void FDeferredShadingSceneRenderer::RenderWRC(FRDGBuilder& GraphBuilder,
 
 		if (CVarWRCDebugProbeRadiance.GetValueOnRenderThread() > 0)
 		{
-			//WRCDebugProbeRadiance(GraphBuilder, SceneTextures, View, *Scene, UpscaleFactor, OutDenoiserInputs, sceneVolumes[0]);
+			WRCDebugProbeRadiance(GraphBuilder, SceneTextures, View, *Scene, UpscaleFactor, OutDenoiserInputs, sceneVolumes[0]);
 		}
 
 	}

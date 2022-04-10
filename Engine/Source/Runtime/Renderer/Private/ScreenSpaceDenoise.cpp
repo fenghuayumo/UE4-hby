@@ -85,7 +85,7 @@ static TAutoConsoleVariable<int32> CVarAOTemporalAccumulation(
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarAOHistoryConvolutionSampleCount(
-	TEXT("r.AmbientOcclusion.Denoiser.HistoryConvolution.SampleCount"), 1,
+	TEXT("r.AmbientOcclusion.Denoiser.HistoryConvolution.SampleCount"), 16,
 	TEXT("Number of samples to use for history post filter (default = 16)."),
 	ECVF_RenderThreadSafe);
 
@@ -95,12 +95,12 @@ static TAutoConsoleVariable<float> CVarAOHistoryConvolutionKernelSpreadFactor(
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGIReconstructionSampleCount(
-	TEXT("r.GlobalIllumination.Denoiser.ReconstructionSamples"), 1,
-	TEXT("Maximum number of samples for the reconstruction pass (default = 1)."),
+	TEXT("r.GlobalIllumination.Denoiser.ReconstructionSamples"), 16,
+	TEXT("Maximum number of samples for the reconstruction pass (default = 16)."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGIPreConvolutionCount(
-	TEXT("r.GlobalIllumination.Denoiser.PreConvolution"), 0,
+	TEXT("r.GlobalIllumination.Denoiser.PreConvolution"), 1,
 	TEXT("Number of pre-convolution passes (default = 1)."),
 	ECVF_RenderThreadSafe);
 

@@ -592,6 +592,13 @@ bool IsSurfelGIEnabled(const FViewInfo& View)
 	return View.FinalPostProcessSettings.RayTracingGIType == ERayTracingGlobalIlluminationType::SurfelGI;
 }
 
+bool ShouldScreenDoise(const FViewInfo& View)
+{
+	if( IsRestirGIEnabled(View) || IsSurfelGIEnabled(View))
+		return false;
+	return true;
+}
+
 bool IsFinalGatherEnabled(const FViewInfo& View)
 {
 	int32 CVarRayTracingGlobalIlluminationValue = CVarRayTracingGlobalIllumination.GetValueOnRenderThread();

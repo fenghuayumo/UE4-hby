@@ -25,7 +25,7 @@ static TAutoConsoleVariable<bool> CVarGlobalIlluminationExperimentalPluginEnable
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarDiffuseIndirectDenoiser(
-	TEXT("r.DiffuseIndirect.Denoiser"), 2,
+	TEXT("r.DiffuseIndirect.Denoiser"), 1,
 	TEXT("Denoising options (default = 1)")
 	TEXT("2 Fusion Denoiser"),
 	ECVF_RenderThreadSafe);
@@ -50,7 +50,7 @@ DECLARE_GPU_STAT(SkyLightDiffuse);
 
 int GetReflectionEnvironmentCVar();
 bool IsAmbientCubemapPassRequired(const FSceneView& View);
-
+extern bool ShouldScreenDoise(const FViewInfo& View);
 
 class FDiffuseIndirectCompositePS : public FGlobalShader
 {
@@ -438,7 +438,7 @@ void FDeferredShadingSceneRenderer::RenderDiffuseIndirectAndAmbientOcclusion(
 		}
 		
 		IScreenSpaceDenoiser::FDiffuseIndirectOutputs DenoiserOutputs;
-		if (DenoiseMode != 0 && CVarRestirGIDenoiser.GetValueOnAnyThread() == 0)
+		if (DenoiseMode != 0 && ShouldScreenDoise(View))
 		{
 			const IScreenSpaceDenoiser* DefaultDenoiser = IScreenSpaceDenoiser::GetDefaultDenoiser();	
 			const IScreenSpaceDenoiser* DenoiserToUse = DenoiseMode == 1 ? DefaultDenoiser : DenoiseMode == 2 ? FFusionDenoiser::GetDenoiser() : GScreenSpaceDenoiser;

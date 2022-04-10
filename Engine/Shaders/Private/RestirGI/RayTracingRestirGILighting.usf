@@ -633,7 +633,7 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 		selectedLi = centerSample.sampleRef.Irradiance;
 		selected = true;
 	}
-
+	centerSample.M = min(centerSample.M, MaxTemporalHistory);
 	state.CombineReservoirs(centerSample, /* random = */ 0.5f, centerSample.targetPdf);
 
 	float3 WorldNormal = GBuffer.WorldNormal;
@@ -665,13 +665,13 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 
     const float ssao_factor_importance = smoothstep(5.0, 10.0, centerSample.M);
     float kernel_radius = lerp(SpatialSamplingRadius, 32, lerp(1, SSAOTex[PixelCoord].r, ssao_factor_importance));
-	// const float ang_offset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
+	// const float AngleOffset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
 	for (int i = 0; i < NumSamples ;++i)
 	{
-		// float ang = (i+1 + ang_offset) * GOLDEN_ANGLE;
+		// float ang = (i+1 + AngleOffset) * GOLDEN_ANGLE;
         // float radius = float(i+1 + RandContext.GenerateSample1D()) * (kernel_radius / NumSamples);
-        // int2 rpx_offset = float2(cos(ang), sin(ang)) * radius;
-		// const int2 SampleCoord = PixelCoord + rpx_offset;
+        // int2 PixelOffset = float2(cos(ang), sin(ang)) * radius;
+		// const int2 SampleCoord = PixelCoord + PixelOffset;
 		
 #if !USE_LDS_FOR_SPATIAL_RESAMPLE
 		float2 Offset = RandContext.GenerateSample2D() * 2.0f - 1.0f;
@@ -715,7 +715,7 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 		if( any(samplePosID > DispatchRaysDimensions().xy ) || any(samplePosID) < 0)
 			continue;
 		RTXGI_Reservoir neighborSample = RTXGI_Reservoir::Load(ReadReservoirData(samplePosID, InputSlice));
-		// neighborSample.M = min(neighborSample.M, 500);
+		neighborSample.M = min(neighborSample.M, 500);
 		// Load that neighbor's RIS state, do resampling
 		if (neighborSample.sampleRef.IsValid())
 		{			
@@ -918,6 +918,7 @@ void ProduceInitialSampleForDeferedGI(uint2 PixelCoord,FSortedGIRay GIRay,uint P
 			if (Field.IsHit()) 
             {
                 Irradiance += Field.Radiance * Field.InvPdf;
+				// RWDebugDiffuseUAV[PixelCoord] = float4(Irradiance, 1.0);
 			}
 			else 
 		#endif
@@ -1169,7 +1170,8 @@ RAY_TRACING_ENTRY_RAYGEN(GenerateInitialSamplesForDeferedGIRGS)
     uint2 SvPosition = GetPixelCoord(PixelCoord, UpscaleFactor);
     float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
     float2 UV = (float2(SvPosition) + 0.5) * InvBufferSize;
-    
+    // RWDebugDiffuseUAV[PixelCoord] = 0.0;
+
 	uint LinearIndex = CalcLinearIndex(SvPosition);
 	FRandomContext RandContext = FRandomContext::Create(LinearIndex, View.StateFrameIndex + HistoryReservoir * 32);
 
@@ -1349,8 +1351,7 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 		}
 	}
 
-	RWDiffuseUAV[DispatchThreadId].rgb = DiffuseExitantRadiance;
-	RWDiffuseUAV[DispatchThreadId].a = 1.0;
+	RWDiffuseUAV[DispatchThreadId] = float4(DiffuseExitantRadiance,1.0);
 	RWRayDistanceUAV[DispatchThreadId] = float2(RayDistance, NumReservoirs);
 }
 
@@ -1428,7 +1429,6 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 		RTXGI_Reservoir curSample = RTXGI_Reservoir::Load(ReadReservoirData(DispatchThreadId, InputSlice));
 
 		int historyLimit = min(RTXGI_Reservoir::MaxM,MaxTemporalHistory * curSample.M);
-
 		state.CombineReservoirs(curSample, /* random = */ 0.5, curSample.targetPdf);
 
 		// Backproject this pixel to last frame
@@ -1572,25 +1572,25 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 // 		state.FinalizeResampling(1, state.M);
 // #endif
 // 	}
-	const float ang_offset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
+		const float AngleOffset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
 		float M_sum = 1;
-		for (uint sample_i = 0; sample_i < 6 && M_sum < MaxTemporalHistory * 1.25; ++sample_i) 
+		for (uint SampleIndex = 0; SampleIndex < 6 && M_sum < MaxTemporalHistory * 1.25; ++SampleIndex) 
 		{
-				const float ang = (sample_i + ang_offset) * GOLDEN_ANGLE;
-				const float rpx_offset_radius = sqrt(
-					float(((sample_i - 1) + View.StateFrameIndex) & 3) + 1
+				const float ang = (SampleIndex + AngleOffset) * GOLDEN_ANGLE;
+				const float PixelOffsetRadius = sqrt(
+					float(((SampleIndex - 1) + View.StateFrameIndex) & 3) + 1
 				) * clamp(8 - M_sum, 1, 7); // TODO: keep high in noisy situations
 
-				const float2 reservoir_px_offset_base = float2(
+				const float2 PxielOffsetBase = float2(
 					cos(ang), sin(ang)
-				) * rpx_offset_radius;
+				) * PixelOffsetRadius;
 
-				const int2 rpx_offset =
-					sample_i == 0
+				const int2 PixelOffset =
+					SampleIndex == 0
 					? 0
-					: int2(reservoir_px_offset_base)
+					: int2(PxielOffsetBase)
 					;
-				int2 idx = prevPos + rpx_offset;
+				int2 idx = prevPos + PixelOffset;
 
 				float PrevDepth = ConvertFromDeviceZ(DepthHistory.Load(int3(idx, 0)).r);
 				float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory.Load(int3(idx, 0)).xyz));
@@ -1616,6 +1616,7 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 					continue;
 				RTXGI_Reservoir prevSample = RTXGI_Reservoir::Load(ReadReservoirHistoryData(prePosId, HistoryReservoir));
 				prevSample.M = min(prevSample.M, historyLimit);
+				// prevSample.M = max(0, min(prevSample.M, exp2(log2(MaxTemporalHistory) * 1.0 ) ));
 
 				if (prevSample.sampleRef.IsValid())
 				{
