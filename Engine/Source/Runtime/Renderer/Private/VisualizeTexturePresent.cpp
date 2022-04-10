@@ -8,6 +8,16 @@
 #include "Engine/Engine.h"
 #include "RenderTargetPool.h"
 
+static TAutoConsoleVariable<float> CVarVisPresentSizeScale(
+	TEXT("r.Vis.PresentSizeScale"), 0.3,
+	TEXT("VisPresentSizeScale (default = 0.3)"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarVisOffsetFromBorder(
+	TEXT("r.Vis.OffsetFromBorder"), 100,
+	TEXT("VisPresent OffsetFromBorder (default = 100)"),
+	ECVF_RenderThreadSafe);
+
 // draw a single pixel sized rectangle using 4 sub elements
 static void DrawBorder(FCanvas& Canvas, const FIntRect Rect, FLinearColor Color)
 {
@@ -360,9 +370,9 @@ void FVisualizeTexturePresent::PresentContent(FRDGBuilder& GraphBuilder, const F
 			const FIntPoint CopyInputExtent  = CopyInput.Texture->Desc.Extent;
 			const float CopyInputAspectRatio = float(CopyInputExtent.X) / float(CopyInputExtent.Y);
 
-			int32 TargetedHeight = 0.3f * View.UnconstrainedViewRect.Height();
+			int32 TargetedHeight = CVarVisPresentSizeScale.GetValueOnRenderThread() * View.UnconstrainedViewRect.Height();
 			int32 TargetedWidth = CopyInputAspectRatio * TargetedHeight;
-			int32 OffsetFromBorder = 100;
+			int32 OffsetFromBorder = CVarVisOffsetFromBorder.GetValueOnRenderThread();
 
 			CopyOutput.ViewRect.Min.X = View.UnconstrainedViewRect.Min.X + OffsetFromBorder;
 			CopyOutput.ViewRect.Max.X = CopyOutput.ViewRect.Min.X + TargetedWidth;
