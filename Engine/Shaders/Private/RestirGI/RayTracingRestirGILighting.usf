@@ -617,8 +617,6 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 {
 	uint cachedResult = 0x0u;
 
-	float normalizationWeight = 1.0f;
-
 	RTXGI_Reservoir centerSample = RTXGI_Reservoir::Load(ReadReservoirData(DispatchID, InputSlice));
 
 	float3 selectedPos;
@@ -663,24 +661,25 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 	// NumSamples = min(NumSamples, 300);
 #endif
 
-    const float ssao_factor_importance = smoothstep(5.0, 10.0, centerSample.M);
-    float kernel_radius = lerp(SpatialSamplingRadius, 32, lerp(1, SSAOTex[PixelCoord].r, ssao_factor_importance));
-	// const float AngleOffset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
-	for (int i = 0; i < NumSamples ;++i)
+    const float SSAOFactor = smoothstep(5.0, 10.0, centerSample.M);
+    float KernelRadius = lerp(SpatialSamplingRadius, 32, lerp(1, SSAOTex[PixelCoord].r, SSAOFactor));
+	const float AngleOffset = 2 * PI * RandContext.GenerateSample1D();
+	for (int i = 0; i < NumSamples && state.M < TARGET_M; ++i)
 	{
-		// float ang = (i+1 + AngleOffset) * GOLDEN_ANGLE;
-        // float radius = float(i+1 + RandContext.GenerateSample1D()) * (kernel_radius / NumSamples);
+		// float ang = (i + AngleOffset) * GOLDEN_ANGLE;
+        // float radius = float(i + RandContext.GenerateSample1D()) * (KernelRadius / NumSamples);
         // int2 PixelOffset = float2(cos(ang), sin(ang)) * radius;
 		// const int2 SampleCoord = PixelCoord + PixelOffset;
+		// const bool IsCenterSample = i == 0;
 		
 #if !USE_LDS_FOR_SPATIAL_RESAMPLE
 		float2 Offset = RandContext.GenerateSample2D() * 2.0f - 1.0f;
-		int2 SampleCoord = round(float2(PixelCoord) + (Offset * kernel_radius));
+		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
 
 		SamplePoints[i] = SampleCoord;
 #else
 		float2 Offset = NeighborOffsets[(StartIdx + i) & NeighborOffsetMask] * 2.0f - 1.0f;
-		int2 SampleCoord = round(float2(PixelCoord) + (Offset * kernel_radius));
+		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
 #endif
 
 		if (any(SampleCoord < 0) || any(SampleCoord >= View.BufferSizeAndInvSize.xy) || all(SampleCoord == PixelCoord))
@@ -731,7 +730,7 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 			float3 OffsetB = neighborSample.sampleRef.Position - neighborSample.sampleRef.CreationPoint;
 			float3 OffsetA = neighborSample.sampleRef.Position - WorldPosition;
 			// Discard back-face
-			if (dot(WorldNormal, OffsetA) < 0 || dot(neighborSample.sampleRef.CreationNormal, WorldNormal) < 0.8 || any(isnan(OffsetA)) || any(isnan(OffsetB)))
+			if (dot(WorldNormal, OffsetA) < 0 || any(isnan(OffsetA)) || any(isnan(OffsetB)))
 			{
 				continue;
 			}
@@ -749,11 +748,11 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 			float cosPhiA = -dot(OffsetA, neighborSample.sampleRef.Normal);
 			float cosPhiB = -dot(OffsetB, neighborSample.sampleRef.Normal);
 			// Discard extreme samples to prevent fireflies
-			if (cosA <= 0 || cosB <= 0 || cosPhiA <= 0 || cosPhiB <= 0 || RA2 <= 0 || RB2 <= 0)
+			if ( cosPhiB <= 0 || RA2 <= 0 || RB2 <= 0)
 			{
 				continue;
 			}
-			float Jocbian = RB2 * cosPhiA / max(1e-5, (RA2 * cosPhiB));
+			float Jocbian = RB2 * max(0.0,cosPhiA) / max(1e-5, (RA2 * cosPhiB));
 
 			float neighborWeight = Visible ?  pNewTN * Jocbian : 0;
 			{
@@ -1328,7 +1327,7 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 			// {
 			// 	DiffuseExitantRadiance *= rcp(1.0 + Luminance(DiffuseExitantRadiance));
 			// }
-			WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
+			// WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
 		}
 
 		DiffuseExitantRadiance /= float(NumReservoirs);
@@ -1342,15 +1341,15 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 
 		DiffuseExitantRadiance = ClampToHalfFloatRange(DiffuseExitantRadiance);
 	}
-	else
-	{
-		// Invalid pixel, write empty reservoir
-		for (int Reservoir = 0; Reservoir < NumReservoirs; Reservoir++)
-		{
-			WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
-		}
-	}
-
+	// else
+	// {
+	// 	// Invalid pixel, write empty reservoir
+	// 	for (int Reservoir = 0; Reservoir < NumReservoirs; Reservoir++)
+	// 	{
+	// 		WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
+	// 	}
+	// }
+	WriteReservoirHistoryData(DispatchThreadId, 0, RTXGI_Reservoir::Load(ReadReservoirData(DispatchThreadId, InputSlice)).Store());
 	RWDiffuseUAV[DispatchThreadId] = float4(DiffuseExitantRadiance,1.0);
 	RWRayDistanceUAV[DispatchThreadId] = float2(RayDistance, NumReservoirs);
 }
@@ -1467,168 +1466,168 @@ RAY_TRACING_ENTRY_RAYGEN(ApplyTemporalResamplingRGS)
 		//ToDo - full GBuffer not available for last frame, so we're going to need to approximate using current + channels we have
 		// could make a better approximation than what is used here
 		FGBufferData PrevGBuffer = GBuffer;
-// 		bool foundNeighbor = false;
-// 		const float radius = 4;
+		bool foundNeighbor = false;
+		const float radius = 4;
 
-// 		// Try to find a matching surface in the neighborhood of the reprojected pixel
-// 		for (int i = 0; i < 9; i++)
-// 		{
-// 			int2 offset = 0;
-// 			if (i > 0)
-// 			{
-// 				offset = int2((RandContext.GenerateSample2D() - 0.5f) * radius);
-// 			}
-// 			int2 idx = prevPos + offset;
-
-// 			float PrevDepth = ConvertFromDeviceZ(DepthHistory.Load(int3(idx, 0)).r);
-// 			float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory.Load(int3(idx, 0)).xyz));
-
-// 			// TODO: refine sample rejection tests
-// 			if (dot(GBuffer.WorldNormal, PrevWorldNormal) < TemporalNormalRejectionThreshold)
-// 			{
-// 				continue;
-// 			}
-
-// 			if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > TemporalDepthRejectionThreshold)
-// 			{
-// 				continue;
-// 			}
-
-// 			PrevGBuffer.WorldNormal = PrevWorldNormal;
-// 			PrevGBuffer.Depth = PrevDepth;
-
-// 			prevPos = idx;
-// 			foundNeighbor = true;
-// 			break;
-// 		}
-
-// 		bool selectedPreviousSample = false;
-// 		uint previousM = 0;
-// 		float previousWeight = 0;
-
-// 		if (foundNeighbor)
-// 		{
-// 			// Resample the previous frame sample into the current reservoir, but reduce the gisample's weight
-// 			// according to the bilinear weight of the current pixel
-// 			uint2 prePosId = uint2(prevPos / float(UpscaleFactor) + 0.5);
-// 			if( any(prePosId > DispatchDimension.xy) || any(prePosId) < 0)
-// 				return;
-// 			RTXGI_Reservoir prevSample = RTXGI_Reservoir::Load(ReadReservoirHistoryData(prePosId, HistoryReservoir));
-// 			prevSample.M = min(prevSample.M, historyLimit);
-
-// 			if (prevSample.sampleRef.IsValid())
-// 			{
-// 				bool Visible = true;
-// #if (VISIBILITY_BEFORE_COMBINE)
-// 				if (ApplyApproximateVisibilityTest)
-// 				{
-// 					Visible = CheckApproximateVisibility(PixelCoord, DeviceZ, WorldPosition, GBuffer, prevSample.sampleRef);
-// 				}
-// #endif
-// 				//previousWeight = Visible ? GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, prevSample.sampleRef) : 0;
-// 				float Jocbian = 1.0f;
-// 				float pNewTN = GetTargetPdf(prevSample.sampleRef.Irradiance, WorldNormal, WorldPosition, prevSample.sampleRef.Position);
-// 				previousWeight = Visible ?  pNewTN * Jocbian : 0;
-// 				{
-// 					previousM = prevSample.M;
-
-// 					if( state.CombineReservoirs(prevSample, RandContext.GenerateSample1D(), previousWeight) )
-// 					{
-// 						selectedPreviousSample = true;
-// 					}
-// 				}
-// 			}
-// 		}
-
-// #if (!TEMPORAL_RESTIR_BIAS)		
-// 		// Compute the unbiased normalization term (instead of using 1/M)
-// 		float pi = state.targetPdf;   // Since it was selected, this is known to be equiv to lightWeight(state.sampleRef, context)
-// 		float piSum = state.targetPdf * curSample.M;
-
-// 		if (state.sampleRef.IsValid() && previousM > 0)
-// 		{
-// 			float pt = GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, state.sampleRef);
-
-// #if (!VISIBILITY_BEFORE_COMBINE)
-// 			//ToDo - does this need to be a permutation?
-// 			if (ApplyApproximateVisibilityTest && pt > 0)
-// 			{
-// 				bool Visible = CheckApproximateVisibility(PixelCoord, DeviceZ, WorldPosition, GBuffer, state.sampleRef);
-
-// 				if (!Visible)
-// 				{
-// 					pt = 0;
-// 				}
-// 			}
-// #endif
-
-// 			pi = selectedPreviousSample ? pt : pi;
-// 			piSum += pt * previousM;
-// 		}
-
-// 		state.FinalizeResampling(pi, piSum);
-// #else
-// 		// If the prior reservoir actually corresponds to the current reservoir, then the visibility and weights should all be the same, and cancel out.
-// 		state.FinalizeResampling(1, state.M);
-// #endif
-// 	}
-		const float AngleOffset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
-		float M_sum = 1;
-		for (uint SampleIndex = 0; SampleIndex < 6 && M_sum < MaxTemporalHistory * 1.25; ++SampleIndex) 
+		// Try to find a matching surface in the neighborhood of the reprojected pixel
+		for (int i = 0; i < 9; i++)
 		{
-				const float ang = (SampleIndex + AngleOffset) * GOLDEN_ANGLE;
-				const float PixelOffsetRadius = sqrt(
-					float(((SampleIndex - 1) + View.StateFrameIndex) & 3) + 1
-				) * clamp(8 - M_sum, 1, 7); // TODO: keep high in noisy situations
+			int2 offset = 0;
+			if (i > 0)
+			{
+				offset = int2((RandContext.GenerateSample2D() - 0.5f) * radius);
+			}
+			int2 idx = prevPos + offset;
 
-				const float2 PxielOffsetBase = float2(
-					cos(ang), sin(ang)
-				) * PixelOffsetRadius;
+			float PrevDepth = ConvertFromDeviceZ(DepthHistory.Load(int3(idx, 0)).r);
+			float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory.Load(int3(idx, 0)).xyz));
 
-				const int2 PixelOffset =
-					SampleIndex == 0
-					? 0
-					: int2(PxielOffsetBase)
-					;
-				int2 idx = prevPos + PixelOffset;
+			// TODO: refine sample rejection tests
+			if (dot(GBuffer.WorldNormal, PrevWorldNormal) < TemporalNormalRejectionThreshold)
+			{
+				continue;
+			}
 
-				float PrevDepth = ConvertFromDeviceZ(DepthHistory.Load(int3(idx, 0)).r);
-				float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory.Load(int3(idx, 0)).xyz));
+			if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > TemporalDepthRejectionThreshold)
+			{
+				continue;
+			}
 
-				// TODO: refine sample rejection tests
-				if (dot(GBuffer.WorldNormal, PrevWorldNormal) < TemporalNormalRejectionThreshold)
-				{
-					continue;
-				}
+			PrevGBuffer.WorldNormal = PrevWorldNormal;
+			PrevGBuffer.Depth = PrevDepth;
 
-				if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > TemporalDepthRejectionThreshold)
-				{
-					continue;
-				}
-
-				PrevGBuffer.WorldNormal = PrevWorldNormal;
-				PrevGBuffer.Depth = PrevDepth;
-
-				prevPos = idx;
-
-				uint2 prePosId = uint2(prevPos / float(UpscaleFactor) + 0.5);
-				if( any(prePosId > DispatchDimension.xy) || any(prePosId) < 0)
-					continue;
-				RTXGI_Reservoir prevSample = RTXGI_Reservoir::Load(ReadReservoirHistoryData(prePosId, HistoryReservoir));
-				prevSample.M = min(prevSample.M, historyLimit);
-				// prevSample.M = max(0, min(prevSample.M, exp2(log2(MaxTemporalHistory) * 1.0 ) ));
-
-				if (prevSample.sampleRef.IsValid())
-				{
-					float Jocbian = 1.0f;
-					float pNewTN = GetTargetPdf(prevSample.sampleRef.Irradiance, WorldNormal, WorldPosition, prevSample.sampleRef.Position);
-				
-					state.CombineReservoirs(prevSample, RandContext.GenerateSample1D(), pNewTN * Jocbian);
-				}
-				M_sum += prevSample.M;
+			prevPos = idx;
+			foundNeighbor = true;
+			break;
 		}
+
+		bool selectedPreviousSample = false;
+		uint previousM = 0;
+		float previousWeight = 0;
+
+		if (foundNeighbor)
+		{
+			// Resample the previous frame sample into the current reservoir, but reduce the gisample's weight
+			// according to the bilinear weight of the current pixel
+			uint2 prePosId = uint2(prevPos / float(UpscaleFactor) + 0.5);
+			if( any(prePosId > DispatchDimension.xy) || any(prePosId) < 0)
+				return;
+			RTXGI_Reservoir prevSample = RTXGI_Reservoir::Load(ReadReservoirHistoryData(prePosId, HistoryReservoir));
+			prevSample.M = min(prevSample.M, historyLimit);
+
+			if (prevSample.sampleRef.IsValid())
+			{
+				bool Visible = true;
+#if (VISIBILITY_BEFORE_COMBINE)
+				if (ApplyApproximateVisibilityTest)
+				{
+					Visible = CheckApproximateVisibility(PixelCoord, DeviceZ, WorldPosition, GBuffer, prevSample.sampleRef);
+				}
+#endif
+				//previousWeight = Visible ? GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, prevSample.sampleRef) : 0;
+				float Jocbian = 1.0f;
+				float pNewTN = GetTargetPdf(prevSample.sampleRef.Irradiance, WorldNormal, WorldPosition, prevSample.sampleRef.Position);
+				previousWeight = Visible ?  pNewTN * Jocbian : 0;
+				{
+					previousM = prevSample.M;
+
+					if( state.CombineReservoirs(prevSample, RandContext.GenerateSample1D(), previousWeight) )
+					{
+						selectedPreviousSample = true;
+					}
+				}
+			}
+		}
+
+#if (!TEMPORAL_RESTIR_BIAS)		
+		// Compute the unbiased normalization term (instead of using 1/M)
+		float pi = state.targetPdf;   // Since it was selected, this is known to be equiv to lightWeight(state.sampleRef, context)
+		float piSum = state.targetPdf * curSample.M;
+
+		if (state.sampleRef.IsValid() && previousM > 0)
+		{
+			float pt = GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, state.sampleRef);
+
+#if (!VISIBILITY_BEFORE_COMBINE)
+			//ToDo - does this need to be a permutation?
+			if (ApplyApproximateVisibilityTest && pt > 0)
+			{
+				bool Visible = CheckApproximateVisibility(PixelCoord, DeviceZ, WorldPosition, GBuffer, state.sampleRef);
+
+				if (!Visible)
+				{
+					pt = 0;
+				}
+			}
+#endif
+
+			pi = selectedPreviousSample ? pt : pi;
+			piSum += pt * previousM;
+		}
+
+		state.FinalizeResampling(pi, piSum);
+#else
+		// If the prior reservoir actually corresponds to the current reservoir, then the visibility and weights should all be the same, and cancel out.
 		state.FinalizeResampling(1, state.M);
+#endif
 	}
+		// const float AngleOffset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
+		// float M_sum = 1;
+		// for (uint SampleIndex = 0; SampleIndex < 5 && M_sum < MaxTemporalHistory * 1.25; ++SampleIndex) 
+		// {
+		// 		const float ang = (SampleIndex + AngleOffset) * GOLDEN_ANGLE;
+		// 		const float PixelOffsetRadius = sqrt(
+		// 			float(((SampleIndex - 1) + View.StateFrameIndex) & 3) + 1
+		// 		) * clamp(8 - M_sum, 1, 7); // TODO: keep high in noisy situations
+
+		// 		const float2 PxielOffsetBase = float2(
+		// 			cos(ang), sin(ang)
+		// 		) * PixelOffsetRadius;
+
+		// 		const int2 PixelOffset =
+		// 			SampleIndex == 0
+		// 			? 0
+		// 			: int2(PxielOffsetBase)
+		// 			;
+		// 		int2 idx = prevPos + PixelOffset;
+
+		// 		float PrevDepth = ConvertFromDeviceZ(DepthHistory.Load(int3(idx, 0)).r);
+		// 		float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory.Load(int3(idx, 0)).xyz));
+
+		// 		// TODO: refine sample rejection tests
+		// 		if (dot(GBuffer.WorldNormal, PrevWorldNormal) < TemporalNormalRejectionThreshold)
+		// 		{
+		// 			continue;
+		// 		}
+
+		// 		if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > TemporalDepthRejectionThreshold)
+		// 		{
+		// 			continue;
+		// 		}
+
+		// 		PrevGBuffer.WorldNormal = PrevWorldNormal;
+		// 		PrevGBuffer.Depth = PrevDepth;
+
+		// 		prevPos = idx;
+
+		// 		uint2 prePosId = uint2(prevPos / float(UpscaleFactor) + 0.5);
+		// 		if( any(prePosId > DispatchDimension.xy) || any(prePosId) < 0)
+		// 			continue;
+		// 		RTXGI_Reservoir prevSample = RTXGI_Reservoir::Load(ReadReservoirHistoryData(prePosId, HistoryReservoir));
+		// 		prevSample.M = min(prevSample.M, historyLimit);
+		// 		// prevSample.M = max(0, min(prevSample.M, exp2(log2(MaxTemporalHistory) * 1.0 ) ));
+
+		// 		if (prevSample.sampleRef.IsValid())
+		// 		{
+		// 			float Jocbian = 1.0f;
+		// 			float pNewTN = GetTargetPdf(prevSample.sampleRef.Irradiance, WorldNormal, WorldPosition, prevSample.sampleRef.Position);
+				
+		// 			state.CombineReservoirs(prevSample, RandContext.GenerateSample1D(), pNewTN * Jocbian);
+		// 		}
+		// 		M_sum += prevSample.M;
+		// }
+		// state.FinalizeResampling(1, state.M);
+	//}
 
 	WriteReservoirData(DispatchThreadId, OutputSlice, state.Store());
 }
