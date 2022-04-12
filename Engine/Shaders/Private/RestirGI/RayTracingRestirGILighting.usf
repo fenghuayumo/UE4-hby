@@ -666,21 +666,21 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 	const float AngleOffset = 2 * PI * RandContext.GenerateSample1D();
 	for (int i = 0; i < NumSamples && state.M < TARGET_M; ++i)
 	{
-		// float ang = (i + AngleOffset) * GOLDEN_ANGLE;
-        // float radius = float(i + RandContext.GenerateSample1D()) * (KernelRadius / NumSamples);
-        // int2 PixelOffset = float2(cos(ang), sin(ang)) * radius;
-		// const int2 SampleCoord = PixelCoord + PixelOffset;
+		float ang = (i + AngleOffset) * GOLDEN_ANGLE;
+        float radius = float(i + RandContext.GenerateSample1D()) * (KernelRadius / NumSamples);
+        int2 PixelOffset = float2(cos(ang), sin(ang)) * radius;
+		const int2 SampleCoord = PixelCoord + PixelOffset;
 		// const bool IsCenterSample = i == 0;
 		
-#if !USE_LDS_FOR_SPATIAL_RESAMPLE
-		float2 Offset = RandContext.GenerateSample2D() * 2.0f - 1.0f;
-		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
+// #if !USE_LDS_FOR_SPATIAL_RESAMPLE
+// 		float2 Offset = RandContext.GenerateSample2D() * 2.0f - 1.0f;
+// 		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
 
-		SamplePoints[i] = SampleCoord;
-#else
-		float2 Offset = NeighborOffsets[(StartIdx + i) & NeighborOffsetMask] * 2.0f - 1.0f;
-		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
-#endif
+// 		SamplePoints[i] = SampleCoord;
+// #else
+// 		float2 Offset = NeighborOffsets[(StartIdx + i) & NeighborOffsetMask] * 2.0f - 1.0f;
+// 		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
+// #endif
 
 		if (any(SampleCoord < 0) || any(SampleCoord >= View.BufferSizeAndInvSize.xy) || all(SampleCoord == PixelCoord))
 		{
