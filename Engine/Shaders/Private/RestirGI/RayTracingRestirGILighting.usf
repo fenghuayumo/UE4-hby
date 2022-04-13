@@ -666,21 +666,21 @@ void ApplySpatialResampling(uint2 PixelCoord,uint2 DispatchID, FGBufferData GBuf
 	const float AngleOffset = 2 * PI * RandContext.GenerateSample1D();
 	for (int i = 0; i < NumSamples && state.M < TARGET_M; ++i)
 	{
-		float ang = (i + AngleOffset) * GOLDEN_ANGLE;
-        float radius = float(i + RandContext.GenerateSample1D()) * (KernelRadius / NumSamples);
-        int2 PixelOffset = float2(cos(ang), sin(ang)) * radius;
-		const int2 SampleCoord = PixelCoord + PixelOffset;
+		// float ang = (i + AngleOffset) * GOLDEN_ANGLE;
+        // float radius = float(i + RandContext.GenerateSample1D()) * (KernelRadius / NumSamples);
+        // int2 PixelOffset = float2(cos(ang), sin(ang)) * radius;
+		// const int2 SampleCoord = PixelCoord + PixelOffset;
 		// const bool IsCenterSample = i == 0;
 		
-// #if !USE_LDS_FOR_SPATIAL_RESAMPLE
-// 		float2 Offset = RandContext.GenerateSample2D() * 2.0f - 1.0f;
-// 		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
+#if !USE_LDS_FOR_SPATIAL_RESAMPLE
+		float2 Offset = RandContext.GenerateSample2D() * 2.0f - 1.0f;
+		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
 
-// 		SamplePoints[i] = SampleCoord;
-// #else
-// 		float2 Offset = NeighborOffsets[(StartIdx + i) & NeighborOffsetMask] * 2.0f - 1.0f;
-// 		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
-// #endif
+		SamplePoints[i] = SampleCoord;
+#else
+		float2 Offset = NeighborOffsets[(StartIdx + i) & NeighborOffsetMask] * 2.0f - 1.0f;
+		int2 SampleCoord = round(float2(PixelCoord) + (Offset * KernelRadius));
+#endif
 
 		if (any(SampleCoord < 0) || any(SampleCoord >= View.BufferSizeAndInvSize.xy) || all(SampleCoord == PixelCoord))
 		{
@@ -1315,6 +1315,7 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 					{
 						risSample.weightSum = 0.0f;
 						risSample.targetPdf = 0.0f;
+						risSample.M = 0;
 					}
 				}
 			}
@@ -1327,7 +1328,7 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 			// {
 			// 	DiffuseExitantRadiance *= rcp(1.0 + Luminance(DiffuseExitantRadiance));
 			// }
-			// WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
+			WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
 		}
 
 		DiffuseExitantRadiance /= float(NumReservoirs);
@@ -1341,15 +1342,15 @@ RAY_TRACING_ENTRY_RAYGEN(EvaluateRestirGILightingRGS)
 
 		DiffuseExitantRadiance = ClampToHalfFloatRange(DiffuseExitantRadiance);
 	}
-	// else
-	// {
-	// 	// Invalid pixel, write empty reservoir
-	// 	for (int Reservoir = 0; Reservoir < NumReservoirs; Reservoir++)
-	// 	{
-	// 		WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
-	// 	}
-	// }
-	WriteReservoirHistoryData(DispatchThreadId, 0, RTXGI_Reservoir::Load(ReadReservoirData(DispatchThreadId, InputSlice)).Store());
+	else
+	{
+		// Invalid pixel, write empty reservoir
+		for (int Reservoir = 0; Reservoir < NumReservoirs; Reservoir++)
+		{
+			WriteReservoirHistoryData(DispatchThreadId, Reservoir, risSample.Store());
+		}
+	}
+	//WriteReservoirHistoryData(DispatchThreadId, 0, RTXGI_Reservoir::Load(ReadReservoirData(DispatchThreadId, InputSlice)).Store());
 	RWDiffuseUAV[DispatchThreadId] = float4(DiffuseExitantRadiance,1.0);
 	RWRayDistanceUAV[DispatchThreadId] = float2(RayDistance, NumReservoirs);
 }
