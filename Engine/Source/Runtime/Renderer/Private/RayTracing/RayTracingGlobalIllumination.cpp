@@ -288,14 +288,15 @@ static TAutoConsoleVariable<int> CVarLightSamplingType(
 	TEXT(" 1:	LightGrid \n")
 	TEXT(" 2:	LightTree \n")
 	TEXT(" 3:	LightCut \n")
-	TEXT(" 4:	Uniform"),
+	TEXT(" 4:	Uniform \n")
+	TEXT(" 5:	ReGIR \n"),
 	ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<float> CVarReGIRLightGridCellSize(
-	TEXT("r.RayTracing.ReGIR.LightGridCellSize"),
-	50.0,
-	TEXT("Set to ReGIR GridCell Size"),
-	ECVF_RenderThreadSafe);
+// static TAutoConsoleVariable<float> CVarReGIRLightGridCellSize(
+// 	TEXT("r.RayTracing.ReGIR.LightGridCellSize"),
+// 	50.0,
+// 	TEXT("Set to ReGIR GridCell Size"),
+// 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarReGIRLightGridResolution(
 	TEXT("r.RayTracing.ReGIR.LightGridResolution"),
@@ -636,6 +637,7 @@ enum class ELightSamplingType
 	LIGHT_TREE = 2,
 	LIGHT_CUT = 3,
 	Light_UNIFORM = 4,
+	LIGHT_REGIR = 5,
 	MAX,
 };
 struct ReGIR_PackedReservoir
@@ -836,11 +838,12 @@ class FGlobalIlluminationRGS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, MeshLightCutBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, MeshLightNodesBuffer)
 		SHADER_PARAMETER(uint32, MeshLightLeafStartIndex)
-		SHADER_PARAMETER_SRV(StructuredBuffer<FVector>, MeshLightVertexBuffer)
-		SHADER_PARAMETER_SRV(StructuredBuffer<uint32>, MeshLightIndexBuffer)
-		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
-		SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstance>, MeshLightInstanceBuffer)
-		SHADER_PARAMETER(uint32, NumLightTriangles)
+		// SHADER_PARAMETER_SRV(StructuredBuffer<FVector>, MeshLightVertexBuffer)
+		// SHADER_PARAMETER_SRV(StructuredBuffer<uint32>, MeshLightIndexBuffer)
+		// SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
+		// SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstance>, MeshLightInstanceBuffer)
+		// SHADER_PARAMETER(uint32, NumLightTriangles)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FMeshLightCommonParameter, MeshLightCommonParam)
 		//SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<ReGIR_PackedReservoir>, RWLightReservoirHistoryUAV)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReGIRCommonParameters, ReGIRCommonParameters)
 	END_SHADER_PARAMETER_STRUCT()
@@ -1851,7 +1854,7 @@ extern MeshLightTree	MeshTree;
 
 DECLARE_GPU_STAT_NAMED(BuilCellReservoir, TEXT("BuilCellReservoir"));
 
-void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& GraphBuilder, FGlobalIlluminationRGS::FParameters* PassParameters,float UpscaleFactor,
+void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& GraphBuilder, FMeshLightCommonParameter* PassParameters,float UpscaleFactor,
 	FBox& OutMeshLightBounds)
 {
 	///mesh light
@@ -2069,8 +2072,10 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 	GTree.FindLightCuts(*Scene, View, GraphBuilder, PassParameters->LightGridParameters.SceneLightsBoundMin, PassParameters->LightGridParameters.SceneLightsBoundMax,
 		1.0 / UpscaleFactor);
 
+	FMeshLightCommonParameter MeshLightCommonParam;
 	FBox MeshLightBounds;
-	SetupMeshLightParamters(Scene, View, GraphBuilder, PassParameters, UpscaleFactor, MeshLightBounds);
+	SetupMeshLightParamters(Scene, View, GraphBuilder, &MeshLightCommonParam, UpscaleFactor, MeshLightBounds);
+	PassParameters->MeshLightCommonParam = MeshLightCommonParam;
 
 	FReGIRCommonParameters	CommonParameter;
 
@@ -2125,11 +2130,11 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 
 		
 		BuildPassParameters->CommonParameters = CommonParameter;
-		BuildPassParameters->MeshLightInstancePrimitiveBuffer = PassParameters->MeshLightInstancePrimitiveBuffer;
-		BuildPassParameters->MeshLightInstanceBuffer = PassParameters->MeshLightInstanceBuffer;
-		BuildPassParameters->MeshLightIndexBuffer = PassParameters->MeshLightIndexBuffer;
-		BuildPassParameters->MeshLightVertexBuffer = PassParameters->MeshLightVertexBuffer;
-		BuildPassParameters->NumLightTriangles = PassParameters->NumLightTriangles;
+		BuildPassParameters->MeshLightInstancePrimitiveBuffer = MeshLightCommonParam.MeshLightInstancePrimitiveBuffer;
+		BuildPassParameters->MeshLightInstanceBuffer = MeshLightCommonParam.MeshLightInstanceBuffer;
+		BuildPassParameters->MeshLightIndexBuffer = MeshLightCommonParam.MeshLightIndexBuffer;
+		BuildPassParameters->MeshLightVertexBuffer = MeshLightCommonParam.MeshLightVertexBuffer;
+		BuildPassParameters->NumLightTriangles = MeshLightCommonParam.NumLightTriangles;
 		BuildPassParameters->LightGridAxis = LightGridAxis;
 		BuildPassParameters->LightGridResolution = LightGridResolution;
 		BuildPassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
@@ -2157,11 +2162,11 @@ void FDeferredShadingSceneRenderer::RenderRayTracingGlobalIlluminationBruteForce
 		//BuildPassParameters->RWLightReservoirHistoryUAV = GraphBuilder.CreateUAV(ReGIRReservoirsHistory);
 
 		BuildPassParameters->LightReservoirHistory = GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(View.PrevViewInfo.SampledReGIRHistory.Reservoirs));
-		BuildPassParameters->MeshLightInstancePrimitiveBuffer = PassParameters->MeshLightInstancePrimitiveBuffer;
-		BuildPassParameters->MeshLightInstanceBuffer = PassParameters->MeshLightInstanceBuffer;
-		BuildPassParameters->MeshLightIndexBuffer = PassParameters->MeshLightIndexBuffer;
-		BuildPassParameters->MeshLightVertexBuffer = PassParameters->MeshLightVertexBuffer;
-		BuildPassParameters->NumLightTriangles = PassParameters->NumLightTriangles;
+		BuildPassParameters->MeshLightInstancePrimitiveBuffer = MeshLightCommonParam.MeshLightInstancePrimitiveBuffer;
+		BuildPassParameters->MeshLightInstanceBuffer = MeshLightCommonParam.MeshLightInstanceBuffer;
+		BuildPassParameters->MeshLightIndexBuffer = MeshLightCommonParam.MeshLightIndexBuffer;
+		BuildPassParameters->MeshLightVertexBuffer = MeshLightCommonParam.MeshLightVertexBuffer;
+		BuildPassParameters->NumLightTriangles = MeshLightCommonParam.NumLightTriangles;
 		BuildPassParameters->LightGridAxis = LightGridAxis;
 		BuildPassParameters->LightGridResolution = LightGridResolution;
 		BuildPassParameters->MaxTemporalHistory = CVarReGIRTemporalMaxHistory.GetValueOnRenderThread();

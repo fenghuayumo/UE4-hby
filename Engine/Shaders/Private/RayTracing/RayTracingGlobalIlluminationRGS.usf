@@ -435,7 +435,11 @@ float GetTargetPdf(float3 Irradiance)
 	return dot(Irradiance, 1);
 }
 
+#if LIGHT_SAMPLING_TYPE == 5
 #define REGIR_SAMPLING 1
+#else
+#define REGIR_SAMPLING 0
+#endif
 
 RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 {
@@ -510,7 +514,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 		float3 RandSample = RandomSequence_GenerateSample3D(RandSequence);
 #if MESH_LIGHT_SAMPLING
 
-#ifdef REGIR_SAMPLING
+#if REGIR_SAMPLING
 		// float3 RandSample3 = RandContext.GenerateSample3D();
 		float3 GridCellSize = (LightBoundMax - LightBoundMin) / GridCellDim;
     	float3 CellRandomOffset = GridCellSize * float3(-0.5f + RandSample.x,
@@ -680,22 +684,6 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 				{
 					// Evaluate material
 					float3 MaterialThroughput;
-#if USE_PATHTRACING_MATERIALS
-					// EvalMaterial(CameraDirection, LightRay.Direction, Payload, MaterialWeight, MaterialEvalPdf);
-					FMaterialClosestHitPayload Payload = (FMaterialClosestHitPayload)0;
-					Payload.WorldPos = WorldPosition;
-					Payload.WorldNormal = WorldNormal;
-					Payload.BaseColor = GBufferData.BaseColor;
-					Payload.Specular = GBufferData.Specular;
-					Payload.Roughness = GBufferData.Roughness;
-					Payload.Metallic = GBufferData.Metallic;
-					Payload.Roughness = GBufferData.Roughness;
-					Payload.ShadingModelID = GBufferData.ShadingModelID;
-					Payload.CustomData = GBufferData.CustomData;
-
-					FMaterialEval MaterialEval = EvalMaterial(CameraDirection, LightRay.Direction, Payload, false);
-					MaterialThroughput = MaterialEval.Weight * MaterialEval.Pdf;
-#else
 					half3 N = WorldNormal;
 					half3 V = -CameraDirection;
 					half3 L = LightRay.Direction;
@@ -707,7 +695,6 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 					{
 						MaterialThroughput += LightingSample.Transmission;
 					}
-#endif
 
 					// Record the contribution
 	
@@ -836,7 +823,7 @@ RAY_TRACING_ENTRY_RAYGEN(GlobalIlluminationRGS)
 				Irradiance += Payload.Radiance * RayThroughput / RayPdf;
 			}
 #else
-#ifdef REGIR_SAMPLING
+#if REGIR_SAMPLING
 		float3 CellRandSample = RandomSequence_GenerateSample3D(RandSequence);
 		float3 GridCellSize = (LightBoundMax - LightBoundMin) / GridCellDim;
     	float3 CellRandomOffset = GridCellSize * float3(-0.5f + CellRandSample.x,

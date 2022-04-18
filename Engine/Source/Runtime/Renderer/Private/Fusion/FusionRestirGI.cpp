@@ -23,6 +23,8 @@
 #include "RayTracingTypes.h"
 #include "PathTracingDefinitions.h"
 #include "PathTracing.h"
+#include "LightCutRendering.h"
+#include "LightTreeTypes.h"
 
 static TAutoConsoleVariable<int32> CVarRestirGISpatial(
 	TEXT("r.RayTracing.RestirGI.Spatial"), 1,
@@ -228,8 +230,19 @@ static TAutoConsoleVariable<int32> CVarRestirGIDenoiserTemporalEnabled(
 	TEXT("whether use Temporal filter."),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarRestirGIUseScreenReprojection(
+	TEXT("r.RayTracing.RestirGI.UseScreenReprojection"), 0,
+	TEXT("whether use Screen Reprojection GI."),
+	ECVF_RenderThreadSafe);
+
+
 
 DECLARE_GPU_STAT_NAMED(RayTracingDeferedGI, TEXT("Ray Tracing GI: Defered"));
+
+extern void SetupMeshLightParamters(FScene* Scene,const FViewInfo& View, FRDGBuilder& GraphBuilder,  FMeshLightCommonParameter* PassParameters,float UpscaleFactor,
+	FBox& OutMeshLightBounds);
+
+extern MeshLightTree	MeshTree;
 
 namespace 
 {
@@ -643,92 +656,14 @@ class FRestirGIInitialSamplesRGS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FRestirGIInitialSamplesRGS)
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FRestirGIInitialSamplesRGS, FGlobalShader)
 
-		class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
-	class FEnableTransmissionDim : SHADER_PERMUTATION_INT("ENABLE_TRANSMISSION", 2);
-	class FUseSurfelDim : SHADER_PERMUTATION_BOOL("USE_SURFEL");
-	using FPermutationDomain = TShaderPermutationDomain<FEnableTwoSidedGeometryDim, FEnableTransmissionDim, FUseSurfelDim>;
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
-	}
-
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		ApplyRestirGIGlobalSettings(OutEnvironment);
-	}
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-
-		SHADER_PARAMETER(int32, OutputSlice)
-		SHADER_PARAMETER(int32, HistoryReservoir)
-		SHADER_PARAMETER(int32, InitialCandidates)
-
-		SHADER_PARAMETER(uint32, MaxBounces)
-		SHADER_PARAMETER(uint32, EvalSkyLight)
-		SHADER_PARAMETER(uint32, UseRussianRoulette)
-		SHADER_PARAMETER(uint32, UseFireflySuppression)
-
-		SHADER_PARAMETER(float, LongPathRatio)
-		SHADER_PARAMETER(float, MaxRayDistanceForGI)
-		SHADER_PARAMETER(float, MaxRayDistanceForAO)
-		SHADER_PARAMETER(float, NextEventEstimationSamples)
-
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FPathTracingLight>, SceneLights)
-		SHADER_PARAMETER(uint32, SceneLightCount)
-		SHADER_PARAMETER_STRUCT_INCLUDE(FPathTracingSkylight, SkylightParameters)
-
-		SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureParameters, SceneTextures)
-
-		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
-
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
-		SHADER_PARAMETER_STRUCT_INCLUDE(FRestirGICommonParameters, RestirGICommonParameters)
-
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelMetaBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashKeyBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashValueBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<SurfelVertexPacked>, SurfelVertexBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, CellIndexOffsetBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelIndexBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, SurfelIrradianceBuf)
-		END_SHADER_PARAMETER_STRUCT()
-};
-
-IMPLEMENT_GLOBAL_SHADER(FRestirGIInitialSamplesRGS, "/Engine/Private/RestirGI/RayTracingRestirGILighting.usf", "GenerateInitialSamplesRGS", SF_RayGen);
-
-class FRestirGIInitialSamplesForDeferedRGS : public FGlobalShader
-{
-	DECLARE_GLOBAL_SHADER(FRestirGIInitialSamplesForDeferedRGS)
-	SHADER_USE_ROOT_PARAMETER_STRUCT(FRestirGIInitialSamplesForDeferedRGS, FGlobalShader)
-
-	// class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
+	// 	class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
 	// class FEnableTransmissionDim : SHADER_PERMUTATION_INT("ENABLE_TRANSMISSION", 2);
 	class FUseSurfelDim : SHADER_PERMUTATION_BOOL("USE_SURFEL");
-	class FDeferredMaterialMode : SHADER_PERMUTATION_ENUM_CLASS("DIM_DEFERRED_MATERIAL_MODE", EDeferredMaterialMode);
-	class FAMDHitToken : SHADER_PERMUTATION_BOOL("DIM_AMD_HIT_TOKEN");
-	class FUseRadianceCache : SHADER_PERMUTATION_BOOL("USE_RADIANCE_CACHE");
-	using FPermutationDomain = TShaderPermutationDomain<FDeferredMaterialMode,FAMDHitToken,FUseSurfelDim, FUseRadianceCache>;
+	class FUseScreenReprojectionDim : SHADER_PERMUTATION_BOOL("USE_SCREEN_GI_REPROJECTION");
+	using FPermutationDomain = TShaderPermutationDomain< FUseSurfelDim,FUseScreenReprojectionDim>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
-		if (!ShouldCompileRayTracingShadersForProject(Parameters.Platform))
-		{
-			return false;
-		}
-
-		FPermutationDomain PermutationVector(Parameters.PermutationId);
-		if (PermutationVector.Get<FDeferredMaterialMode>() == EDeferredMaterialMode::None)
-		{
-			return false;
-		}
-
-		if (PermutationVector.Get<FAMDHitToken>() && !(IsD3DPlatform(Parameters.Platform) && IsPCPlatform(Parameters.Platform)))
-		{
-			return false;
-		}
-
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
 	}
 
@@ -736,8 +671,6 @@ class FRestirGIInitialSamplesForDeferedRGS : public FGlobalShader
 	{
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 		ApplyRestirGIGlobalSettings(OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("UE_RAY_TRACING_DISPATCH_1D"), 1); // Always using 1D dispatches
-		OutEnvironment.SetDefine(TEXT("USE_DEFERED_GI"), 1);
 		OutEnvironment.SetDefine(TEXT("ENABLE_TWO_SIDED_GEOMETRY"), 1);
 		OutEnvironment.SetDefine(TEXT("ENABLE_TRANSMISSION"), 1);
 	}
@@ -769,6 +702,108 @@ class FRestirGIInitialSamplesForDeferedRGS : public FGlobalShader
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FRestirGICommonParameters, RestirGICommonParameters)
 
+		//surfel gi
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, SurfelMetaBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, SurfelGridMetaBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32> , SurfelEntryCellBuf)
+		
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelLifeBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelPoolBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FSurfelVertexPacked>, SurfelRePositionBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelRePositionCountBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FSurfelVertexPacked>, SurfelVertexBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, SurfelIrradianceBuf)
+
+		END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FRestirGIInitialSamplesRGS, "/Engine/Private/RestirGI/RayTracingRestirGILighting.usf", "GenerateInitialSamplesRGS", SF_RayGen);
+
+class FRestirGIInitialSamplesForDeferedRGS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FRestirGIInitialSamplesForDeferedRGS)
+	SHADER_USE_ROOT_PARAMETER_STRUCT(FRestirGIInitialSamplesForDeferedRGS, FGlobalShader)
+
+	// class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY");
+	// class FEnableTransmissionDim : SHADER_PERMUTATION_INT("ENABLE_TRANSMISSION", 2);
+	class FUseSurfelDim : SHADER_PERMUTATION_BOOL("USE_SURFEL");
+	class FDeferredMaterialMode : SHADER_PERMUTATION_ENUM_CLASS("DIM_DEFERRED_MATERIAL_MODE", EDeferredMaterialMode);
+	class FAMDHitToken : SHADER_PERMUTATION_BOOL("DIM_AMD_HIT_TOKEN");
+	class FUseRadianceCache : SHADER_PERMUTATION_BOOL("USE_RADIANCE_CACHE");
+	class FUseScreenReprojectionDim : SHADER_PERMUTATION_BOOL("USE_SCREEN_GI_REPROJECTION");
+	using FPermutationDomain = TShaderPermutationDomain<FDeferredMaterialMode,FAMDHitToken,FUseSurfelDim, FUseRadianceCache, FUseScreenReprojectionDim>;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		if (!ShouldCompileRayTracingShadersForProject(Parameters.Platform))
+		{
+			return false;
+		}
+
+		FPermutationDomain PermutationVector(Parameters.PermutationId);
+		if (PermutationVector.Get<FDeferredMaterialMode>() == EDeferredMaterialMode::None)
+		{
+			return false;
+		}
+
+		if (PermutationVector.Get<FAMDHitToken>() && !(IsD3DPlatform(Parameters.Platform) && IsPCPlatform(Parameters.Platform)))
+		{
+			return false;
+		}
+		if (PermutationVector.Get<FDeferredMaterialMode>() == EDeferredMaterialMode::Gather && PermutationVector.Get<FUseSurfelDim>() == true)
+		{
+			return false;
+		}
+		if (PermutationVector.Get<FDeferredMaterialMode>() == EDeferredMaterialMode::Gather && PermutationVector.Get<FUseRadianceCache>() == true)
+		{
+			return false;
+		}
+		if (PermutationVector.Get<FDeferredMaterialMode>() == EDeferredMaterialMode::Gather && PermutationVector.Get<FUseScreenReprojectionDim>() == true)
+		{
+			return false;
+		}
+
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		ApplyRestirGIGlobalSettings(OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("UE_RAY_TRACING_DISPATCH_1D"), 1); // Always using 1D dispatches
+		OutEnvironment.SetDefine(TEXT("USE_DEFERED_GI"), 1);
+		OutEnvironment.SetDefine(TEXT("ENABLE_TWO_SIDED_GEOMETRY"), 1);
+		OutEnvironment.SetDefine(TEXT("ENABLE_TRANSMISSION"), 1);
+		OutEnvironment.SetDefine(TEXT("TRACE_STEP"), 1);
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+
+		SHADER_PARAMETER(int32, OutputSlice)
+		SHADER_PARAMETER(int32, HistoryReservoir)
+		SHADER_PARAMETER(int32, InitialCandidates)
+
+		SHADER_PARAMETER(uint32, MaxBounces)
+		SHADER_PARAMETER(uint32, EvalSkyLight)
+		SHADER_PARAMETER(uint32, UseRussianRoulette)
+		SHADER_PARAMETER(uint32, UseFireflySuppression)
+
+		SHADER_PARAMETER(float, LongPathRatio)
+		SHADER_PARAMETER(float, MaxRayDistanceForGI)
+		SHADER_PARAMETER(float, MaxRayDistanceForAO)
+		SHADER_PARAMETER(float, NextEventEstimationSamples)
+
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FPathTracingLight>, SceneLights)
+		SHADER_PARAMETER(uint32, SceneLightCount)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FPathTracingSkylight, SkylightParameters)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FPathTracingLightGrid, LightGridParameters)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureParameters, SceneTextures)
+
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
+
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FRestirGICommonParameters, RestirGICommonParameters)
+
 		//defered 
 		SHADER_PARAMETER(FIntPoint, RayTracingResolution)
 		SHADER_PARAMETER(FIntPoint, TileAlignedResolution)
@@ -777,17 +812,28 @@ class FRestirGIInitialSamplesForDeferedRGS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FGIRayIntersectionBookmark>, BookmarkBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDeferredMaterialPayload>, MaterialBuffer)
 
+		//mesh light
+		SHADER_PARAMETER_STRUCT_INCLUDE(FLightCutCommonParameter, LightCutCommonParameters)
+		SHADER_PARAMETER(uint32, DistanceType)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, MeshLightCutBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FLightNode>, MeshLightNodesBuffer)
+		SHADER_PARAMETER(uint32, MeshLightLeafStartIndex)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FMeshLightCommonParameter, MeshLightCommonParam)
+
 		 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWDebugDiffuseUAV)
 		// SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, RWDebugRayDistanceUAV)
 
-		//surfel
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelMetaBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashKeyBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashValueBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<SurfelVertexPacked>, SurfelVertexBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, CellIndexOffsetBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelIndexBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, SurfelIrradianceBuf)
+		//surfel gi
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, SurfelMetaBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, SurfelGridMetaBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32> , SurfelEntryCellBuf)
+		
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelLifeBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelPoolBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FSurfelVertexPacked>, SurfelRePositionBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelRePositionCountBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FSurfelVertexPacked>, SurfelVertexBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, SurfelIrradianceBuf)
 
 		//radiance probe
 		SHADER_PARAMETER(FVector,       VolumeProbeOrigin)
@@ -1186,14 +1232,15 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingRestirGI(const FViewInfo& V
 		return;
 	}
 	int EnableTransmission = CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread();
-	for (int EnableTwoSidedGeometry = 0; EnableTwoSidedGeometry < 2; ++EnableTwoSidedGeometry)
+	for (int EnableScreenReprojection = 0; EnableScreenReprojection < 2; ++EnableScreenReprojection)
 	{
 		for (int UseSurfel = 0; UseSurfel < 2; ++UseSurfel)
 		{
 			FRestirGIInitialSamplesRGS::FPermutationDomain PermutationVector;
-			PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTwoSidedGeometryDim>(EnableTwoSidedGeometry == 1);
-			PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTransmissionDim>(EnableTransmission);
+			// PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTwoSidedGeometryDim>(EnableTwoSidedGeometry == 1);
+			// PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTransmissionDim>(EnableTransmission);
 			PermutationVector.Set<FRestirGIInitialSamplesRGS::FUseSurfelDim>(UseSurfel == 1);
+			PermutationVector.Set<FRestirGIInitialSamplesRGS::FUseScreenReprojectionDim>(EnableScreenReprojection == 1);
 			TShaderMapRef<FRestirGIInitialSamplesRGS> RayGenerationShader(View.ShaderMap, PermutationVector);
 			OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
 		}
@@ -1249,10 +1296,12 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingDeferedGI(const FViewInfo& 
 		RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FDeferredMaterialMode>(EDeferredMaterialMode::Gather);
 		RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseSurfelDim>(false);
 		RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseRadianceCache>(false);
+		RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseScreenReprojectionDim>(false);
 		auto RayGenShader = View.ShaderMap->GetShader<FRestirGIInitialSamplesForDeferedRGS>(RestirPermutationVector);
 		OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 	}
 	//const bool UseWRC = CVarRestirGIUseRadianceCache.GetValueOnRenderThread() != 0;
+	const bool UseReprojection = CVarRestirGIUseScreenReprojection.GetValueOnRenderThread() != 0;
 	for (int UseSurfel = 0; UseSurfel < 2; ++UseSurfel)
 	{
 		for (int UseWRC = 0; UseWRC < 2; ++UseWRC)
@@ -1260,6 +1309,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingDeferedGI(const FViewInfo& 
 			RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FDeferredMaterialMode>(EDeferredMaterialMode::Shade);
 			RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseSurfelDim>(UseSurfel == 1);
 			RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseRadianceCache>(UseWRC == 1);
+			RestirPermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseScreenReprojectionDim>(UseReprojection);
 			TShaderMapRef<FRestirGIInitialSamplesForDeferedRGS> RayGenerationShader(View.ShaderMap, RestirPermutationVector);
 			OutRayGenShaders.Add(RayGenerationShader.GetRayTracingShader());
 		}
@@ -1287,6 +1337,7 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingDeferredGIDeferredMaterial(
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FDeferredMaterialMode>(EDeferredMaterialMode::Gather);
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseSurfelDim>(false);
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseRadianceCache>(false);
+		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseScreenReprojectionDim>(false);
 		auto RayGenShader = View.ShaderMap->GetShader<FRestirGIInitialSamplesForDeferedRGS>(PermutationVector);
 		OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 	}
@@ -1704,28 +1755,33 @@ void GenerateInitialSample(FRDGBuilder& GraphBuilder,
 		bool UseSurfel = IsSurfelGIEnabled(View) && CVarRestirGIUseSurfel.GetValueOnRenderThread() != 0;
 		if (SurfelRes && UseSurfel)
 		{
-			auto SurfelMetaBuf = SurfelRes->SurfelMetaBuf;
-			auto SurfelHashKeyBuf = SurfelRes->SurfelHashKeyBuf;
-			auto SurfelHashValueBuf = SurfelRes->SurfelHashValueBuf;
-			auto CellIndexOffsetBuf = SurfelRes->CellIndexOffsetBuf;
-			auto SurfelIndexBuf = SurfelRes->SurfelIndexBuf;
-			auto SurfelVertexBuf = SurfelRes->SurfelVertexBuf;
-			auto SurfelIrradianceBuf = SurfelRes->SurfelIrradianceBuf;
+			FRDGBufferRef SurfelMetaBuf = SurfelRes->SurfelMetaBuf;
+			FRDGBufferRef SurfelGridMetaBuf = SurfelRes->SurfelGridMetaBuf;
+			FRDGBufferRef SurfelEntryCellBuf = SurfelRes->SurfelEntryCellBuf;
+			FRDGBufferRef SurfelPoolBuf = SurfelRes->SurfelPoolBuf;
+			FRDGBufferRef SurfelLifeBuf = SurfelRes->SurfelLifeBuf;
+			FRDGBufferRef SurfelVertexBuf = SurfelRes->SurfelVertexBuf;
+			FRDGBufferRef SurfelIrradianceBuf = SurfelRes->SurfelIrradianceBuf;
+			FRDGBufferRef SurfelRePositionBuf = SurfelRes->SurfelRePositionBuf;
+			FRDGBufferRef SurfelRePositionCountBuf = SurfelRes->SurfelRePositionCountBuf;
 
-			PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateSRV(SurfelIrradianceBuf);
-			PassParameters->CellIndexOffsetBuf = GraphBuilder.CreateSRV(CellIndexOffsetBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelIndexBuf = GraphBuilder.CreateSRV(SurfelIndexBuf, EPixelFormat::PF_R8_UINT);
+			PassParameters->SurfelMetaBuf = GraphBuilder.CreateUAV(SurfelMetaBuf, EPixelFormat::PF_R8_UINT);
+			PassParameters->SurfelGridMetaBuf = GraphBuilder.CreateUAV(SurfelGridMetaBuf, EPixelFormat::PF_R8_UINT);
+			PassParameters->SurfelEntryCellBuf = GraphBuilder.CreateUAV(SurfelEntryCellBuf);
 
-			PassParameters->SurfelHashKeyBuf = GraphBuilder.CreateSRV(SurfelHashKeyBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelHashValueBuf = GraphBuilder.CreateSRV(SurfelHashValueBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelMetaBuf = GraphBuilder.CreateSRV(SurfelMetaBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelVertexBuf = GraphBuilder.CreateSRV(SurfelVertexBuf);
+			PassParameters->SurfelPoolBuf = GraphBuilder.CreateUAV(SurfelPoolBuf);
+			PassParameters->SurfelLifeBuf = GraphBuilder.CreateUAV(SurfelLifeBuf);
+			PassParameters->SurfelVertexBuf = GraphBuilder.CreateUAV(SurfelMetaBuf);
+			PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateUAV(SurfelIrradianceBuf);
+			PassParameters->SurfelRePositionBuf = GraphBuilder.CreateUAV(SurfelRePositionBuf);
+			PassParameters->SurfelRePositionCountBuf = GraphBuilder.CreateUAV(SurfelRePositionCountBuf);
 		}
 
 		FRestirGIInitialSamplesRGS::FPermutationDomain PermutationVector;
-		PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingGlobalIlluminationEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);
-		PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTransmissionDim>(CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread());
+		// PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTwoSidedGeometryDim>(CVarRayTracingGlobalIlluminationEnableTwoSidedGeometry.GetValueOnRenderThread() != 0);
+		// PermutationVector.Set<FRestirGIInitialSamplesRGS::FEnableTransmissionDim>(CVarRayTracingGlobalIlluminationEnableTransmission.GetValueOnRenderThread());
 		PermutationVector.Set<FRestirGIInitialSamplesRGS::FUseSurfelDim>(UseSurfel);
+		PermutationVector.Set<FRestirGIInitialSamplesRGS::FUseScreenReprojectionDim>(CVarRestirGIUseScreenReprojection.GetValueOnRenderThread() != 0);
 		TShaderMapRef<FRestirGIInitialSamplesRGS> RayGenShader(GetGlobalShaderMap(ERHIFeatureLevel::SM5), PermutationVector);
 		ClearUnusedGraphResources(RayGenShader, PassParameters);
 
@@ -1752,6 +1808,7 @@ void GenerateInitialSampleForDefered(FRDGBuilder& GraphBuilder,
 	int32 Reservoir,
 	int32 InitialCandidates,
 	const FIntPoint& RayTracingResolution,
+	int32 UpscaleFactor,
 	FSurfelBufResources* SurfelRes,
 	FRadianceVolumeProbeConfigs* ProbeConfig)
 {
@@ -1836,6 +1893,7 @@ void GenerateInitialSampleForDefered(FRDGBuilder& GraphBuilder,
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FDeferredMaterialMode>(EDeferredMaterialMode::Gather);
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseSurfelDim>(0);
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseRadianceCache>(0);
+		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseScreenReprojectionDim>(0);
 		auto RayGenShader = View.ShaderMap->GetShader<FRestirGIInitialSamplesForDeferedRGS>(PermutationVector);
 		ClearUnusedGraphResources(RayGenShader, &PassParameters);
 
@@ -1868,8 +1926,26 @@ void GenerateInitialSampleForDefered(FRDGBuilder& GraphBuilder,
 		PassParameters->HistoryReservoir = Reservoir;
 		PassParameters->InitialCandidates = FMath::Max(1, InitialCandidates);
 		PassParameters->RestirGICommonParameters = RestirGICommonParameters;
-		SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters);
+		SetupLightParameters(Scene, View, GraphBuilder, &PassParameters->SceneLights, &PassParameters->SceneLightCount, &PassParameters->SkylightParameters,
+		&PassParameters->LightGridParameters);
 		
+		FMeshLightCommonParameter MeshLightCommonParam;
+		FBox MeshLightBounds;
+		SetupMeshLightParamters(Scene, View, GraphBuilder, &MeshLightCommonParam, UpscaleFactor, MeshLightBounds);
+		PassParameters->MeshLightCommonParam = MeshLightCommonParam;
+
+		FLightCutCommonParameter	LightCutCommonParameters;
+		LightCutCommonParameters.CutShareGroupSize = GetCVarCutBlockSize().GetValueOnRenderThread();
+		LightCutCommonParameters.MaxCutNodes = GetMaxCutNodes();
+		LightCutCommonParameters.ErrorLimit = GetCVarErrorLimit().GetValueOnRenderThread();
+		LightCutCommonParameters.UseApproximateCosineBound = GetCVarUseApproximateCosineBound().GetValueOnRenderThread();
+		LightCutCommonParameters.InterleaveRate = GetCVarInterleaveRate().GetValueOnRenderThread();
+		PassParameters->LightCutCommonParameters = LightCutCommonParameters;
+		PassParameters->DistanceType = GetCVarLightTreeDistanceType().GetValueOnRenderThread();
+		PassParameters->MeshLightLeafStartIndex = MeshTree.GetLeafStartIndex();
+		PassParameters->MeshLightCutBuffer = GraphBuilder.CreateSRV(MeshTree.LightCutBuffer);
+		PassParameters->MeshLightNodesBuffer = GraphBuilder.CreateSRV(MeshTree.LightNodesBuffer);
+
 		//  FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(
 		//  RayTracingResolution,
 		//  PF_FloatRGBA,
@@ -1885,22 +1961,26 @@ void GenerateInitialSampleForDefered(FRDGBuilder& GraphBuilder,
 		bool UseSurfel = IsSurfelGIEnabled(View) && CVarRestirGIUseSurfel.GetValueOnRenderThread() != 0;
 		if (SurfelRes && UseSurfel)
 		{
-			auto SurfelMetaBuf = SurfelRes->SurfelMetaBuf;
-			auto SurfelHashKeyBuf = SurfelRes->SurfelHashKeyBuf;
-			auto SurfelHashValueBuf = SurfelRes->SurfelHashValueBuf;
-			auto CellIndexOffsetBuf = SurfelRes->CellIndexOffsetBuf;
-			auto SurfelIndexBuf = SurfelRes->SurfelIndexBuf;
-			auto SurfelVertexBuf = SurfelRes->SurfelVertexBuf;
-			auto SurfelIrradianceBuf = SurfelRes->SurfelIrradianceBuf;
+			FRDGBufferRef SurfelMetaBuf = SurfelRes->SurfelMetaBuf;
+			FRDGBufferRef SurfelGridMetaBuf = SurfelRes->SurfelGridMetaBuf;
+			FRDGBufferRef SurfelEntryCellBuf = SurfelRes->SurfelEntryCellBuf;
+			FRDGBufferRef SurfelPoolBuf = SurfelRes->SurfelPoolBuf;
+			FRDGBufferRef SurfelLifeBuf = SurfelRes->SurfelLifeBuf;
+			FRDGBufferRef SurfelVertexBuf = SurfelRes->SurfelVertexBuf;
+			FRDGBufferRef SurfelIrradianceBuf = SurfelRes->SurfelIrradianceBuf;
+			FRDGBufferRef SurfelRePositionBuf = SurfelRes->SurfelRePositionBuf;
+			FRDGBufferRef SurfelRePositionCountBuf = SurfelRes->SurfelRePositionCountBuf;
 
-			PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateSRV(SurfelIrradianceBuf);
-			PassParameters->CellIndexOffsetBuf = GraphBuilder.CreateSRV(CellIndexOffsetBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelIndexBuf = GraphBuilder.CreateSRV(SurfelIndexBuf, EPixelFormat::PF_R8_UINT);
+			PassParameters->SurfelMetaBuf = GraphBuilder.CreateUAV(SurfelMetaBuf, EPixelFormat::PF_R8_UINT);
+			PassParameters->SurfelGridMetaBuf = GraphBuilder.CreateUAV(SurfelGridMetaBuf, EPixelFormat::PF_R8_UINT);
+			PassParameters->SurfelEntryCellBuf = GraphBuilder.CreateUAV(SurfelEntryCellBuf);
 
-			PassParameters->SurfelHashKeyBuf = GraphBuilder.CreateSRV(SurfelHashKeyBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelHashValueBuf = GraphBuilder.CreateSRV(SurfelHashValueBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelMetaBuf = GraphBuilder.CreateSRV(SurfelMetaBuf, EPixelFormat::PF_R8_UINT);
-			PassParameters->SurfelVertexBuf = GraphBuilder.CreateSRV(SurfelVertexBuf);
+			PassParameters->SurfelPoolBuf = GraphBuilder.CreateUAV(SurfelPoolBuf);
+			PassParameters->SurfelLifeBuf = GraphBuilder.CreateUAV(SurfelLifeBuf);
+			PassParameters->SurfelVertexBuf = GraphBuilder.CreateUAV(SurfelMetaBuf);
+			PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateUAV(SurfelIrradianceBuf);
+			PassParameters->SurfelRePositionBuf = GraphBuilder.CreateUAV(SurfelRePositionBuf);
+			PassParameters->SurfelRePositionCountBuf = GraphBuilder.CreateUAV(SurfelRePositionCountBuf);
 		}
 
 		const bool UseWRC = ProbeConfig && ProbeConfig->ProbesRadiance && CVarRestirGIUseRadianceCache.GetValueOnRenderThread() != 0;
@@ -1924,6 +2004,7 @@ void GenerateInitialSampleForDefered(FRDGBuilder& GraphBuilder,
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FDeferredMaterialMode>(EDeferredMaterialMode::Shade);
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseSurfelDim>(UseSurfel);
 		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseRadianceCache>(UseWRC);
+		PermutationVector.Set<FRestirGIInitialSamplesForDeferedRGS::FUseScreenReprojectionDim>(CVarRestirGIUseScreenReprojection.GetValueOnRenderThread() != 0);
 		auto RayGenShader = View.ShaderMap->GetShader<FRestirGIInitialSamplesForDeferedRGS>(PermutationVector);
 		ClearUnusedGraphResources(RayGenShader, PassParameters);
 
@@ -2023,7 +2104,7 @@ void FDeferredShadingSceneRenderer::RenderRestirGI(
 	{
 		if( CVarRestirGIDefered.GetValueOnRenderThread() > 0)
 		{
-			GenerateInitialSampleForDefered(GraphBuilder, SceneTextures, Scene, View, CommonParameters,Reservoir, InitialCandidates, RayTracingResolution,SurfelRes, ProbeConfig);
+			GenerateInitialSampleForDefered(GraphBuilder, SceneTextures, Scene, View, CommonParameters,Reservoir, InitialCandidates, RayTracingResolution,UpscaleFactor, SurfelRes, ProbeConfig);
 		}
 		else
 			GenerateInitialSample(GraphBuilder, SceneTextures, Scene, View, CommonParameters, Reservoir, InitialCandidates, RayTracingResolution,SurfelRes);

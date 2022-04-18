@@ -19,6 +19,13 @@ SHADER_PARAMETER(int, UseApproximateCosineBound)
 SHADER_PARAMETER(int, InterleaveRate)
 END_SHADER_PARAMETER_STRUCT()
 
+BEGIN_SHADER_PARAMETER_STRUCT(FMeshLightCommonParameter,)
+	SHADER_PARAMETER_SRV(StructuredBuffer<FVector>, MeshLightVertexBuffer)
+	SHADER_PARAMETER_SRV(StructuredBuffer<uint32>, MeshLightIndexBuffer)
+	SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstanceTriangle>, MeshLightInstancePrimitiveBuffer)
+	SHADER_PARAMETER_SRV(StructuredBuffer<MeshLightInstance>, MeshLightInstanceBuffer)
+	SHADER_PARAMETER(uint32, NumLightTriangles)
+END_SHADER_PARAMETER_STRUCT()
 class LightTree
 {
 public:

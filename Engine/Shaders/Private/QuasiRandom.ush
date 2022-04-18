@@ -113,3 +113,13 @@ float3 QuasiRandom_Sample3(inout FQuasiRandom QuasiRandom)
 	// Return shifted Halton sequence value
 	return RandomSample;
 }
+
+float2 QuasiRandom_Sample2(inout FQuasiRandom QuasiRandom)
+{
+	return float2(QuasiRandom_Sample(QuasiRandom), QuasiRandom_Sample(QuasiRandom));
+}
+
+float4 QuasiRandom_Sample4(inout FQuasiRandom QuasiRandom)
+{
+	return float4(QuasiRandom_Sample3(QuasiRandom), QuasiRandom_Sample(QuasiRandom));
+}

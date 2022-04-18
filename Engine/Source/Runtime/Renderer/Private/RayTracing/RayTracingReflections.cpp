@@ -233,7 +233,7 @@ static TAutoConsoleVariable<int32> CVarRayTracingReflectionsTiming(
 	TEXT("Time cost of ray traced reflections ( 0 - off, 1 - shaded rays. 2 - material gather, 3 - all"),
 	ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<int32> CVarRayTracingReflectionsUseSurfel(
+TAutoConsoleVariable<int32> CVarRayTracingReflectionsUseSurfel(
 	TEXT("r.RayTracing.Reflections.UseSurfel"),
 	0,
 	TEXT("Whether to use surfel gi for reflection."),
@@ -349,13 +349,16 @@ class FRayTracingReflectionsRGS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FImaginaryReflectionGBufferData>, ImaginaryReflectionGBuffer)
 
 		//surfel gi
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelMetaBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashKeyBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelHashValueBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<SurfelVertexPacked>, SurfelVertexBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, CellIndexOffsetBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, SurfelIndexBuf)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, SurfelIrradianceBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, SurfelMetaBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, SurfelGridMetaBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32> , SurfelEntryCellBuf)
+		
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelLifeBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelPoolBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FSurfelVertexPacked>, SurfelRePositionBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint32>, SurfelRePositionCountBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FSurfelVertexPacked>, SurfelVertexBuf)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, SurfelIrradianceBuf)
 	
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -646,7 +649,9 @@ void FDeferredShadingSceneRenderer::RenderRayTracingReflections(
 			View,
 			DenoiserMode,
 			Options,
-			OutDenoiserInputs);
+			OutDenoiserInputs,
+			SurfelRes,
+			ProbeConfig);
 		return;
 	}
 
@@ -815,22 +820,37 @@ void FDeferredShadingSceneRenderer::RenderRayTracingReflections(
 			bool bUseSurfel = SurfelRes && SurfelRes->SurfelIrradianceBuf && CVarRayTracingReflectionsUseSurfel.GetValueOnRenderThread() != 0;
 			if (bUseSurfel)
 			{
-				auto SurfelMetaBuf = SurfelRes->SurfelMetaBuf;
-				auto SurfelHashKeyBuf = SurfelRes->SurfelHashKeyBuf;
-				auto SurfelHashValueBuf = SurfelRes->SurfelHashValueBuf;
-				auto CellIndexOffsetBuf = SurfelRes->CellIndexOffsetBuf;
-				auto SurfelIndexBuf = SurfelRes->SurfelIndexBuf;
-				auto SurfelVertexBuf = SurfelRes->SurfelVertexBuf;
-				auto SurfelIrradianceBuf = SurfelRes->SurfelIrradianceBuf;
+				 FRDGBufferRef SurfelMetaBuf = SurfelRes->SurfelMetaBuf;
+				 FRDGBufferRef SurfelGridMetaBuf = SurfelRes->SurfelGridMetaBuf;
+				 FRDGBufferRef SurfelEntryCellBuf = SurfelRes->SurfelEntryCellBuf;
+				 FRDGBufferRef SurfelPoolBuf = SurfelRes->SurfelPoolBuf;
+				 FRDGBufferRef SurfelLifeBuf = SurfelRes->SurfelLifeBuf;
+				 FRDGBufferRef SurfelVertexBuf = SurfelRes->SurfelVertexBuf;
+				 FRDGBufferRef SurfelIrradianceBuf = SurfelRes->SurfelIrradianceBuf;
+				 FRDGBufferRef SurfelRePositionBuf = SurfelRes->SurfelRePositionBuf;
+				 FRDGBufferRef SurfelRePositionCountBuf = SurfelRes->SurfelRePositionCountBuf;
 
-				PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateSRV(SurfelIrradianceBuf);
-				PassParameters->CellIndexOffsetBuf = GraphBuilder.CreateSRV(CellIndexOffsetBuf, EPixelFormat::PF_R8_UINT);
-				PassParameters->SurfelIndexBuf = GraphBuilder.CreateSRV(SurfelIndexBuf, EPixelFormat::PF_R8_UINT);
+	/*			FRDGBufferRef SurfelMetaBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelMetaBuf, TEXT("SurfelMetaBuf"));
+				FRDGBufferRef SurfelGridMetaBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelGridMetaBuf, TEXT("SurfelGridMetaBuf"));
+				FRDGBufferRef SurfelEntryCellBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelEntryCellBuf, TEXT("SurfelEntryCellBuf"));
+				FRDGBufferRef SurfelPoolBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelPoolBuf, TEXT("SurfelPoolBuf"));
+				FRDGBufferRef SurfelLifeBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelLifeBuf, TEXT("SurfelLifeBuf"));
+				FRDGBufferRef SurfelVertexBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelVertexBuf, TEXT("SurfelVertexBuf"));
+				FRDGBufferRef SurfelIrradianceBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelIrradianceBuf, TEXT("SurfelIrradianceBuf"));
+				FRDGBufferRef SurfelRePositionBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelRePositionBuf, TEXT("SurfelRePositionBuf"));
+				FRDGBufferRef SurfelRePositionCountBuf =  GraphBuilder.RegisterExternalBuffer(View.ViewState->SurfelRePositionCountBuf, TEXT("SurfelRePositionCountBuf"));*/
 
-				PassParameters->SurfelHashKeyBuf = GraphBuilder.CreateSRV(SurfelHashKeyBuf, EPixelFormat::PF_R8_UINT);
-				PassParameters->SurfelHashValueBuf = GraphBuilder.CreateSRV(SurfelHashValueBuf, EPixelFormat::PF_R8_UINT);
-				PassParameters->SurfelMetaBuf = GraphBuilder.CreateSRV(SurfelMetaBuf, EPixelFormat::PF_R8_UINT);
-				PassParameters->SurfelVertexBuf = GraphBuilder.CreateSRV(SurfelVertexBuf);
+
+				PassParameters->SurfelMetaBuf = GraphBuilder.CreateUAV(SurfelMetaBuf, EPixelFormat::PF_R8_UINT);
+				PassParameters->SurfelGridMetaBuf = GraphBuilder.CreateUAV(SurfelGridMetaBuf, EPixelFormat::PF_R8_UINT);
+				PassParameters->SurfelEntryCellBuf = GraphBuilder.CreateUAV(SurfelEntryCellBuf);
+
+				PassParameters->SurfelPoolBuf = GraphBuilder.CreateUAV(SurfelPoolBuf);
+				PassParameters->SurfelLifeBuf = GraphBuilder.CreateUAV(SurfelLifeBuf);
+				PassParameters->SurfelVertexBuf = GraphBuilder.CreateUAV(SurfelMetaBuf);
+				PassParameters->SurfelIrradianceBuf = GraphBuilder.CreateUAV(SurfelIrradianceBuf);
+				PassParameters->SurfelRePositionBuf = GraphBuilder.CreateUAV(SurfelRePositionBuf);
+				PassParameters->SurfelRePositionCountBuf = GraphBuilder.CreateUAV(SurfelRePositionCountBuf);
 			}
 
 			FRayTracingReflectionsRGS::FPermutationDomain PermutationVector;
