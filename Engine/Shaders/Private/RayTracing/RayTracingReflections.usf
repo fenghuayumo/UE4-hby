@@ -125,14 +125,18 @@ RWStructuredBuffer<FDeferredMaterialPayload> MaterialBuffer;
 
 #if USE_SURFEL
 #include "../SurfelGI/SurfelCommon.ush"
-ByteAddressBuffer SurfelMetaBuf;
-ByteAddressBuffer SurfelHashKeyBuf;
-ByteAddressBuffer SurfelHashValueBuf;
-StructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
-ByteAddressBuffer CellIndexOffsetBuf;
-ByteAddressBuffer SurfelIndexBuf;
-StructuredBuffer<float4> SurfelIrradianceBuf;
-#include "../SurfelGI/SurfelGridHash.ush"
+RWByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer SurfelGridMetaBuf;
+
+RWStructuredBuffer<uint> SurfelLifeBuf;
+RWStructuredBuffer<uint> SurfelPoolBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelRePositionBuf;
+RWStructuredBuffer<uint> SurfelRePositionCountBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+RWStructuredBuffer<float4> SurfelIrradianceBuf;
+RWStructuredBuffer<uint> SurfelEntryCellBuf;
+
+#include "../SurfelGI/SurfelLookUp.ush"
 #endif
 
 // #define USE_RADIANCE_CACHE	1
@@ -744,7 +748,7 @@ RAY_TRACING_ENTRY_RAYGEN(RayTracingReflectionsRGS)
 
 					float3 SurfelLighting = 0.0;
 #if USE_SURFEL
-					SurfelLighting += PackedPayload.GetDiffuseColor() * GetSurfelGI(RayHitWorldPos, PackedPayload.GetWorldNormal());
+					SurfelLighting += PackedPayload.GetDiffuseColor() * GetSurfelGI(RayHitWorldPos, PackedPayload.GetWorldNormal(),0, RandSequence );
 #endif
 					TopLayerRadiance += (SurfelLighting + Radiance) * Transmission;
 				}

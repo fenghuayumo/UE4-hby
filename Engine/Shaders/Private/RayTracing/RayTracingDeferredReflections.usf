@@ -70,6 +70,22 @@ RaytracingAccelerationStructure                 TLAS;
 // used during to reduce ray intersection overhead during Shading.
 RWStructuredBuffer<FRayIntersectionBookmark>    BookmarkBuffer;
 
+#if USE_SURFEL
+#include "../SurfelGI/SurfelCommon.ush"
+RWByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer SurfelGridMetaBuf;
+
+RWStructuredBuffer<uint> SurfelLifeBuf;
+RWStructuredBuffer<uint> SurfelPoolBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelRePositionBuf;
+RWStructuredBuffer<uint> SurfelRePositionCountBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+RWStructuredBuffer<float4> SurfelIrradianceBuf;
+RWStructuredBuffer<uint> SurfelEntryCellBuf;
+
+#include "../SurfelGI/SurfelLookUp.ush"
+#endif
+
 RAY_TRACING_ENTRY_RAYGEN(RayTracingDeferredReflectionsRGS)
 {
 	const uint DispatchThreadId = DispatchRaysIndex().x; // This shader is dispatched in 1D configuration
@@ -232,7 +248,9 @@ RAY_TRACING_ENTRY_RAYGEN(RayTracingDeferredReflectionsRGS)
 				bDecoupleSampleGeneration,
 				RayCone,
 				ResultColor.rgb);
-
+#if USE_SURFEL
+			ResultColor.rgb += PackedPayload.GetDiffuseColor()   * GetSurfelGI(RayHitWorldPos, PackedPayload.GetWorldNormal(),0, RandSequence );
+#endif
 			if (ShouldDoReflectionCaptures != 0)
 			{
 				float3 R = reflect(Ray.Direction, PackedPayload.GetWorldNormal());
