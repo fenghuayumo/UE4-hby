@@ -39,15 +39,21 @@ float3              Volume_Radius;
 float               ProbeBlendHistoryWeight;
 
 #if USE_SURFEL
+#define SURFEL_LOOKUP_DONT_KEEP_ALIVE   // TODO
+
 #include "../SurfelGI/SurfelCommon.ush"
-ByteAddressBuffer SurfelMetaBuf;
-ByteAddressBuffer SurfelHashKeyBuf;
-ByteAddressBuffer SurfelHashValueBuf;
-StructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
-ByteAddressBuffer CellIndexOffsetBuf;
-ByteAddressBuffer SurfelIndexBuf;
-StructuredBuffer<float4> SurfelIrradianceBuf;
-#include "../SurfelGI/SurfelGridHash.ush"
+RWByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer SurfelGridMetaBuf;
+
+RWStructuredBuffer<uint> SurfelLifeBuf;
+RWStructuredBuffer<uint> SurfelPoolBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelRePositionBuf;
+RWStructuredBuffer<uint> SurfelRePositionCountBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+RWStructuredBuffer<float4> SurfelIrradianceBuf;
+RWStructuredBuffer<uint> SurfelEntryCellBuf;
+
+#include "../SurfelGI/SurfelLookUp.ush"
 #endif
 
 void GenerateCosineNormalRay(
@@ -296,7 +302,7 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeTraceRGS)
             // albedo to a maximum value to account for the energy loss at each bounce.
             float maxAlbedo = 0.9f;
 
-            surfelLighting = GetSurfelGI(Ray.Origin, GBufferData.WorldNormal) * min(albedo, maxAlbedo);
+            surfelLighting = GetSurfelGI(Ray.Origin, GBufferData.WorldNormal, 0, RandSequence) * min(albedo, maxAlbedo);
             float3 surfacePosWS = Ray.Origin + Ray.Direction * Payload.HitT;
             // don't apply volume lighting outside the volume
             float3 relPos = abs(surfacePosWS - VolumeProbeOrigin);
