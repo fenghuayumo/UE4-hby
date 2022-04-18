@@ -1,41 +1,325 @@
 #include "/Engine/Public/Platform.ush"
 #include "/Engine/Private/DeferredShadingCommon.ush"
 #include "../PositionReconstructionCommon.ush" 
+#include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
 #include "SurfelCommon.ush"
 
-#ifdef FIND_MISS_SURFEL
+// #ifdef FIND_MISS_SURFEL
 
-#define VISUALIZE_SURFELS 1
-#define VISUALIZE_SURFELS_AS_NORMALS 1
-#define VISUALIZE_CELL_SURFEL_COUNT 0
-#define VISUALIZE_IRRADIANCE 0
-#define USE_DEBUG_OUT 1
+// #define VISUALIZE_SURFELS 1
+// #define VISUALIZE_SURFELS_AS_NORMALS 1
+// #define VISUALIZE_CELL_SURFEL_COUNT 0
+// #define VISUALIZE_IRRADIANCE 0
+// #define USE_DEBUG_OUT 1
 
 
-RWByteAddressBuffer SurfelHashKeyBuf;
-RWByteAddressBuffer SurfelHashValueBuf;
-RWByteAddressBuffer CellIndexOffsetBuf;
-RWByteAddressBuffer SurfelIndexBuf;
-RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
-RWStructuredBuffer<float4> SurfelIrradianceBuf;
+// RWByteAddressBuffer SurfelHashKeyBuf;
+// RWByteAddressBuffer SurfelHashValueBuf;
+// RWByteAddressBuffer CellIndexOffsetBuf;
+// RWByteAddressBuffer SurfelIndexBuf;
+// RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+// RWStructuredBuffer<float4> SurfelIrradianceBuf;
 
-RWByteAddressBuffer SurfelMetaBuf;
-RWStructuredBuffer<float4> SurfelSHBuf;
-RWTexture2D<float4> RWDebugOutTex;
-RWTexture2D<uint2> RWTileSurfelAllocTex;
+// RWByteAddressBuffer SurfelMetaBuf;
+// RWStructuredBuffer<float4> SurfelSHBuf;
+// RWTexture2D<float4> RWDebugOutTex;
+// RWTexture2D<uint2> RWTileSurfelAllocTex;
 
-Texture2D<float4>   NormalTexture;
-Texture2D<float>    DepthTexture;
+// Texture2D<float4>   NormalTexture;
+// Texture2D<float>    DepthTexture;
+// // Texture2D<float4>   BaseColorTexture;
+// // Texture2D<float4>   MetallicTexture;
+
+// SamplerState        PointClampSampler;
+// SamplerState        LinearClampSampler;
+// float4              ScaledViewSizeAndInvSize;
+
+// #include "SurfelGridHashMut.ush"
+
+// groupshared uint GSPxScoreLocPacked;
+
+
+// float3 tricolor_ramp(float3 a, float3 b, float3 c, float x) 
+// {
+//     x = saturate(x);
+
+//     const float lobe = pow(smoothstep(1, 0, 2 * abs(x - 0.5)), 2.5254);
+//     float aw = x < 0.5 ? 1 - lobe : 0;
+//     float bw = lobe;
+//     float cw = x > 0.5 ? 1 - lobe : 0;
+
+//     return aw * a + bw * b + cw * c;
+// }
+
+// float3 cost_color_map(float x) 
+// {
+//     return tricolor_ramp(
+//         float3(0.05, 0.2, 1),
+//         float3(0.02, 1, 0.2),
+//         float3(1, 0.01, 0.1),
+//         x
+//     );
+// }
+
+// [numthreads(8, 8, 1)]
+// void FindMissSurfel(
+//     uint2 DispatchThreadID: SV_DispatchThreadID,
+//     uint GroupIndex: SV_GroupIndex,
+//     uint2 GroupID: SV_GroupID,
+//     uint2 GroupThreadID: SV_GroupThreadID)
+// {
+//     if( DispatchThreadID.x >=  View.ViewSizeAndInvSize.x || DispatchThreadID.y >= View.ViewSizeAndInvSize.y )
+//         return;   
+//     #if USE_DEBUG_OUT
+//         RWDebugOutTex[DispatchThreadID.xy] = 0.0.xxxx;
+//     #endif
+//     if (0 == GroupIndex)
+//     {
+//         GSPxScoreLocPacked = 0;
+//         RWTileSurfelAllocTex[GroupID] = uint2(0, 0);
+//     }
+//     GroupMemoryBarrierWithGroupSync();
+
+//     int2 PixelCoord = (DispatchThreadID.xy);
+//     uint Seed = hash_combine2(hash_combine2(PixelCoord.x, hash1(PixelCoord.y)), View.StateFrameIndex);
+
+//     float2 BufferUV = (PixelCoord + View.ViewRectMin.xy + 0.5f) * View.BufferSizeAndInvSize.zw;
+//     float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
+//     float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
+//     const bool bIsValidPixel = DeviceZ > 1e-3 && DeviceZ < 0.999;
+//     if ( !bIsValidPixel) return;
+//     float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+// 	float3 WorldPosition = ReconstructWorldPositionFromDepth(BufferUV, SceneDepth);
+//     float3 WorldNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(LinearClampSampler, BufferUV, 0).xyz));
+
+//     SurfelGridHashEntry entry = SurfelHashLookupByGridCoord(GetSurfelGridCoordFromPos(WorldPosition / SURFEL_UNIT_SCALE ));
+//     const float2 GroupCenterOffset = float2(GroupThreadID) - 3.5;
+
+//     float PxScore = 1e10 / (1.0 + dot(GroupCenterOffset, GroupCenterOffset));
+
+//     uint CellIdx = 0xffffffff;
+
+//     if (entry.found) 
+//     {
+//         PxScore = 0.0;
+
+//         CellIdx = SurfelHashValueBuf.Load(sizeof(uint) * entry.idx);
+//         float3 SurfelColor = 0;//uint_id_to_color(CellIdx) * 0.3;
+
+//         // Calculate px score based on surrounding surfels
+//         uint2 SurfelIdxRange = CellIndexOffsetBuf.Load2(sizeof(uint) * CellIdx);
+//         const uint CellSurfelCount = SurfelIdxRange.y - SurfelIdxRange.x;
+
+//         // Hack: Make sure we're not iterating over tons of surfels out of bounds
+//         SurfelIdxRange.y = min(SurfelIdxRange.y, SurfelIdxRange.x + 128);
+
+//         float3 TotalColor = 0.0.xxx;
+//         float TotalWeight = 0.0;
+//         float ScoringTotalWeight = 0.0;
+//         uint UsefulSurfelCount = 0;
+
+//         for (uint idx = SurfelIdxRange.x; idx < SurfelIdxRange.y; ++idx) 
+//         {
+//             const uint SurfelIdx = SurfelIndexBuf.Load(sizeof(uint) * idx);
+
+//             SurfelVertex surfel = UnPackVertex(SurfelVertexBuf[SurfelIdx]);
+            
+//             #if VISUALIZE_SURFELS && VISUALIZE_IRRADIANCE
+//             float4 SurfelIrradiancePacked = SurfelIrradianceBuf[SurfelIdx];
+//             SurfelColor = SurfelIrradiancePacked.xyz;
+//             #endif
+
+//             #if VISUALIZE_SURFELS && VISUALIZE_SURFELS_AS_NORMALS
+//                 SurfelColor = surfel.Normal * 0.5 + 0.5;
+//             #endif
+
+//             const float3 PosOffset = (WorldPosition.xyz - surfel.Position.xyz) / SURFEL_UNIT_SCALE;;
+//             const float DirWeight = max(0.0, dot(surfel.Normal, WorldNormal));
+//             //const float DirWeight = pow(max(0.0, dot(surfel.Normal, Normal)), 2);
+//             //const float DirWeight = 1;
+//             //const float DirWeight = pow(max(0.0, 0.5 + 0.5 * dot(surfel.Normal, Normal)), 2);
+//             const float dist = length(PosOffset);
+//             const float mahalanobis_dist = length(PosOffset) * (1 + abs(dot( (PosOffset), surfel.Normal)) * SURFEL_NORMAL_DIRECTION_SQUISH);
+
+//             float Weight = smoothstep(
+//                 SURFEL_RADIUS * RADIUS_OVERSCALE,
+//                 0.0,
+//                 mahalanobis_dist) * DirWeight;
+//             const float ScoringWeight = smoothstep(
+//                 SURFEL_RADIUS,
+//                 0.0,
+//                 mahalanobis_dist) * DirWeight;
+
+//             UsefulSurfelCount += ScoringWeight > 1e-5  ? 1 : 0;
+
+//             //weight *= saturate(inverse_lerp(31.0, 128.0, SurfelIrradiancePacked.w));
+//             TotalWeight += Weight;
+//             ScoringTotalWeight += ScoringWeight;
+//             TotalColor += SurfelColor * Weight * (VISUALIZE_SURFELS ? (dist < 0.05 ? 1 : 0.1) : 1);
+//             // TotalColor += SurfelColor * 1.0/ CellSurfelCount;
+//         }
+
+//         TotalColor /= max(0.1, TotalWeight);
+
+//         #if VISUALIZE_CELL_SURFEL_COUNT
+//             TotalColor = cost_color_map(CellSurfelCount / 32.0);
+//         #endif
+
+//         if (CellSurfelCount > 128) 
+//             TotalColor = float3(0, 1, 0);
+
+//         #if USE_DEBUG_OUT
+//             RWDebugOutTex[PixelCoord] = float4(TotalColor, 1);
+//         #endif
+
+//         if (CellSurfelCount >= 32 || UsefulSurfelCount > 2 || ScoringTotalWeight > 0.2) 
+//             return;
+
+//         PxScore = 1.0 / (1.0 + TotalWeight);
+//     } 
+//     else 
+//     {
+//         if (entry.vacant) 
+//         {
+//             {
+//                 if (entry.acquire()) 
+//                 {
+//                     SurfelMetaBuf.InterlockedAdd(0 * sizeof(uint), 1, CellIdx);
+//                     SurfelHashValueBuf.Store(entry.idx * sizeof(uint), CellIdx);
+//                 } 
+//                 else 
+//                 {
+//                     // Allocating the cell
+//                     #if USE_DEBUG_OUT
+//                         RWDebugOutTex[PixelCoord] = float4(10, 0, 0, 1);
+//                     #endif
+//                     return;
+//                 }
+//             }
+//         } 
+//         else 
+//         {
+//             // Too many conflicts; cannot insert a new entry.
+//             #if USE_DEBUG_OUT
+//                 RWDebugOutTex[PixelCoord] = float4(10, 0, 10, 1);
+//             #endif
+//             return;
+//         }
+//     }
+
+//     // Execution only survives here if we would like to allocate a surfel in this tile
+//     uint PxScoreLocPacked = 0;
+//     float FarFactor = 20000.0 ;/// SURFEL_UNIT_SCALE;
+//     float PtDepth = length(WorldPosition - View.TranslatedWorldCameraOrigin);
+//     if (uint_to_u01_float(hash1_mut(Seed)) <  FarFactor / 64.0 * View.ViewSizeAndInvSize.z * View.ViewSizeAndInvSize.w)
+//     {
+//         PxScoreLocPacked = (asuint(PxScore) & (0xffffffff - 63)) | (GroupThreadID.y * 8 + GroupThreadID.x);
+//     }
+    
+//     InterlockedMax(GSPxScoreLocPacked, PxScoreLocPacked);
+//     GroupMemoryBarrierWithGroupSync();
+
+//     if (GSPxScoreLocPacked == PxScoreLocPacked && PxScoreLocPacked != 0)
+//     {
+//         #if USE_DEBUG_OUT
+//             RWDebugOutTex[PixelCoord] = float4(10, 10, 0, 1);
+//         #endif
+//         RWTileSurfelAllocTex[GroupID] = uint2(PxScoreLocPacked, CellIdx);
+//     } 
+//     else 
+//     {
+//         #if USE_DEBUG_OUT
+//         RWDebugOutTex[PixelCoord] = float4(0, 0, 10, 1);
+//         #endif
+//     }
+// }
+
+// #endif
+
+// #ifdef ALLOCATE_SURFEL
+// // #include "SurfelGridHash.ush"
+
+// RWByteAddressBuffer SurfelMetaBuf;
+// Texture2D<uint2> TileSurfelAllocTex;
+// RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+
+// Texture2D<float4>   NormalTexture;
+// Texture2D<float>    DepthTexture;
 // Texture2D<float4>   BaseColorTexture;
 // Texture2D<float4>   MetallicTexture;
 
+// SamplerState        PointClampSampler;
+// SamplerState        LinearClampSampler;
+// uint2               TileSurfelAllocTexSize;
+
+// [numthreads(8, 8, 1)]
+// void AllocateSurfels(
+//     uint2 TilePixelCoord: SV_DispatchThreadID,
+//     uint2 GroupID: SV_GroupID,
+//     uint2 GroupThreadID: SV_GroupThreadID) 
+// {
+//     if( TilePixelCoord.x >= TileSurfelAllocTexSize.x || TilePixelCoord.y >= TileSurfelAllocTexSize.y)
+//         return;
+//     const uint2 TileSurfelAllocPacked = TileSurfelAllocTex[TilePixelCoord];
+//     if (TileSurfelAllocPacked.x == 0) 
+//         return;
+
+//     const uint PxScoreLocPacked = TileSurfelAllocPacked.x;
+//     const uint CellIdx = TileSurfelAllocPacked.y;
+
+//     const uint2 PixelCoord = TilePixelCoord * 8 + uint2(PxScoreLocPacked & 7, (PxScoreLocPacked >> 3) & 7);
+
+//     float2 BufferUV = (PixelCoord + View.ViewRectMin.xy + 0.5f) * View.BufferSizeAndInvSize.zw;
+//     float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
+//     float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
+//     const bool bIsValidPixel = DeviceZ > 1e-3;
+//     if ( !bIsValidPixel) return;
+//     float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+// 	float3 WorldPosition = ReconstructWorldPositionFromDepth(BufferUV, SceneDepth);
+//     float3 WorldNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(LinearClampSampler, BufferUV, 0).xyz));
+
+//     float3 BaseColor = DecodeBaseColor(BaseColorTexture.SampleLevel(PointClampSampler, BufferUV, 0).rgb);
+//     float Metallic = MetallicTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
+//     float3 Albedo = BaseColor - BaseColor * Metallic;
+//     SurfelVertexPacked surfel = (SurfelVertexPacked)0;
+//     // TODO: proper packing
+//     surfel.data0 = float4(WorldPosition.xyz, PackNormal_11_10_11(WorldNormal));
+//     surfel.data1 = float4(Albedo, asfloat(PackUint16_16(PixelCoord)));
+//     uint SurfelIdx;
+//     SurfelMetaBuf.InterlockedAdd(1 * sizeof(uint), 1, SurfelIdx);
+
+//     SurfelVertexBuf[SurfelIdx] = surfel;
+// }
+
+// #endif
+
+#ifdef ALLOCATE_SURFEL
+
+#define VISUALIZE_CASCADES 0
+#define VISUALIZE_SURFEL_AGE 0
+#define VISUALIZE_CELLS 0
+#define USE_GEOMETRIC_NORMALS 1
+#define USE_DEBUG_OUT 1
+
+RWByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer SurfelGridMetaBuf;
+
+RWStructuredBuffer<uint> SurfelLifeBuf;
+RWStructuredBuffer<uint> SurfelPoolBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelRePositionBuf;
+RWStructuredBuffer<uint> SurfelRePositionCountBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+RWStructuredBuffer<float4> SurfelIrradianceBuf;
+RWStructuredBuffer<uint> SurfelEntryCellBuf;
+
+Texture2D<float4>   NormalTexture;
+Texture2D<float>    DepthTexture;
 SamplerState        PointClampSampler;
 SamplerState        LinearClampSampler;
 float4              ScaledViewSizeAndInvSize;
+RWTexture2D<float4> RWDebugOutTex;
 
-#include "SurfelGridHashMut.ush"
-
-groupshared uint GSPxScoreLocPacked;
+#include "SurfelLookUp.ush"
 
 
 float3 tricolor_ramp(float3 a, float3 b, float3 c, float x) 
@@ -61,7 +345,7 @@ float3 cost_color_map(float x)
 }
 
 [numthreads(8, 8, 1)]
-void FindMissSurfel(
+void AllocateSurfels(
     uint2 DispatchThreadID: SV_DispatchThreadID,
     uint GroupIndex: SV_GroupIndex,
     uint2 GroupID: SV_GroupID,
@@ -72,16 +356,9 @@ void FindMissSurfel(
     #if USE_DEBUG_OUT
         RWDebugOutTex[DispatchThreadID.xy] = 0.0.xxxx;
     #endif
-    if (0 == GroupIndex)
-    {
-        GSPxScoreLocPacked = 0;
-        RWTileSurfelAllocTex[GroupID] = uint2(0, 0);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
+    const float3 EyePos = View.WorldCameraOrigin;
+    
     int2 PixelCoord = (DispatchThreadID.xy);
-    uint Seed = hash_combine2(hash_combine2(PixelCoord.x, hash1(PixelCoord.y)), View.StateFrameIndex);
-
     float2 BufferUV = (PixelCoord + View.ViewRectMin.xy + 0.5f) * View.BufferSizeAndInvSize.zw;
     float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
     float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
@@ -91,203 +368,151 @@ void FindMissSurfel(
 	float3 WorldPosition = ReconstructWorldPositionFromDepth(BufferUV, SceneDepth);
     float3 WorldNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(LinearClampSampler, BufferUV, 0).xyz));
 
-    SurfelGridHashEntry entry = SurfelHashLookupByGridCoord(GetSurfelGridCoordFromPos(WorldPosition / SURFEL_UNIT_SCALE ));
-    const float2 GroupCenterOffset = float2(GroupThreadID) - 3.5;
+    const uint cellIdx = GetHashFromSurfelGridCoord(GetSurfelGridCoordFromPos(WorldPosition.xyz, EyePos));
 
-    float PxScore = 1e10 / (1.0 + dot(GroupCenterOffset, GroupCenterOffset));
+    const uint4 ptC4 = SurfelGridCoordToC4(GetSurfelGridCoordFromPos(WorldPosition.xyz, EyePos));
+    const uint ptC4Hash = GetHashFromSurfelGridCoord4(ptC4);
 
-    uint CellIdx = 0xffffffff;
+    float3 surfelColor = 0.0.xxx;
 
-    if (entry.found) 
-    {
-        PxScore = 0.0;
+    RandomSequence RandSequence;
+    RandomSequence_Initialize(RandSequence, PixelCoord, 0, View.StateFrameIndex, 1);
 
-        CellIdx = SurfelHashValueBuf.Load(sizeof(uint) * entry.idx);
-        float3 SurfelColor = 0;//uint_id_to_color(CellIdx) * 0.3;
-
-        // Calculate px score based on surrounding surfels
-        uint2 SurfelIdxRange = CellIndexOffsetBuf.Load2(sizeof(uint) * CellIdx);
-        const uint CellSurfelCount = SurfelIdxRange.y - SurfelIdxRange.x;
-
-        // Hack: Make sure we're not iterating over tons of surfels out of bounds
-        SurfelIdxRange.y = min(SurfelIdxRange.y, SurfelIdxRange.x + 128);
-
-        float3 TotalColor = 0.0.xxx;
-        float TotalWeight = 0.0;
-        float ScoringTotalWeight = 0.0;
-        uint UsefulSurfelCount = 0;
-
-        for (uint idx = SurfelIdxRange.x; idx < SurfelIdxRange.y; ++idx) 
-        {
-            const uint SurfelIdx = SurfelIndexBuf.Load(sizeof(uint) * idx);
-
-            SurfelVertex surfel = UnPackVertex(SurfelVertexBuf[SurfelIdx]);
-            
-            #if VISUALIZE_SURFELS && VISUALIZE_IRRADIANCE
-            float4 SurfelIrradiancePacked = SurfelIrradianceBuf[SurfelIdx];
-            SurfelColor = SurfelIrradiancePacked.xyz;
-            #endif
-
-            #if VISUALIZE_SURFELS && VISUALIZE_SURFELS_AS_NORMALS
-                SurfelColor = surfel.Normal * 0.5 + 0.5;
-            #endif
-
-            const float3 PosOffset = (WorldPosition.xyz - surfel.Position.xyz) / SURFEL_UNIT_SCALE;;
-            const float DirWeight = max(0.0, dot(surfel.Normal, WorldNormal));
-            //const float DirWeight = pow(max(0.0, dot(surfel.Normal, Normal)), 2);
-            //const float DirWeight = 1;
-            //const float DirWeight = pow(max(0.0, 0.5 + 0.5 * dot(surfel.Normal, Normal)), 2);
-            const float dist = length(PosOffset);
-            const float mahalanobis_dist = length(PosOffset) * (1 + abs(dot( (PosOffset), surfel.Normal)) * SURFEL_NORMAL_DIRECTION_SQUISH);
-
-            float Weight = smoothstep(
-                SURFEL_RADIUS * RADIUS_OVERSCALE,
-                0.0,
-                mahalanobis_dist) * DirWeight;
-            const float ScoringWeight = smoothstep(
-                SURFEL_RADIUS,
-                0.0,
-                mahalanobis_dist) * DirWeight;
-
-            UsefulSurfelCount += ScoringWeight > 1e-5  ? 1 : 0;
-
-            //weight *= saturate(inverse_lerp(31.0, 128.0, SurfelIrradiancePacked.w));
-            TotalWeight += Weight;
-            ScoringTotalWeight += ScoringWeight;
-            TotalColor += SurfelColor * Weight * (VISUALIZE_SURFELS ? (dist < 0.05 ? 1 : 0.1) : 1);
-            // TotalColor += SurfelColor * 1.0/ CellSurfelCount;
-        }
-
-        TotalColor /= max(0.1, TotalWeight);
-
-        #if VISUALIZE_CELL_SURFEL_COUNT
-            TotalColor = cost_color_map(CellSurfelCount / 32.0);
-        #endif
-
-        if (CellSurfelCount > 128) 
-            TotalColor = float3(0, 1, 0);
-
-        #if USE_DEBUG_OUT
-            RWDebugOutTex[PixelCoord] = float4(TotalColor, 1);
-        #endif
-
-        if (CellSurfelCount >= 32 || UsefulSurfelCount > 2 || ScoringTotalWeight > 0.2) 
-            return;
-
-        PxScore = 1.0 / (1.0 + TotalWeight);
-    } 
-    else 
-    {
-        if (entry.vacant) 
-        {
-            {
-                if (entry.acquire()) 
-                {
-                    SurfelMetaBuf.InterlockedAdd(0 * sizeof(uint), 1, CellIdx);
-                    SurfelHashValueBuf.Store(entry.idx * sizeof(uint), CellIdx);
-                } 
-                else 
-                {
-                    // Allocating the cell
-                    #if USE_DEBUG_OUT
-                        RWDebugOutTex[PixelCoord] = float4(10, 0, 0, 1);
-                    #endif
-                    return;
-                }
-            }
-        } 
-        else 
-        {
-            // Too many conflicts; cannot insert a new entry.
-            #if USE_DEBUG_OUT
-                RWDebugOutTex[PixelCoord] = float4(10, 0, 10, 1);
-            #endif
-            return;
-        }
-    }
-
-    // Execution only survives here if we would like to allocate a surfel in this tile
-    uint PxScoreLocPacked = 0;
-    float FarFactor = 20000.0 ;/// SURFEL_UNIT_SCALE;
-    float PtDepth = length(WorldPosition - View.TranslatedWorldCameraOrigin);
-    if (uint_to_u01_float(hash1_mut(Seed)) <  FarFactor / 64.0 * View.ViewSizeAndInvSize.z * View.ViewSizeAndInvSize.w)
-    {
-        PxScoreLocPacked = (asuint(PxScore) & (0xffffffff - 63)) | (GroupThreadID.y * 8 + GroupThreadID.x);
-    }
+    float3 debugColor = GetSurfelGI(WorldPosition.xyz, WorldNormal, 0, RandSequence);
     
-    InterlockedMax(GSPxScoreLocPacked, PxScoreLocPacked);
-    GroupMemoryBarrierWithGroupSync();
+    #if VISUALIZE_CASCADES
+        SurfelVertex surfel;
+        surfel.Position = WorldPosition.xyz;
+        SurfelGridMinMax box = GetSurfelGridBoxMinMax(surfel, View.WorldCameraOrigin);
 
-    if (GSPxScoreLocPacked == PxScoreLocPacked && PxScoreLocPacked != 0)
+        debugColor = cost_color_map((
+            GetFloatCascadeFromSurfelGridCoord(GetSurfelGridCoordFromPos(WorldPosition.xyz, EyePos))
+            + 1) / 8.0
+        );
+
+        debugColor = cost_color_map(
+            (box.c4_min[0].w + 1) / 8.0
+        );
+
+        debugColor = cost_color_map(
+            (box.c4_min[0].x % 32 + 1) / 32.0
+        );
+
+        if (box.cascade_count > 1) {
+            debugColor = 1;
+        }
+    #endif
+
+    if (VISUALIZE_CELLS) 
     {
-        #if USE_DEBUG_OUT
-            RWDebugOutTex[PixelCoord] = float4(10, 10, 0, 1);
-        #endif
-        RWTileSurfelAllocTex[GroupID] = uint2(PxScoreLocPacked, CellIdx);
+        const uint h = hash4(ptC4);
+        debugColor = float3(h % 11, h % 29, h % 7) / float3(10, 28, 6);
+    }
+
+    #if USE_DEBUG_OUT
+        RWDebugOutTex[DispatchThreadID] = float4(debugColor, 1);
+    #endif
+}
+
+#endif
+
+#ifdef AGE_SURFEL
+RWByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer SurfelGridMetaBuf;
+
+RWStructuredBuffer<uint> SurfelLifeBuf;
+RWStructuredBuffer<uint> SurfelPoolBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelRePositionBuf;
+RWStructuredBuffer<uint> SurfelRePositionCountBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
+RWStructuredBuffer<float4> SurfelIrradianceBuf;
+RWStructuredBuffer<uint> SurfelEntryCellBuf;
+
+void AgeSurfel(uint entryIdx) 
+{
+    const uint prevAge = SurfelLifeBuf[entryIdx];
+    const uint newAge = prevAge + 1;
+
+    if (IsSurfelLifeValid(newAge))
+        SurfelLifeBuf[entryIdx] = newAge;
+    else 
+    {
+        //kill , deallocate
+        SurfelLifeBuf[entryIdx] = SURFEL_LIFE_RECYCLED;
+
+        SurfelIrradianceBuf[entryIdx] = 0.0.xxxx;
+        uint surfelAllocCount = 0;
+        SurfelMetaBuf.InterlockedAdd(SURFEL_META_ALLOC_COUNT, -1, surfelAllocCount);
+        SurfelPoolBuf[surfelAllocCount - 1] = entryIdx;
+
+        const uint cellIdx = SurfelEntryCellBuf[entryIdx];
+        SurfelGridMetaBuf.InterlockedAnd(sizeof(uint4) * cellIdx + sizeof(uint), ~SURF_RCACHE_ENTRY_META_OCCUPIED);
+    }
+}
+
+[numthreads(64, 1, 1)]
+void AgeSurfelCS(uint SurfelIdx: SV_DispatchThreadID) 
+{
+    const uint SurfelCount = SurfelMetaBuf.Load(SURFEL_META_ENTRY_COUNT);
+    if (SurfelIdx < SurfelCount) 
+    {
+        if (SurfelLifeNeedsAging(SurfelLifeBuf[SurfelIdx]))
+            AgeSurfel(SurfelIdx);
+
+        SurfelVertexPacked proposal = SurfelRePositionBuf[SurfelIdx];
+        SurfelVertexBuf[SurfelIdx] = proposal;
+
+        SurfelRePositionCountBuf[SurfelIdx] = 0;
     } 
     else 
     {
-        #if USE_DEBUG_OUT
-        RWDebugOutTex[PixelCoord] = float4(0, 0, 10, 1);
-        #endif
+        SurfelVertexPacked invalid = (SurfelVertexPacked)0;
+        invalid.data0 = asfloat(0);
+        invalid.data1 = asfloat(0);
+        SurfelVertexBuf[SurfelIdx] = invalid;
     }
 }
 
 #endif
 
-#ifdef ALLOCATE_SURFEL
-// #include "SurfelGridHash.ush"
-
-RWByteAddressBuffer SurfelMetaBuf;
-Texture2D<uint2> TileSurfelAllocTex;
-RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
-
-Texture2D<float4>   NormalTexture;
-Texture2D<float>    DepthTexture;
-Texture2D<float4>   BaseColorTexture;
-Texture2D<float4>   MetallicTexture;
-
-SamplerState        PointClampSampler;
-SamplerState        LinearClampSampler;
-uint2               TileSurfelAllocTexSize;
-
-[numthreads(8, 8, 1)]
-void AllocateSurfels(
-    uint2 TilePixelCoord: SV_DispatchThreadID,
-    uint2 GroupID: SV_GroupID,
-    uint2 GroupThreadID: SV_GroupThreadID) 
+#ifdef CLEAR_SURFEL
+RWStructuredBuffer<uint> SurfelPoolBuf;
+RWStructuredBuffer<uint> SurfelLifeBuf;
+[numthreads(64, 1, 1)]
+void ClearSurfelCS(uint SurfelIdx: SV_DispatchThreadID) 
 {
-    if( TilePixelCoord.x >= TileSurfelAllocTexSize.x || TilePixelCoord.y >= TileSurfelAllocTexSize.y)
-        return;
-    const uint2 TileSurfelAllocPacked = TileSurfelAllocTex[TilePixelCoord];
-    if (TileSurfelAllocPacked.x == 0) 
-        return;
+    SurfelPoolBuf[SurfelIdx] = SurfelIdx;
+    //SurfelLifeBuf[SurfelIdx] = SURFEL_LIFE_RECYCLED;
+}
 
-    const uint PxScoreLocPacked = TileSurfelAllocPacked.x;
-    const uint CellIdx = TileSurfelAllocPacked.y;
 
-    const uint2 PixelCoord = TilePixelCoord * 8 + uint2(PxScoreLocPacked & 7, (PxScoreLocPacked >> 3) & 7);
+#endif
 
-    float2 BufferUV = (PixelCoord + View.ViewRectMin.xy + 0.5f) * View.BufferSizeAndInvSize.zw;
-    float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
-    float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
-    const bool bIsValidPixel = DeviceZ > 1e-3;
-    if ( !bIsValidPixel) return;
-    float SceneDepth = ConvertFromDeviceZ(DeviceZ);
-	float3 WorldPosition = ReconstructWorldPositionFromDepth(BufferUV, SceneDepth);
-    float3 WorldNormal = normalize(DecodeNormal(NormalTexture.SampleLevel(LinearClampSampler, BufferUV, 0).xyz));
+#ifdef PRE_DISPATCH_SURFEL_ARGS
+ByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer IndirectDispatchArgs;
 
-    float3 BaseColor = DecodeBaseColor(BaseColorTexture.SampleLevel(PointClampSampler, BufferUV, 0).rgb);
-    float Metallic = MetallicTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
-    float3 Albedo = BaseColor - BaseColor * Metallic;
-    SurfelVertexPacked surfel = (SurfelVertexPacked)0;
-    // TODO: proper packing
-    surfel.data0 = float4(WorldPosition.xyz, PackNormal_11_10_11(WorldNormal));
-    surfel.data1 = float4(Albedo, asfloat(PackUint16_16(PixelCoord)));
-    uint SurfelIdx;
-    SurfelMetaBuf.InterlockedAdd(1 * sizeof(uint), 1, SurfelIdx);
+// RWBuffer<uint> IndirectDispatchArgs;
 
-    SurfelVertexBuf[SurfelIdx] = surfel;
+// void WriteArgs1D(uint Index, uint ThreadCount)
+// {
+// 	IndirectDispatchArgs[Index * 3 + 0] = ThreadCount;
+// 	IndirectDispatchArgs[Index * 3 + 1] = 1;
+// 	IndirectDispatchArgs[Index * 3 + 2] = 1;
+// }
+
+[numthreads(1, 1, 1)]
+void PrepareDispatchArgs() 
+{
+    const uint SurfelCount = SurfelMetaBuf.Load(SURFEL_META_ENTRY_COUNT);
+    {
+        static const uint ThreadsPerGroup = 64;
+        static const uint EntriesPerThread = 1;
+        static const uint Divisor = ThreadsPerGroup * EntriesPerThread;
+
+        IndirectDispatchArgs.Store3(0 * sizeof(uint3), uint3((SurfelCount + Divisor - 1) / Divisor, 1, 1));
+        //WriteArgs1D(1, (SurfelCount + Divisor - 1) / Divisor);
+    }
 }
 
 #endif

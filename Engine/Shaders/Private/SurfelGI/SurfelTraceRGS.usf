@@ -55,7 +55,6 @@ void PreDispatchTrace()
 #include "../PathTracing/Light/PathTracingLightSampling.ush"
 
 #include "SurfelCommon.ush"
-// #include "SurfelGridHash.ush"
 
 RaytracingAccelerationStructure TLAS;
 
@@ -76,9 +75,19 @@ uint RenderTileOffsetX;
 uint RenderTileOffsetY;
 uint AccumulateEmissive;
 
+RWByteAddressBuffer SurfelMetaBuf;
+RWByteAddressBuffer SurfelGridMetaBuf;
+RWStructuredBuffer<float4> SurfelAuxiBuf; //0 : prev irradiance, 1 : varaicne related variable
+
+RWStructuredBuffer<uint> SurfelLifeBuf;
+RWStructuredBuffer<uint> SurfelPoolBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelRePositionBuf;
+RWStructuredBuffer<uint> SurfelRePositionCountBuf;
+RWStructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
 RWStructuredBuffer<float4> SurfelIrradianceBuf;
-StructuredBuffer<SurfelVertexPacked> SurfelVertexBuf;
-ByteAddressBuffer SurfelMetaBuf;
+RWStructuredBuffer<uint> SurfelEntryCellBuf;
+
+#include "SurfelLookUp.ush"
 
 void GenerateCosineNormalRay(
 	float3 WorldPosition,
@@ -103,31 +112,43 @@ void GenerateCosineNormalRay(
 }
 
 
-#define TARGET_SAMPLE_COUNT 32
+#define TARGET_SAMPLE_COUNT 128
+static const uint SHORT_ESTIMATOR_SAMPLE_COUNT = 4;
 
 RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 {
 	const uint SurfelIndex = DispatchRaysIndex().x;
-	const uint SurfelCount = SurfelMetaBuf.Load(sizeof(uint) * 1);
-	if( SurfelIndex >= SurfelCount)
+	const uint SurfelCount = SurfelMetaBuf.Load(SURFEL_META_ENTRY_COUNT);
+
+	const uint life = SurfelLifeBuf[SurfelIndex];
+
+	if( SurfelIndex >= SurfelCount || !IsSurfelLifeValid(life) )
 		return ;
 	
-    const SurfelVertex surfel = UnPackVertex(SurfelVertexBuf[SurfelIndex]);
+	#if USE_DYNAMIC_TRACE_ORIGIN
+        const SurfelVertex surfel = UnPackVertex(SurfRePositionBuf[SurfelIndex]);
+    #else
+        const SurfelVertex surfel = UnPackVertex(SurfelVertexBuf[SurfelIndex]);
+    #endif
 
-	uint2 PixelCoord = surfel.PixelCoord;
-    float4 PrevRadiancePacked = min(SurfelIrradianceBuf[SurfelIndex], TARGET_SAMPLE_COUNT);
-	float3 DiffuseColor = surfel.DiffuseColor;
-	if (Luminance(DiffuseColor) < DiffuseThreshold)
-	{
-		return;
-	}
+
+	uint2 PixelCoord = uint2(SurfelIndex % 2048, SurfelIndex / 2048 );
+    // float4 PrevRadiancePacked = min(SurfelIrradianceBuf[SurfelIndex], TARGET_SAMPLE_COUNT);
+
+	const float4 PrevTotalRadiancePacked = SurfelAuxiBuf[SurfelIndex * 2 + 0];
+
+
+	// float3 DiffuseColor = surfel.DiffuseColor;
+	// if (Luminance(DiffuseColor) < DiffuseThreshold)
+	// {
+	// 	return;
+	// }
 
 	// uint  SampleCount = 4;
     float  ValidSampleCount = 0;
 	float3 Irradiance = 0;
-    float HitDistance = 0;
-	float HitCount = 0.0;
-	// float AmbientOcclusion = 0.0;
+	float3 Sample0Irradiance = 0.0;
+
     for (uint SampleIndex = 0; SampleIndex < SamplesPerPixel; ++SampleIndex)
 	{
         ValidSampleCount += 1.0;
@@ -138,23 +159,27 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 		float3 RayThroughput = 1.0;
 		float3 RandSample = RandomSequence_GenerateSample3D(RandSequence);
 		
-		if (UseRussianRoulette)
-		{
-			float RRSample = RandSample.x;
-			float ProbabilityOfSuccess = Luminance(DiffuseColor);
-			float ProbabilityOfTermination = 1.0 - ProbabilityOfSuccess;
-			if (RRSample < ProbabilityOfTermination) continue;
-			RayThroughput /= ProbabilityOfSuccess;
-		}
+		// if (UseRussianRoulette)
+		// {
+		// 	float RRSample = RandSample.x;
+		// 	float ProbabilityOfSuccess = Luminance(DiffuseColor);
+		// 	float ProbabilityOfTermination = 1.0 - ProbabilityOfSuccess;
+		// 	if (RRSample < ProbabilityOfTermination) continue;
+		// 	RayThroughput /= ProbabilityOfSuccess;
+		// }
 
+    	const uint SequenceIdx = hash1(SurfelIndex) + SampleIndex + View.StateFrameIndex * SamplesPerPixel;
+		const float2 Rand2 = r2_sequence(SequenceIdx % max(128, TARGET_SAMPLE_COUNT));
+		
 		RayDesc Ray;
 		float RayPdf = 1.0;
-		GenerateCosineNormalRay(surfel.Position, surfel.Normal, RandSample.yz, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
-		RayThroughput *= Diffuse_Lambert(DiffuseColor) * saturate(dot(surfel.Normal, Ray.Direction)) / DiffuseColor;
-
+		GenerateCosineNormalRay(surfel.Position, surfel.Normal, Rand2, Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RayPdf);
+		RayThroughput *=  saturate(dot(surfel.Normal, Ray.Direction)) / PI;
+		//RayPdf = 1.0;
+		
 		float MaterialPdf = 0.0;
 		uint Bounce = 0;
-		while (Bounce < MaxBounces)
+		while (Bounce < 1)
 		{
 			// Cast ray
 			uint RayFlags = 0;
@@ -192,15 +217,9 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 				break;
 			}
 
-			if (Bounce == 0)
-			{
-				HitDistance += Payload.HitT;
-				HitCount += 1.0;
-				// if (Payload.HitT < MaxRayDistanceForAO)
-				// {
-				// 	AmbientOcclusion += 1.0;
-				// }
-			}
+			// if (Bounce == 0)
+			// {
+			// }
 			if (Payload.HitT > MaxRayDistanceForGI) break;
 
 			// Update intersection
@@ -311,35 +330,42 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 			}
 
 			// Perform material sampling
-			if (Bounce + 1 < MaxBounces)
-			{
-				float3 Direction;
-				float3 Throughput = 1.0;
-				float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
+			// if (Bounce + 1 < MaxBounces)
+			// {
+			// 	float3 Direction;
+			// 	float3 Throughput = 1.0;
+			// 	float3 RandSample3 = RandomSequence_GenerateSample3D(RandSequence);
 
-				float3 RayOrigin = Ray.Origin;
-				GenerateCosineNormalRay(RayOrigin, Payload.WorldNormal, RandSample3.xy, Ray.Origin, Direction, Ray.TMin, Ray.TMax, MaterialPdf);
+			// 	float3 RayOrigin = Ray.Origin;
+			// 	GenerateCosineNormalRay(RayOrigin, Payload.WorldNormal, RandSample3.xy, Ray.Origin, Direction, Ray.TMin, Ray.TMax, MaterialPdf);
 				
-				half3 N = Payload.WorldNormal;
-				half3 V = -Ray.Direction;
-				half3 L = Direction;
-				float NoL = saturate(dot(N, L));
-				FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
-				FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
-				Throughput = LightingSample.Diffuse;
-				if (MaterialPdf <= 0.0)
-				{
-					break;
-				}
+			// 	half3 N = Payload.WorldNormal;
+			// 	half3 V = -Ray.Direction;
+			// 	half3 L = Direction;
+			// 	float NoL = saturate(dot(N, L));
+			// 	FShadowTerms ShadowTerms = { 0.0, 0.0, 0.0, InitHairTransmittanceData() };
+			// 	FDirectLighting LightingSample = EvaluateBxDF(GBufferData, N, V, L, NoL, ShadowTerms);
+			// 	Throughput = LightingSample.Diffuse;
+			// 	if (MaterialPdf <= 0.0)
+			// 	{
+			// 		break;
+			// 	}
 
-				// Update ray
-				Ray.Direction = Direction;
-				RayThroughput *= Throughput;
-				RayPdf *= MaterialPdf;
-			}
-
+			// 	// Update ray
+			// 	Ray.Direction = Direction;
+			// 	RayThroughput *= Throughput;
+			// 	RayPdf *= MaterialPdf;
+			// }
+#if USE_SURFEL
+			{
+                Irradiance += GetSurfelGI(Ray.Origin, Payload.WorldNormal, 1 + SurfelLifeToRank(life), RandSequence) * GBufferData.DiffuseColor;
+            }
+#endif
 			Bounce++;
 		}
+
+		if( SampleIndex == 0 )
+			Sample0Irradiance = Irradiance;
 	}
 
 	
@@ -351,34 +377,65 @@ RAY_TRACING_ENTRY_RAYGEN(SurfelTraceRGS)
 		{
 			Irradiance *= rcp(1 - Luminance(Irradiance));
 		}
-
-		// AmbientOcclusion /= SamplesPerPixel;
 	}
 
-	if (HitCount > 0.0)
-	{
-		HitDistance /= HitCount;
-	}
-	else
-	{
-		HitDistance = -1.0;
-	}
+	const float IrradianceLum = Luminance(Irradiance);
 
-	// AmbientOcclusion = saturate(AmbientOcclusion);
+    const float4 PrevAux = SurfelAuxiBuf[SurfelIndex * 2 + 1];
+    const float PrevLuminance = PrevAux.x;
+    const float2 PrevExEx2 = PrevAux.zw;
 
-// #if USE_PREEXPOSURE
-// 	Irradiance *= View.PreExposure;
-// #endif
+	const float2 SampleExEX2 = float2(IrradianceLum, IrradianceLum * IrradianceLum);
+    const float2 BlendExEX2 = lerp(PrevExEx2, SampleExEX2, 1.0 / (1.0 + clamp(PrevTotalRadiancePacked.w, 1, SHORT_ESTIMATOR_SAMPLE_COUNT)));
 
-	const float TotalSampleCount = PrevRadiancePacked.w + ValidSampleCount;
-    const float BlendFactorNew = ValidSampleCount / max(1, TotalSampleCount);
+    const float4 NewAux = float4(
+        Luminance(Sample0Irradiance),
+        lerp(PrevAux.y, IrradianceLum, 1.0 / (1.0 + clamp(PrevTotalRadiancePacked.w, 2, 2 * SHORT_ESTIMATOR_SAMPLE_COUNT))),
+        BlendExEX2
+    );
+    SurfelAuxiBuf[SurfelIndex * 2 + 1] = NewAux;
 
-    float3 PrevValue = PrevRadiancePacked.rgb;
-	Irradiance = ClampToHalfFloatRange(Irradiance);
+    const float LumVariance = max(0.0, BlendExEX2.y - BlendExEX2.x * BlendExEX2.x);
+    const float LumDev = sqrt(LumVariance);
 
-    Irradiance = lerp(PrevValue, Irradiance, BlendFactorNew);
+    float PrevSampleCount = min(PrevTotalRadiancePacked.w, TARGET_SAMPLE_COUNT);
 
-	SurfelIrradianceBuf[SurfelIndex] = max(0.0, float4(Irradiance,TotalSampleCount));
+    const float4 prevIrradPacked = SurfelIrradianceBuf[SurfelIndex];
+    const float3 PrevIrradiance = prevIrradPacked.xyz;
+
+	//dead surfel
+    if (0 == prevIrradPacked.w) 
+        PrevSampleCount = 0;
+
+    const float TotalSampleCount = PrevSampleCount + ValidSampleCount;
+    float BlendFactorNew = ValidSampleCount / max(1, TotalSampleCount);
+
+    // Forecasting mean
+    const float QuickLumEx = min(BlendExEX2.x * 1.2, lerp(NewAux.y, BlendExEX2.x, 1.5));
+    const float3 PrevValue = PrevTotalRadiancePacked.rgb;
+    const float3 BlendValue = lerp( PrevValue, Irradiance, BlendFactorNew);
+
+    SurfelAuxiBuf[SurfelIndex * 2 + 0] = max(0.0, float4(
+        BlendValue,
+        TotalSampleCount
+    ));
+
+    const float k = 0.5;
+
+    SurfelIrradianceBuf[SurfelIndex] = max(0.0, float4(
+            pow(lerp(pow(max(0.0, PrevIrradiance), k),pow(max(0.0, BlendValue), k),0.25),1.0 / k),
+        TotalSampleCount
+    ));
+
+	// const float TotalSampleCount = PrevRadiancePacked.w + ValidSampleCount;
+    // const float BlendFactorNew = ValidSampleCount / max(1, TotalSampleCount);
+
+    // float3 PrevValue = PrevRadiancePacked.rgb;
+	// Irradiance = ClampToHalfFloatRange(Irradiance);
+
+    // Irradiance = lerp(PrevValue, Irradiance, BlendFactorNew);
+
+	// SurfelIrradianceBuf[SurfelIndex] = max(0.0, float4(Irradiance,TotalSampleCount));
 }
 
 #endif

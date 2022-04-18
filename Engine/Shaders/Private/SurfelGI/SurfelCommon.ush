@@ -2,15 +2,60 @@
 #define SURFEL_COMMON_HLSL
 #include "/Engine/Shared/SurfelTypes.h"
 #include "HashUtil.ush"
+#include "../Octahedral.ush"
+
+#define MAX_SURFELS_PER_CELL_FOR_KEEP_ALIVE 32
 
 #define SURFEL_UNIT_SCALE 100
+static const uint SURFEL_CS = 32;
 static const uint MAX_SURFEL_COUNT  = MAX_SURFELS_PER_CELL * MAX_SURFEL_CELLS;
 
-static const float SURFEL_GRID_CELL_DIAMETER = 0.25;
-
-static const float SURFEL_RADIUS = 0.3;
+static const float SURFEL_GRID_CELL_DIAMETER = 0.25 * SURFEL_UNIT_SCALE;
+// static const float SURFEL_RADIUS = 0.3;
+static const float SURFEL_RADIUS = SURFEL_GRID_CELL_DIAMETER * 1.2;
 static const float SURFEL_NORMAL_DIRECTION_SQUISH = 2.0;
 static const float RADIUS_OVERSCALE = 1.25;
+//add cascade coord
+static const float SURFEL_GRID_CASCADE_DIAMETER = SURFEL_GRID_CELL_DIAMETER * SURFEL_CS;
+static const float SURFEL_GRID_CASCADE_RADIUS = SURFEL_GRID_CASCADE_DIAMETER * 0.5;
+static const bool SURFEL_GRID_SCROLL = !true;
+
+#define SURF_RCACHE_USE_TRILINEAR 0
+#define SURF_RCACHE_USE_UNIFORM_VOTING 1
+#define SURF_RCACHE_FREEZE 0
+//#define SURFEL_META_CELL_COUNT (0 * sizeof(uint))
+#define SURFEL_META_ENTRY_COUNT (1 * sizeof(uint))
+#define SURFEL_META_ALLOC_COUNT (2 * sizeof(uint))
+
+static const uint SURF_RCACHE_ENTRY_META_OCCUPIED = 1;
+
+#define SURFEL_LIFE_RECYCLE 0x8000000u
+#define SURFEL_LIFE_RECYCLED (SURFEL_LIFE_RECYCLE + 1u)
+
+static const uint SURF_RCACHE_ENTRY_LIFE_PER_RANK = 32;
+static const uint SURF_RCACHE_ENTRY_MAX_RANK = 3;
+
+bool IsSurfelLifeValid(uint life) 
+{
+    return life < SURF_RCACHE_ENTRY_LIFE_PER_RANK * SURF_RCACHE_ENTRY_MAX_RANK;
+}
+
+bool SurfelLifeNeedsAging(uint life) 
+{
+    return life != SURFEL_LIFE_RECYCLED;
+}
+
+uint SurfelLifeToRank(uint life) 
+{
+    return life / SURF_RCACHE_ENTRY_LIFE_PER_RANK;
+}
+
+uint SurfelLifeForRank(uint rank) 
+{
+    return rank * SURF_RCACHE_ENTRY_LIFE_PER_RANK;
+}
+
+
 struct SurfelVertexPacked
 {
     float4   data0;
@@ -21,8 +66,6 @@ struct SurfelVertex
 {
     float3  Position;
     float3  Normal;
-    uint2   PixelCoord;
-    float3  DiffuseColor;
 };
 
 float UnPackUnormal(uint pckd, uint bitCount) 
@@ -77,51 +120,163 @@ uint2 UnPackUint16_16(uint p)
     return uint2(p & mask , ( p >> 16 ) & mask);
 }
 
+SurfelVertexPacked PackVertex(SurfelVertex vertex)
+{
+    SurfelVertexPacked packed = (SurfelVertexPacked)0;
+    // 
+    // packed.data1 = 
+
+    float2 octN = OctEncode(vertex.Normal);
+    packed.data0 = float4(vertex.Position, octN.x);
+    packed.data1 = float4(float3(0.0,0,0.0), octN.y);
+    return packed;
+}
+
 SurfelVertex UnPackVertex(SurfelVertexPacked p) 
 {
     SurfelVertex res;
+    float3  Normal = OctDecode(float2(p.data0.w, p.data1.w));
     res.Position = p.data0.xyz;
-    res.Normal = UnPackNormal_11_10_11(p.data0.w);
-    res.DiffuseColor = p.data1.xyz;
-    res.PixelCoord = UnPackUint16_16(asuint(p.data1.w));
+    res.Normal = Normal;
+    // res.Normal = UnPackNormal_11_10_11(p.data0.w);
+    // res.DiffuseColor = p.data1.xyz;
+    // res.PixelCoord = UnPackUint16_16(asuint(p.data1.w));
     return res;
 }
 
-int3 GetSurfelGridCoordFromPos(float3 WorldPosition) 
+int3 GetSurfelGridCoordFromPos(float3 WorldPosition, float3 EyePos) 
 {
-    return int3(floor( (WorldPosition)/ SURFEL_GRID_CELL_DIAMETER));
+    if (!SURFEL_GRID_SCROLL) 
+        EyePos = 0.0.xxx;
+    return int3(floor( (WorldPosition - EyePos)/ SURFEL_GRID_CELL_DIAMETER));
 }
 
-float3 GetSurfelGridCenter(int3 Coord) 
+float3 GetSurfelGridCenter(int4 Coord, float3 EyePos) 
 {
-    return (Coord + 0.5.xxx) * SURFEL_GRID_CELL_DIAMETER;
+    if (!SURFEL_GRID_SCROLL) 
+        EyePos = 0.0.xxx;
+    return EyePos + (Coord.xyz + 0.5.xxx  - SURFEL_CS / 2) * SURFEL_GRID_CELL_DIAMETER * (1u << uint(Coord.w));;
 }
 
-uint GetHashFromSurfelGridCoord(int3 Coord) 
+float GetFloatCascadeFromSurfelGridCoord(int3 Coord) 
 {
-    return hash3(asuint(Coord));
+    const float3 fCoord = Coord + 0.5;
+    const float MaxCoord = max(abs(fCoord.x), max(abs(fCoord.y), abs(fCoord.z)));
+    return log2(MaxCoord / (SURFEL_CS / 2));
 }
 
-uint GetHashFromSurfelPos(float3 WorldPosition) 
+uint SurfelFloatCascadeToCascade(float cascade) 
 {
-    return GetHashFromSurfelGridCoord(GetSurfelGridCoordFromPos(WorldPosition));
+    return uint(clamp(ceil(max(0.0, cascade)), 0, 7));
 }
 
-void GetSurfelGridBoxMinMax(SurfelVertex surfel, out int3 pMin, out int3 pMax) 
+uint GetCascadeFromSurfelGridCoord(int3 Coord) 
 {
-    float3 SurfelPos = surfel.Position / SURFEL_UNIT_SCALE;
-    const float3 box_min_pos = SurfelPos - SURFEL_RADIUS;
-    const float3 box_max_pos = SurfelPos + SURFEL_RADIUS;
-
-    pMin = GetSurfelGridCoordFromPos(box_min_pos);
-    pMax = GetSurfelGridCoordFromPos(box_max_pos);
+    return SurfelFloatCascadeToCascade(GetFloatCascadeFromSurfelGridCoord(Coord));
 }
 
-bool SurfelIntersectsGrid(SurfelVertex surfel, int3 GridCoord) 
+float GetSurfelRadiusFromPos(float3 Pos, float3 EyePos) 
 {
-    float3 SurfelPos = surfel.Position / SURFEL_UNIT_SCALE;
-    const float3 CellCenter = GetSurfelGridCenter(GridCoord);
-    const float GridCellRadius = SURFEL_GRID_CELL_DIAMETER * 0.5;
+    return SURFEL_RADIUS * max(1.0, 
+        length(Pos - EyePos) / SURFEL_GRID_CASCADE_RADIUS
+    );
+}
+
+int3 SurfelGridCoordWithinCascade(int3 coord, uint cascade)
+{
+    return (coord >> cascade) + SURFEL_CS / 2;
+}
+
+uint4 SurfelGridCoordToC4(int3 coord) 
+{
+    const uint cascade = GetCascadeFromSurfelGridCoord(coord);
+    const uint3 ucoordInCascade = clamp(SurfelGridCoordWithinCascade(coord, cascade), (int3)0, (int3)(SURFEL_CS - 1));
+    return uint4(ucoordInCascade, cascade);
+}
+
+// uint GetHashFromSurfelGridCoord(int3 Coord) 
+// {
+//     return hash3(asuint(Coord));
+// }
+
+uint GetHashFromSurfelGridCoord4(uint4 c4) 
+{
+    return dot(c4,uint4(1,SURFEL_CS,
+            SURFEL_CS * SURFEL_CS,
+            SURFEL_CS * SURFEL_CS * SURFEL_CS));
+}
+
+uint GetHashFromSurfelGridCoord(int3 coord) 
+{
+    return GetHashFromSurfelGridCoord4(SurfelGridCoordToC4(coord));
+}
+
+uint GetHashFromSurfelPos(float3 WorldPosition, float3 EyePos) 
+{
+    return GetHashFromSurfelGridCoord(GetSurfelGridCoordFromPos(WorldPosition, EyePos));
+}
+
+struct SurfelGridMinMax 
+{
+    uint4 c4_min[2];
+    uint4 c4_max[2];
+    uint cascade_count;
+};
+
+
+SurfelGridMinMax GetSurfelGridBoxMinMax(SurfelVertex surfel, float3 EyePos) 
+{
+    float3 SurfelPos = surfel.Position ;
+    // const float3 box_min_pos = SurfelPos - SURFEL_RADIUS;
+    // const float3 box_max_pos = SurfelPos + SURFEL_RADIUS;
+
+    // pMin = GetSurfelGridCoordFromPos(box_min_pos);
+    // pMax = GetSurfelGridCoordFromPos(box_max_pos);
+
+    const float SurfelRadius = GetSurfelRadiusFromPos(SurfelPos, EyePos);
+
+    // TODO: OBB around normal?
+    const float3 box_min_pos = SurfelPos - SurfelRadius;
+    const float3 box_max_pos = SurfelPos + SurfelRadius;
+
+    const float fc = GetFloatCascadeFromSurfelGridCoord(GetSurfelGridCoordFromPos(SurfelPos, EyePos));
+
+    const uint c0 = SurfelFloatCascadeToCascade(fc - 0.2);
+    const uint c1 = SurfelFloatCascadeToCascade(fc + 0.2);
+
+    const int3 min_coord = GetSurfelGridCoordFromPos(box_min_pos, EyePos);
+    const int3 max_coord = GetSurfelGridCoordFromPos(box_max_pos, EyePos);
+
+    SurfelGridMinMax result;
+
+    result.cascade_count = 1;
+    result.c4_min[0] = uint4(
+        clamp(SurfelGridCoordWithinCascade(min_coord, c0), (int3)(0), (int3)(SURFEL_CS - 1)),
+        c0);
+    result.c4_max[0] = uint4(
+        clamp(SurfelGridCoordWithinCascade(max_coord, c0), (int3)(0), (int3)(SURFEL_CS - 1)),
+        c0);
+
+    if (c1 != c0) 
+    {
+        result.cascade_count = 2;
+        result.c4_min[1] = uint4(
+            clamp(SurfelGridCoordWithinCascade(min_coord, c1), (int3)(0), (int3)(SURFEL_CS - 1)),
+            c1);
+        result.c4_max[1] = uint4(
+            clamp(SurfelGridCoordWithinCascade(max_coord, c1), (int3)(0), (int3)(SURFEL_CS - 1)),
+            c1);
+    }
+
+    return result;
+}
+
+bool SurfelIntersectsGrid(SurfelVertex surfel,float3 EyePos, int4 GridCoord) 
+{
+    float3 SurfelPos = surfel.Position ;
+    const float surfelRadius = GetSurfelRadiusFromPos(SurfelPos, EyePos);
+    const float3 CellCenter = GetSurfelGridCenter(GridCoord, EyePos);
+    const float GridCellRadius = SURFEL_GRID_CELL_DIAMETER * 0.5 * (1u << GridCoord.w);
     const float3 CellLocalSurfelPos = SurfelPos - CellCenter;
     const float3 CellLocalClosestPointOnGridCell =
         clamp(CellLocalSurfelPos, -GridCellRadius, GridCellRadius);
@@ -133,9 +288,9 @@ bool SurfelIntersectsGrid(SurfelVertex surfel, int3 GridCoord)
         // but greatly improves culling efficiency.
         // TODO: figure out a precise solution. Warp space before finding the closest point?
         const float mahalanobis_dist = length(PosOffset) * (1 + abs(dot((PosOffset), surfel.Normal)) * SURFEL_NORMAL_DIRECTION_SQUISH);
-        return mahalanobis_dist < SURFEL_RADIUS;
+        return mahalanobis_dist < surfelRadius;
     #else
-        return dot(PosOffset, PosOffset) < SURFEL_RADIUS * SURFEL_RADIUS;
+        return dot(PosOffset, PosOffset) < surfelRadius * surfelRadius;
     #endif
 }
 

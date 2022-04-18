@@ -58,4 +58,13 @@ float uint_to_u01_float(uint h)
 	return r2 - 1.0;
 }
 
+#define M_PLASTIC 1.32471795724474602596
+float2 r2_sequence(uint i) 
+{
+    const float a1 = 1.0 / M_PLASTIC;
+    const float a2 = 1.0 / (M_PLASTIC * M_PLASTIC);
+    
+    return frac(float2(a1, a2) * i + 0.5);
+}
+
 #endif 

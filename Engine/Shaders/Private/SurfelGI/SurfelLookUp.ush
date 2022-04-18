@@ -1,0 +1,123 @@
+struct SurfRcacheLookup 
+{
+    uint entryIdx[8];
+    float weight[8];
+    uint count;
+};
+
+SurfRcacheLookup SurfelNearestLookup(float3 WorldPos) 
+{
+    SurfRcacheLookup result;
+    result.count = 0;
+
+    const float3 EyePos = View.WorldCameraOrigin;
+    const int3 grid_coord = GetSurfelGridCoordFromPos(WorldPos.xyz, EyePos);
+    const uint4 grid_c4 = SurfelGridCoordToC4(grid_coord);
+    const uint cascade = grid_c4.w;
+
+    const uint cellIdx = GetHashFromSurfelGridCoord(grid_coord);
+    const uint4 cellMeta = SurfelGridMetaBuf.Load4(sizeof(uint4) * cellIdx);
+
+    if (cellMeta.y & SURF_RCACHE_ENTRY_META_OCCUPIED) 
+    {
+        const uint entryIdx = cellMeta.x;
+        result.entryIdx[result.count] = entryIdx;
+        result.weight[result.count] = 1;
+        result.count += 1;
+    }
+
+    return result;
+}
+
+ #define SurfelLookup SurfelNearestLookup
+
+float3 GetSurfelGI(float3 WorldPos, float3 WorldNormal, uint queryRank,inout RandomSequence RandSequence) 
+{
+#ifndef SURFEL_LOOKUP_DONT_KEEP_ALIVE
+    if (!SURF_RCACHE_FREEZE) 
+    {
+        // TODO: should be prev eye pos for the find_missing_surfels shader
+        const float3 EyePos = View.WorldCameraOrigin;
+
+        const uint cellIdx = GetHashFromSurfelGridCoord(GetSurfelGridCoordFromPos(WorldPos.xyz, EyePos));
+
+        const uint4 cellMeta = SurfelGridMetaBuf.Load4(sizeof(uint4) * cellIdx);
+        uint entryIdx = cellMeta.x;
+        const uint entryFlags = cellMeta.y;
+
+        if ((entryFlags & SURF_RCACHE_ENTRY_META_OCCUPIED) == 0) 
+        {
+            // Allocate
+
+            uint prev = 0;
+            SurfelGridMetaBuf.InterlockedOr(sizeof(uint4) * cellIdx + sizeof(uint), SURF_RCACHE_ENTRY_META_OCCUPIED, prev);
+
+            if ((prev & SURF_RCACHE_ENTRY_META_OCCUPIED) == 0) 
+            {
+                // We've allocated it!
+
+                uint alloc_idx;
+                SurfelMetaBuf.InterlockedAdd(SURFEL_META_ALLOC_COUNT, 1, alloc_idx);
+
+                entryIdx = SurfelPoolBuf[alloc_idx];
+                SurfelMetaBuf.InterlockedMax(SURFEL_META_ENTRY_COUNT, entryIdx + 1);
+
+                // Clear dead state, mark used.
+
+                InterlockedMin(SurfelLifeBuf[entryIdx], SurfelLifeForRank(queryRank));
+
+                SurfelEntryCellBuf[entryIdx] = cellIdx;
+
+                SurfelGridMetaBuf.Store(sizeof(uint4) * cellIdx + 0, entryIdx);
+            } 
+            else 
+            {
+                // We did not allocate it, so read the entry index from whoever did.
+                
+                entryIdx = SurfelGridMetaBuf.Load(sizeof(uint4) * cellIdx + 0);
+            }
+        }
+    }
+#endif
+
+    SurfRcacheLookup lookup = SurfelLookup(WorldPos);
+
+    SurfelVertex new_surfel;
+    new_surfel.Position = WorldPos.xyz;
+    new_surfel.Normal = WorldNormal;
+
+    float3 irradianceSum = 0.0.xxx;
+
+    for (uint i = 0; i < lookup.count; ++i) 
+    {
+        const uint entryIdx = lookup.entryIdx[i];
+        const float3 irradiance = SurfelIrradianceBuf[entryIdx].xyz;
+        irradianceSum += irradiance * lookup.weight[i];
+
+        if (!SURF_RCACHE_FREEZE) 
+        {
+            #ifndef SURFEL_LOOKUP_DONT_KEEP_ALIVE
+                if (SurfelLifeBuf[entryIdx] < SURFEL_LIFE_RECYCLE) 
+                {
+                    uint prevLife;
+                    InterlockedMin(SurfelLifeBuf[entryIdx], SurfelLifeForRank(queryRank), prevLife);
+
+                    const uint prevRank = SurfelLifeToRank(prevLife);
+                    if (queryRank <= prevRank) 
+                    {
+                        uint prevVoteCount;
+                        InterlockedAdd(SurfelRePositionCountBuf[entryIdx], 1, prevVoteCount);
+
+                        const float dart = RandomSequence_GenerateSample1D(RandSequence);
+                        const float prob = 1.0 / (prevVoteCount + 1.0);
+
+                        if (!SURF_RCACHE_USE_UNIFORM_VOTING || dart <= prob) 
+                            SurfelRePositionBuf[entryIdx] = PackVertex(new_surfel);
+                    }
+                }
+            #endif
+        }
+    }
+
+    return irradianceSum;
+}

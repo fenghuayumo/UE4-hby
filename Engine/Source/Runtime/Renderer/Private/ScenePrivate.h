@@ -723,13 +723,15 @@ public:
 
 	//Surfel
 	TRefCountPtr<FRDGPooledBuffer> SurfelMetaBuf;
-	TRefCountPtr<FRDGPooledBuffer> SurfelHashKeyBuf;
-	TRefCountPtr<FRDGPooledBuffer> SurfelHashValueBuf;
-	TRefCountPtr<FRDGPooledBuffer> CellIndexOffsetBuf;
-	TRefCountPtr<FRDGPooledBuffer> SurfelIndexBuf;
+	TRefCountPtr<FRDGPooledBuffer> SurfelGridMetaBuf;
+	TRefCountPtr<FRDGPooledBuffer> SurfelEntryCellBuf;
+	TRefCountPtr<FRDGPooledBuffer> SurfelPoolBuf;
+	TRefCountPtr<FRDGPooledBuffer> SurfelLifeBuf;
 	TRefCountPtr<FRDGPooledBuffer> SurfelVertexBuf;
 	TRefCountPtr<FRDGPooledBuffer> SurfelIrradianceBuf;
-	TRefCountPtr<FRDGPooledBuffer> SurfelSHBuf;
+	TRefCountPtr<FRDGPooledBuffer> SurfelRePositionBuf;
+	TRefCountPtr<FRDGPooledBuffer> SurfelRePositionCountBuf;
+	TRefCountPtr<FRDGPooledBuffer> SurfelAuxiBuf;
 #endif
 
 	// A counter incremented once each time this view is rendered.
