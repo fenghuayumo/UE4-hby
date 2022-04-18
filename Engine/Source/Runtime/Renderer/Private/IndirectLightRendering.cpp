@@ -438,7 +438,7 @@ void FDeferredShadingSceneRenderer::RenderDiffuseIndirectAndAmbientOcclusion(
 		}
 		
 		IScreenSpaceDenoiser::FDiffuseIndirectOutputs DenoiserOutputs;
-		if (DenoiseMode != 0 && ShouldScreenDoise(View))
+		if (DenoiseMode != 0 && CVarRestirGIDenoiser.GetValueOnRenderThread() == 0)
 		{
 			const IScreenSpaceDenoiser* DefaultDenoiser = IScreenSpaceDenoiser::GetDefaultDenoiser();	
 			const IScreenSpaceDenoiser* DenoiserToUse = DenoiseMode == 1 ? DefaultDenoiser : DenoiseMode == 2 ? FFusionDenoiser::GetDenoiser() : GScreenSpaceDenoiser;

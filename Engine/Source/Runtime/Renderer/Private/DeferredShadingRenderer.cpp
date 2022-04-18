@@ -2339,7 +2339,8 @@ void FDeferredShadingSceneRenderer::Render(FRHICommandListImmediate& RHICmdList)
 			RenderDitheredLODFadingOutMask(GraphBuilder, Views[0], SceneDepthTexture.Target);
 		}
 #endif
-		FSurfelBufResources SurfelRes;
+		FSurfelBufResources SurfelRes = { 0 };
+		
 		FRadianceVolumeProbeConfigs RadianceProbeConfig;
 		FRDGTextureRef DynamicBentNormalAOTexture = nullptr;
 		RenderDiffuseIndirectAndAmbientOcclusion(GraphBuilder, SceneTextures, SceneColorTexture.Target, LightingChannelsTexture, HairDatas,&SurfelRes,&RadianceProbeConfig );

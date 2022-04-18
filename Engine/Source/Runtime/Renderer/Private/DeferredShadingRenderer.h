@@ -50,13 +50,16 @@ public:
 struct FSurfelBufResources
 {
 	FRDGBufferRef SurfelMetaBuf;
-	FRDGBufferRef SurfelHashKeyBuf;
-	FRDGBufferRef SurfelHashValueBuf;
-	FRDGBufferRef CellIndexOffsetBuf;
-	FRDGBufferRef SurfelIndexBuf;
+	FRDGBufferRef SurfelGridMetaBuf;
+	FRDGBufferRef SurfelEntryCellBuf;
+	FRDGBufferRef SurfelPoolBuf;
+	FRDGBufferRef SurfelLifeBuf;
 	FRDGBufferRef SurfelVertexBuf;
 	FRDGBufferRef SurfelIrradianceBuf;
-	FRDGBufferRef SurfelSHBuf;
+	FRDGBufferRef SurfelRePositionBuf;
+	FRDGBufferRef SurfelRePositionCountBuf;
+
+	FRDGBufferRef SurfelAuxiBuf;
 };
 
 struct FRadianceVolumeProbeConfigs
@@ -707,7 +710,9 @@ private:
 		const FViewInfo& View,
 		int DenoiserMode,
 		const FRayTracingReflectionOptions& Options,
-		IScreenSpaceDenoiser::FReflectionsInputs* OutDenoiserInputs);
+		IScreenSpaceDenoiser::FReflectionsInputs* OutDenoiserInputs,
+		FSurfelBufResources* SurfelResource = nullptr,
+		FRadianceVolumeProbeConfigs* ProbeConfig = nullptr);
 
 	void RenderDitheredLODFadingOutMask(FRDGBuilder& GraphBuilder, const FViewInfo& View, FRDGTextureRef SceneDepthTexture);
 
