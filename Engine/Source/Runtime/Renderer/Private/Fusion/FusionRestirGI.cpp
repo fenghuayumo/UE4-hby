@@ -235,6 +235,11 @@ static TAutoConsoleVariable<int32> CVarRestirGIUseScreenReprojection(
 	TEXT("whether use Screen Reprojection GI."),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarReconstructSampleCount(
+	TEXT("r.RestirGI.Denioser.Spatial.ReconstructSampleCount"), 4,
+	TEXT("ReconstructSampleCount (default 4)"),
+	ECVF_RenderThreadSafe);
+
 
 
 DECLARE_GPU_STAT_NAMED(RayTracingDeferedGI, TEXT("Ray Tracing GI: Defered"));
@@ -1143,6 +1148,7 @@ class FRestirGISpatialFilterCS : public FGlobalShader
 		SHADER_PARAMETER_SAMPLER(SamplerState, LinearClampSampler)
 		SHADER_PARAMETER(FVector4, BufferTexSize)
         SHADER_PARAMETER(int, UpscaleFactor)
+		SHADER_PARAMETER(int, ReconstructSampleCount)
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
 
 
@@ -1508,6 +1514,7 @@ void PrefilterRestirGI(FRDGBuilder& GraphBuilder,
 		FIntPoint HalfTexSize = FIntPoint(TexSize.X * Config.ResolutionFraction, TexSize.Y * Config.ResolutionFraction);
 		PassParameters->BufferTexSize = FVector4(HalfTexSize.X, HalfTexSize.Y, 1.0 / HalfTexSize.X, 1.0 / HalfTexSize.Y);
 		PassParameters->UpscaleFactor = int32(1.0 / Config.ResolutionFraction);
+		PassParameters->ReconstructSampleCount = CVarReconstructSampleCount.GetValueOnRenderThread(); 
 		ClearUnusedGraphResources(ComputeShader, PassParameters);
 		FComputeShaderUtils::AddPass(
 			GraphBuilder,
@@ -1693,6 +1700,7 @@ void DenoiseRestirGI(FRDGBuilder& GraphBuilder, const FViewInfo& View, FPrevious
 
         PassParameters->BufferTexSize = BufferTexSize;
         PassParameters->UpscaleFactor = int32(1.0 /Config.ResolutionFraction); 
+		PassParameters->ReconstructSampleCount = CVarReconstructSampleCount.GetValueOnRenderThread(); 
         ClearUnusedGraphResources(ComputeShader, PassParameters);
         FComputeShaderUtils::AddPass(
             GraphBuilder,
