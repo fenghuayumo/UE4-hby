@@ -239,6 +239,13 @@ TAutoConsoleVariable<int32> CVarRayTracingReflectionsUseSurfel(
 	TEXT("Whether to use surfel gi for reflection."),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarFusionReflection(
+	TEXT("r.Fusion.Reflection"),
+	0,
+	TEXT("Whether to use the fusion restir ray traced reflection rendering algorithm, which only supports a subset of features but runs faster. (default = 0)."),
+	ECVF_RenderThreadSafe);
+
+
 // ESamplePhase
 enum class ESamplePhase
 {
@@ -495,6 +502,11 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflections(const FViewInfo
 	{
 		return;
 	}
+	if( CVarFusionReflection.GetValueOnRenderThread())
+	{
+		PrepareFusionReflections(View, Scene, OutRayGenShaders);
+		return;
+	}
 
 	if (CVarRayTracingReflectionsExperimentalDeferred.GetValueOnRenderThread())
 	{
@@ -502,7 +514,6 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflections(const FViewInfo
 		PrepareRayTracingDeferredReflections(View, Scene, OutRayGenShaders);
 		return;
 	}
-
 	const bool bHybridReflections = ShouldRayTracedReflectionsUseHybridReflections();
 	const bool bSortMaterials = ShouldRayTracedReflectionsSortMaterials(View);
 	const bool bMissShaderLighting = CanUseRayTracingLightingMissShader(View.GetShaderPlatform());
@@ -554,14 +565,17 @@ void FDeferredShadingSceneRenderer::PrepareRayTracingReflections(const FViewInfo
 void FDeferredShadingSceneRenderer::PrepareRayTracingReflectionsDeferredMaterial(const FViewInfo& View, const FScene& Scene, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
 {
 	// Declare all RayGen shaders that are used with deferred material sorts
-
+	if( CVarFusionReflection.GetValueOnRenderThread())
+	{
+		PrepareFusionReflectionsDeferredMaterial(View, Scene, OutRayGenShaders);
+		return;
+	}
 	if (CVarRayTracingReflectionsExperimentalDeferred.GetValueOnRenderThread())
 	{
 		// If deferred reflections technique is used, then we only need to gather its shaders and skip the rest.
 		PrepareRayTracingDeferredReflectionsDeferredMaterial(View, Scene, OutRayGenShaders);
 		return;
 	}
-
 	if (!ShouldRayTracedReflectionsSortMaterials(View))
 	{
 		return;
@@ -641,6 +655,19 @@ void FDeferredShadingSceneRenderer::RenderRayTracingReflections(
 	FRadianceVolumeProbeConfigs* ProbeConfig)
 #if RHI_RAYTRACING
 {
+	if( CVarFusionReflection.GetValueOnRenderThread())
+	{
+		RenderFusionReflections(
+			GraphBuilder,
+			SceneTextures,
+			View,
+			DenoiserMode,
+			Options,
+			OutDenoiserInputs,
+			SurfelRes,
+			ProbeConfig);
+		return;
+	}
 	if (Options.Algorithm == FRayTracingReflectionOptions::SortedDeferred)
 	{
 		RenderRayTracingDeferredReflections(
@@ -654,6 +681,7 @@ void FDeferredShadingSceneRenderer::RenderRayTracingReflections(
 			ProbeConfig);
 		return;
 	}
+	
 
 	const uint32 SortTileSize = CVarRayTracingReflectionsSortTileSize.GetValueOnRenderThread();
 	const uint32 EnableTranslucency = GRayTracingReflectionsTranslucency > -1 ? (uint32)GRayTracingReflectionsTranslucency : (uint32)View.FinalPostProcessSettings.RayTracingReflectionsTranslucency;
@@ -1031,8 +1059,12 @@ FRayTracingReflectionOptions GetRayTracingReflectionOptions(const FViewInfo& Vie
 #if RHI_RAYTRACING
 
 	Result.bEnabled = ShouldRenderRayTracingReflections(View);
+	if( CVarFusionReflection.GetValueOnRenderThread())
+	{
+		Result.Algorithm = FRayTracingReflectionOptions::Restir;
+	}
 
-	if (ShouldRayTracedReflectionsUseSortedDeferredAlgorithm(View))
+	else if (ShouldRayTracedReflectionsUseSortedDeferredAlgorithm(View))
 	{
 		Result.Algorithm = FRayTracingReflectionOptions::SortedDeferred;
 	}
