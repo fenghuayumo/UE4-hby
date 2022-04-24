@@ -15,6 +15,7 @@ RWTexture2D<float4> RWFilteredTex;
 
 SamplerState        LinearClampSampler;
 SamplerState        PointClampSampler;
+int                 ReconstructSampleCount;
 float4 BufferTexSize;
 int     UpscaleFactor;
 float square(float x) { return x * x; }
@@ -75,7 +76,7 @@ void SpatialFilter(in uint2 DispatchID : SV_DispatchThreadID)
     // {
     // UNROLL
     // for (int x = -KernelWidth; x <= KernelWidth; ++x) 
-    for(uint SampleIndex = 0; SampleIndex < SubPixelCount; SampleIndex++)
+    for(uint SampleIndex = 0; SampleIndex < ReconstructSampleCount; SampleIndex++)
     {
         const float Angle = (SampleIndex + RandSample) * GOLDEN_ANGLE + (RaySubPixelId / float(SubPixelCount) ) * 2 * PI;
        const float Radius = pow(float(SampleIndex), 0.666) * 1.0 + 0.4;

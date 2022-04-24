@@ -43,6 +43,11 @@ static TAutoConsoleVariable<float> CVarPlaneDistanceRejectionThreshold(
 	TEXT("Rejection threshold for rejecting samples based on plane distance differences (default 50.0)"),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarReconstructSampleCount(
+	TEXT("r.Fusion.Spatial.ReconstructSampleCount"), 4,
+	TEXT("ReconstructSampleCount (default 4)"),
+	ECVF_RenderThreadSafe);
+
 enum class ETemporalFilterStage
 {
     ResetHistory = 0,
@@ -155,6 +160,8 @@ class FDiffuseInDirectSpatialFilterCS : public FGlobalShader
 		SHADER_PARAMETER_SAMPLER(SamplerState, LinearClampSampler)
 		SHADER_PARAMETER(FVector4, BufferTexSize)
         SHADER_PARAMETER(int, UpscaleFactor)
+        SHADER_PARAMETER(int, ReconstructSampleCount)
+        
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
 
 
@@ -282,6 +289,7 @@ IScreenSpaceDenoiser::FDiffuseIndirectOutputs FFusionDenoiser::DenoiseDiffuseInd
         FIntPoint HalfTexSize = FIntPoint(TexSize.X* Config.ResolutionFraction, TexSize.Y * Config.ResolutionFraction);
         PassParameters->BufferTexSize = FVector4( HalfTexSize.X, HalfTexSize.Y, 1.0 / HalfTexSize.X, 1.0 / HalfTexSize.Y) ;
         PassParameters->UpscaleFactor = int32(1.0 /Config.ResolutionFraction); 
+        PassParameters->ReconstructSampleCount = CVarReconstructSampleCount.GetValueOnRenderThread(); 
         ClearUnusedGraphResources(ComputeShader, PassParameters);
         FComputeShaderUtils::AddPass(
             GraphBuilder,
