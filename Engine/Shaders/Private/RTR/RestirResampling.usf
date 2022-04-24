@@ -1,0 +1,301 @@
+
+#if TEMPORAL_SPATIAL_RESAMPLING
+
+#include "../Common.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../SceneTextureParameters.ush"
+#include "../ScreenSpaceDenoise/SSDPublic.ush"
+#include "../MortonCode.ush"
+#include "../BRDF.ush"
+
+#include "../RayTracing/RayTracingCommon.ush"
+#include "../RayTracing/RayTracingReflectionsCommon.ush"
+#include "../RayTracing/RayTracingDeferredReflections.ush"
+#include "../PathTracing/Utilities/PathTracingRandomSequence.ush" 
+#include "ReservoirManagement.ush"
+
+int MaxTemporalHistory;
+float2 UpscaleFactor;
+
+Texture2D<float> DepthHistory;
+Texture2D<float4> NormalHistory;
+float ReflectionMaxRoughness;
+float ReflectionSmoothBias;
+
+static const float GOLDEN_ANGLE = 2.39996323;
+
+
+[numthreads(8, 8, 1)]
+void TemporalSpatialResamplingCS(uint2 DispatchThreadID : SV_DispatchThreadID) 
+{
+    uint2 DispatchThreadId = DispatchThreadID.xy + View.ViewRectMin.xy;
+	// uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
+    uint2 PixelCoord = floor(float2(DispatchThreadId) * UpscaleFactor);
+	if (any(PixelCoord > View.ViewSizeAndInvSize.xy))
+	{
+		return;
+	}
+
+	RandomSequence RandSequence = (RandomSequence) 0; // Not actually used, since hard shadows are forced
+   RandomSequence_Initialize(RandSequence, PixelCoord, 0, View.StateFrameIndex, 1);
+
+	const float2 BufferUV = (PixelCoord + 0.5) * View.BufferSizeAndInvSize.zw;
+	FGBufferData GBuffer = GetGBufferDataFromSceneTextures(BufferUV);
+	float DeviceZ = SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+
+    const bool bIsValidPixel = DeviceZ > 1e-3 && DeviceZ < 0.999;
+    float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+	// float3 WorldPosition = ReconstructWorldPositionFromDepth(BufferUV, SceneDepth);
+    float3 WorldPosition, CameraDirection;
+    ReconstructWorldPositionAndCameraDirectionFromDeviceZ(PixelCoord, DeviceZ, WorldPosition, CameraDirection);
+	float3 WorldNormal = GBuffer.WorldNormal;
+    GBuffer.Roughness = GetRayTracingClearCoatApproximateRoughness(GBuffer);
+	GBuffer.Roughness = ApplySmoothBias(GBuffer.Roughness, ReflectionSmoothBias);
+
+    float3 V = -CameraDirection;
+
+	Reservoir state = Reservoir::Empty();
+	if ( bIsValidPixel) 
+    {
+        Reservoir curSample = Reservoir::Load(ReadReservoirData(DispatchThreadId, 0));
+
+        int historyLimit = min(Reservoir::MaxM,MaxTemporalHistory * curSample.M);
+        // state.CombineReservoirs(curSample, /* random = */ 0.5, curSample.targetPdf,curSample.sourcePdf);
+        state = curSample;
+        // Backproject this pixel to last frame
+
+        // start by just using our sample position
+        int2 prevPos = PixelCoord;
+        float ExpectedPrevLinearDepth = GBuffer.Depth;
+
+        float2 ViewUV = (float2(PixelCoord) + 0.5) * View.ViewSizeAndInvSize.zw;
+        float4 NDC = float4(ViewUV * float2(2, -2) + float2(-1, 1), DeviceZ, 1);
+
+    #if GBUFFER_HAS_VELOCITY && 0
+        // Some objects can get marked as not having velocities, which leads to DecodeGBuffer zeroing them
+        // This appears to be errant under some conditions, so overriding the rejection produces better results
+        GBuffer.Velocity = GBufferVelocityTexture.Load(int3(PixelCoord, 0));
+    #endif
+        if (GBuffer.Velocity.x > 0.0)
+        {
+            float2 Velocity = DecodeVelocityFromTexture(GBuffer.Velocity).xy;
+            float2 PrevNDC = NDC.xy - Velocity;
+            float2 PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+            prevPos = PrevUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy;
+            ExpectedPrevLinearDepth = ConvertFromDeviceZ(DeviceZ - DecodeVelocityFromTexture(GBuffer.Velocity).z);
+        }
+        else
+        {
+            float4 PrevNDC = mul(NDC, View.ClipToPrevClip);
+            PrevNDC.xyz /= PrevNDC.w;
+            float2 PrevUV = (PrevNDC.xy * float2(1, -1) + 1) * 0.5;
+            prevPos = PrevUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy;
+
+            ExpectedPrevLinearDepth = ConvertFromDeviceZ(PrevNDC.z);
+        }
+
+        const float AngleOffset = ((View.StateFrameIndex + 7) * 11) % 32 * 2 * PI;
+
+        for (uint SampleIndex = 0; SampleIndex < 1  && state.M < MaxTemporalHistory; ++SampleIndex)
+        {
+            const float Angle = (SampleIndex + AngleOffset) * GOLDEN_ANGLE;
+            const float OffsetRadius = sqrt(float(((SampleIndex - 1) + View.StateFrameIndex) & 3) + 1) * clamp(MaxTemporalHistory - state.M, 1, MaxTemporalHistory); // TODO: keep high in noisy situation
+            const float2 PixelOffsetBase = float2(cos(Angle), sin(Angle)) * OffsetRadius;
+            const int2 PixelOffset = SampleIndex == 0 ? int2(0, 0) : int2(PixelOffsetBase);
+            // const float4 reproj = ReprojectionMap[PixelCoord + Offset * 2];
+	        int2 idx = prevPos + PixelOffset;
+
+            float PrevDepth = ConvertFromDeviceZ(DepthHistory.Load(int3(idx, 0)).r);
+            float3 PrevWorldNormal = normalize(DecodeNormal(NormalHistory.Load(int3(idx, 0)).xyz));
+
+            // TODO: refine sample rejection tests
+            if (dot(GBuffer.WorldNormal, PrevWorldNormal) < 0.5)
+            {
+                continue;
+            }
+
+            if (abs(ExpectedPrevLinearDepth - PrevDepth) / ExpectedPrevLinearDepth > 0.1)
+            {
+                continue;
+            }
+
+            prevPos = idx;
+
+            uint2 prePosId = uint2(prevPos / UpscaleFactor + 0.5);
+            if( any(prePosId > ReservoirBufferDim.xy) || any(prePosId) < 0)
+                continue;
+            Reservoir prevSample = Reservoir::Load(ReadReservoirHistoryData(prePosId, 0));
+            prevSample.M = min(prevSample.M, historyLimit);
+            // prevSample.M = max(0, min(prevSample.M, exp2(log2(MaxTemporalHistory) * 1.0 ) ));
+
+            const float a2 = max(1e-5, Pow4(GBuffer.Roughness));
+
+            float3 SampleL = prevSample.sampleRef.Position - WorldPosition;
+            const float3 SampleH = normalize(V + SampleL);
+			const float SampleNoH = max(0, dot(WorldNormal, SampleH));
+
+            float PrevNdf = D_GGX(a2, SampleNoH);
+
+            const float t2 = D_GGX(a2, 0.99);
+
+            prevSample.M = min(prevSample.M, MaxTemporalHistory * smoothstep(0.005, 0.01, PrevNdf));
+
+			float Visible = 1.0;
+            
+            // float3 OffsetB = prevSample.sampleRef.Position - prevSample.sampleRef.CreationPoint;
+            // float3 OffsetA = prevSample.sampleRef.Position - WorldPosition;
+            // // Discard back-face
+            // if (dot(WorldNormal, OffsetA) < 0 || any(isnan(OffsetA)) || any(isnan(OffsetB)))
+            // {
+            //     continue;
+            // }
+
+            // float pNewTN = Luminance(prevSample.sampleRef.Irradiance) * prevSample.sourcePdf ;
+
+            // float RB2 = dot(OffsetB, OffsetB);
+            // float RA2 = dot(OffsetA, OffsetA);
+            // OffsetB = normalize(OffsetB);
+            // OffsetA = normalize(OffsetA);
+
+            // float cosA = dot(WorldNormal, OffsetB);
+            // float cosB = dot(prevSample.sampleRef.CreationNormal, OffsetB);
+            // float cosPhiA = -dot(OffsetA, prevSample.sampleRef.Normal);
+            // float cosPhiB = -dot(OffsetB, prevSample.sampleRef.Normal);
+            // // Discard extreme samples to prevent fireflies
+            // if ( cosPhiB <= 0 || RA2 <= 0 || RB2 <= 0)
+            // {
+            //     continue;
+            // }
+            // float Jocbian = RB2 * max(0.0,cosPhiA) / max(1e-5, (RA2 * cosPhiB));
+            float Jocbian = 1.0;
+
+			// TODO: finish the derivations, don't perspective-project for every sample.
+            const float3 SurfaceOffset = prevSample.sampleRef.CreationPoint - WorldPosition;
+
+			const float3 RayMarchDir = prevSample.sampleRef.Position - WorldPosition;
+			const float3 RayMarchEnd = WorldPosition + RayMarchDir * min(1.0, length(SurfaceOffset) / length(RayMarchDir));
+
+			float4 RayHitClipPos = mul(float4(RayMarchEnd, 1), View.WorldToClip);
+			float3 RayHitScreenPos = RayHitClipPos.xyz / RayHitClipPos.w;
+			float2 RayMarchHitUv = RayHitScreenPos.xy * View.ScreenPositionScaleBias.xy + View.ScreenPositionScaleBias.wz;
+			uint2 HitPixelCoord = RayMarchHitUv * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy;
+			const float2 RaymarchLenPx = HitPixelCoord - PixelCoord;
+
+			const uint MIN_PX_PER_STEP = 2;
+			const uint MAX_TAPS = 2;
+
+			const int StepCount = min(MAX_TAPS, int(floor(length(RaymarchLenPx) / MIN_PX_PER_STEP)));
+
+			// Depth values only have the front; assume a certain thickness.
+			const float Z_LAYER_THICKNESS = 0.05;
+
+			for (int k = 0; k < StepCount; ++k) 
+			{
+			    const float t = (k + 0.5) / StepCount;
+			    const float3 InterpPos = lerp(WorldPosition, RayMarchEnd, t);
+			    float4 InterpClipPos = mul(float4(InterpPos, 1), View.WorldToClip);
+			    InterpClipPos.xyz /= InterpClipPos.w;
+				float2 RayMarchUV = InterpClipPos.xy * View.ScreenPositionScaleBias.xy + View.ScreenPositionScaleBias.wz;
+			    const float DepthAtInterp = DepthHistory.SampleLevel(GlobalPointClampedSampler, RayMarchUV, 0);
+			    if (DepthAtInterp > InterpClipPos.z * 1.001) 
+			        Visible *= smoothstep(0, Z_LAYER_THICKNESS, abs( max(1e-20,InterpClipPos.z) /max(1e-20,DepthAtInterp) ) -1.0 );
+			}
+            if (prevSample.sampleRef.IsValid())
+            {
+                float pNewTN = Luminance(prevSample.sampleRef.Irradiance) * prevSample.sourcePdf;
+            
+                state.CombineReservoirs(prevSample, RandomSequence_GenerateSample1D(RandSequence), Visible * pNewTN * Jocbian, prevSample.sourcePdf);
+            }
+		}
+		// state.FinalizeResampling(1, state.M);
+
+    //     for (uint SampleIndex = 1; SampleIndex <= 5 && state.M < MaxTemporalHistory; ++SampleIndex) 
+    //     {
+    //         const float Angle = (SampleIndex + AngleOffset) * GOLDEN_ANGLE;
+    //         const float OffsetRadius = sqrt(float(((SampleIndex - 1) + View.StateFrameIndex + 1) & 3) + 1) * 7;
+    //         const float2 PixelOffsetBase = float2(cos(Angle), sin(Angle)) * OffsetRadius;
+    //         const int2 PixelOffset = SampleIndex == 0 ? int2(0, 0) : int2(PixelOffsetBase);
+    //         const int2 SampleCoord = PixelCoord + PixelOffset;
+
+    //         if (any(SampleCoord < 0) || any(SampleCoord >= View.BufferSizeAndInvSize.xy) || all(SampleCoord == PixelCoord))
+    //         {
+    //             continue;
+    //         }
+
+    //         // Read adjacent GBuffer data
+	// 		const float2 SampledBufferUV = (SampleCoord + 0.5) * View.BufferSizeAndInvSize.zw;
+    //         FGBufferData AdjGBuffer = GetGBufferDataFromSceneTextures(SampledBufferUV);
+    //         float AdjDeviceZ = SceneDepthTexture.Load(int3(SampleCoord, 0)).r;
+    //         float3 AdjWorldPosition;
+    //         float3 AdjCameraDirection;
+    //         ReconstructWorldPositionAndCameraDirectionFromDeviceZ(SampleCoord, AdjDeviceZ, AdjWorldPosition, AdjCameraDirection);
+
+    //         // TODO: refine sample rejection tests
+    //         if (dot(GBuffer.WorldNormal, AdjGBuffer.WorldNormal) < 0.5)
+    //         {
+    //             continue;
+    //         }
+
+    //         if (abs(GBuffer.Depth - AdjGBuffer.Depth) / GBuffer.Depth > 0.1)
+    //         {
+    //             continue;
+    //         }
+
+    //         if (GBuffer.ShadingModelID != AdjGBuffer.ShadingModelID)
+    //         {
+    //             continue;
+    //         }
+    //         uint2 samplePosID = uint2(SampleCoord / (UpscaleFactor) + 0.5);
+    //         if( any(samplePosID > ReservoirBufferDim.xy ) || any(samplePosID) < 0)
+    //             continue;
+    //         Reservoir neighborSample = Reservoir::Load(ReadReservoirData(samplePosID, 0));
+    //         neighborSample.M = min(neighborSample.M, 500);
+    //         // Load that neighbor's RIS state, do resampling
+    //         if (neighborSample.sampleRef.IsValid())
+    //         {			
+    //             //ToDo - does this need to be a permutation?
+    //             float Visible = 1.0;
+    // // #if (VISIBILITY_BEFORE_COMBINE)
+    // //             if (ApplyApproximateVisibilityTest)
+    // //             {
+    // //                 Visible = CheckApproximateVisibility(SampleCoord, DeviceZ, WorldPosition, GBuffer, neighborSample.sampleRef);
+    // //             }
+    // // #endif
+    //     		// const float3 surface_offset_vs = neighborSample.sampleRef.CreatePoint - WorldPosition;
+
+    //             //float neighborWeight = Visible ? GetApproximateLightSampleWeight(WorldPosition, CameraDirection, GBuffer, neighborSample.sampleRef) : 0;
+    //             // float3 OffsetB = neighborSample.sampleRef.Position - neighborSample.sampleRef.CreationPoint;
+    //             // float3 OffsetA = neighborSample.sampleRef.Position - WorldPosition;
+    //             // // Discard back-face
+    //             // if (dot(WorldNormal, OffsetA) < 0 || any(isnan(OffsetA)) || any(isnan(OffsetB)))
+    //             // {
+    //             //     continue;
+    //             // }
+    //             // float RB2 = dot(OffsetB, OffsetB);
+    //             // float RA2 = dot(OffsetA, OffsetA);
+    //             // OffsetB = normalize(OffsetB);
+    //             // OffsetA = normalize(OffsetA);
+
+    //             // float cosA = dot(WorldNormal, OffsetB);
+    //             // float cosB = dot(neighborSample.sampleRef.CreationNormal, OffsetB);
+    //             // float cosPhiA = -dot(OffsetA, neighborSample.sampleRef.Normal);
+    //             // float cosPhiB = -dot(OffsetB, neighborSample.sampleRef.Normal);
+    //             // // Discard extreme samples to prevent fireflies
+    //             // if ( cosPhiB <= 0 || RA2 <= 0 || RB2 <= 0)
+    //             // {
+    //             //     continue;
+    //             // }
+    //             // float Jocbian = RB2 * max(0.0,cosPhiA) / max(1e-5, (RA2 * cosPhiB));
+    //             float pNewTN = Luminance(neighborSample.sampleRef.Irradiance)  ;
+    //             float Jocbian = 1.0;
+    //             float neighborWeight = Visible ?  pNewTN * Jocbian : 0;
+    //             state.CombineReservoirs(neighborSample,  RandomSequence_GenerateSample1D(RandSequence), neighborWeight, neighborSample.sourcePdf);
+    //         }
+    //     }
+        state.FinalizeResampling(1, state.M);
+    }
+
+    WriteReservoirData(DispatchThreadId, 0, state.Store());
+}
+
+#endif

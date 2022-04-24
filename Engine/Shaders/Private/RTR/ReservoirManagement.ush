@@ -1,0 +1,292 @@
+#pragma once
+
+// Code for managing reads/writes to reservoirs
+
+struct PackedReservoir
+{
+	// Internal compressed GI sample data
+	uint4 CreationGeometry;
+	uint4 HitGeometry;
+	uint4 LightInfo;
+
+	float4 PdfInfo;
+};
+
+RWStructuredBuffer<PackedReservoir> RWRTReservoirUAV;
+uint3 ReservoirBufferDim;
+
+RWStructuredBuffer<PackedReservoir> RWRTReservoirHistoryUAV;
+StructuredBuffer<PackedReservoir> RTReservoirHistory;
+uint3 ReservoirHistoryBufferDim;
+
+uint ComputeReservoirAddress(int2 PixelCoord, int Slice, uint3 BufferDim)
+{
+	// static const uint TileSize = 4;
+	// const uint RowStride = (BufferDim.x / TileSize) * TileSize * TileSize;
+
+	// int2 Tile = PixelCoord / TileSize;
+	// int2 TileCoord = PixelCoord % TileSize;
+
+	// uint Address = Slice * BufferDim.x * BufferDim.y; 
+	// Address += Tile.y * RowStride;
+	// Address += Tile.x * TileSize * TileSize;
+	// Address += TileCoord.y * TileSize + TileCoord.x;
+	uint Address = Slice * BufferDim.x * BufferDim.y; 
+	Address += PixelCoord.y * BufferDim.x;
+	Address += PixelCoord.x;
+	return Address;
+}
+
+PackedReservoir ReadReservoirData(int2 PixelCoord, int Slice)
+{
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirBufferDim) ;
+	return RWRTReservoirUAV[Address];
+}
+
+PackedReservoir ReadReservoirHistoryData(int2 PixelCoord, int Slice)
+{
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirHistoryBufferDim) ;
+	return RTReservoirHistory[Address];
+}
+
+void WriteReservoirData(int2 PixelCoord, int Slice,in PackedReservoir Value)
+{
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirBufferDim) ;
+	RWRTReservoirUAV[Address] = Value; //0
+}
+
+void WriteReservoirHistoryData(int2 PixelCoord, int Slice,in PackedReservoir Value)
+{
+	uint Address = ComputeReservoirAddress(PixelCoord, Slice, ReservoirHistoryBufferDim) ;
+
+	RWRTReservoirHistoryUAV[Address] = Value;
+}
+
+uint2 PackIrradiance(float3 Irradiance, float M)
+{
+	uint2 Packed = (uint2)0;
+
+	// Note: Consider keeping Lumiance(Y) in full range
+	Packed.x = f32tof16(Irradiance.x) | (f32tof16(Irradiance.y) << 16);
+	Packed.y = f32tof16(Irradiance.z) | (f32tof16(M) << 16);
+	return Packed;
+}
+
+void UnpackIrradiance(uint2 Irradiance, out float3 Unpacked, out float M)
+{
+	Unpacked.x = f16tof32(Irradiance.x & 0xffff);
+	Unpacked.y = f16tof32(Irradiance.x >> 16);
+	Unpacked.z = f16tof32(Irradiance.y & 0xffff);
+	M          = f16tof32(Irradiance.y >> 16);
+}
+
+uint PackNormal(float3 Normal)
+{
+	float alpha = 0;
+	if ((Normal.x != 0 || Normal.y != 0))
+	{
+		alpha = atan2(Normal.y, Normal.x);
+	}
+	return f32tof16(alpha) | (f32tof16(Normal.z) << 16);
+}
+
+float3 UnpackNormal(uint PackedNormal)
+{
+	float z = f16tof32(PackedNormal >> 16);
+	float alpha = f16tof32(PackedNormal & 0xffff);
+	float r = sqrt(abs(1 - z * z));
+	return float3(cos(alpha) * r, sin(alpha) * r, z);
+}
+
+
+struct SampleRef
+{
+	// Internal compressed GI sample data
+	float3 CreationPoint;
+	float3 CreationNormal;
+	float3 Position;
+	float3 Normal;
+	float3 Irradiance;
+	uint   Valid;
+
+	bool IsValid()
+	{
+		return Valid > 0;
+	}
+
+	static SampleRef Invalid()
+	{
+		SampleRef s = (SampleRef)0;
+		s.Valid = 0;
+		s.Irradiance = 0;
+		
+		s.CreationPoint = 0;
+		s.CreationNormal = 0;
+		s.Position = 0;
+		s.Normal = 0;
+		return s;
+	}
+
+	static SampleRef Create(float3 samPos, float3 samNormal, float3 visPos, float3 visNormal)
+	{
+		SampleRef s;
+		s.CreationPoint = visPos;
+		s.CreationNormal = visNormal;
+		s.Position = samPos;
+		s.Normal = samNormal;
+		s.Valid = 1;
+		return s;
+	}
+};
+
+// Use 24-bit unsigned float to enable extra precision and keep the reservior in a single 128-bit quantity
+#define CUSTOM_FLOAT 1
+#define RESTIR_RESERVOIR_W_CLAMP 5.0
+struct Reservoir
+{
+	static const uint MaxM = 0xffff;
+
+	SampleRef sampleRef;
+	float weightSum;
+	float targetPdf;
+	float sourcePdf;
+	uint M;
+
+	static Reservoir Empty()
+	{
+		Reservoir s;
+		s.sampleRef = SampleRef::Invalid();
+		s.targetPdf = 0;
+		s.weightSum = 0;
+		s.sourcePdf = 0.0;
+		s.M = 0;
+		return s;
+	}
+
+	static Reservoir Load(PackedReservoir data)
+	{
+		Reservoir res;
+		uint4 CreationGeometry = data.CreationGeometry;
+		res.sampleRef.CreationPoint = asfloat(CreationGeometry.xyz);
+		res.sampleRef.CreationNormal = UnpackNormal(CreationGeometry.w);
+
+		uint4 HitGeometry = data.HitGeometry;
+		res.sampleRef.Position = asfloat(HitGeometry.xyz);
+		res.sampleRef.Normal = UnpackNormal(HitGeometry.w);
+
+		uint4 LightInfo = data.LightInfo;
+		// UnpackIrradiance(LightInfo.xy, res.sampleRef.Irradiance, res.M);
+		res.sampleRef.Irradiance = asfloat(LightInfo.xyz);
+		res.M = LightInfo.w;
+		res.sampleRef.Valid = res.M ;
+
+		// res.weightSum = asfloat(LightInfo.z );
+		// res.sourcePdf = f16tof32(LightInfo.w);
+		// res.targetPdf = f16tof32(LightInfo.w >> 16);
+		// res.targetPdf =  asfloat(LightInfo.w );
+
+		res.weightSum = (data.PdfInfo.x);
+		res.targetPdf = (data.PdfInfo.y);
+		res.sourcePdf = (data.PdfInfo.z);
+
+		// Discard reservoirs that have Inf/NaN
+		if (isinf(res.weightSum) || isnan(res.weightSum)) {
+			res = Empty();
+		}
+
+		return res;
+	}
+
+	PackedReservoir Store()
+	{
+		PackedReservoir data;
+		uint4 CreationGeometry;
+		CreationGeometry.xyz = asuint(sampleRef.CreationPoint);
+		CreationGeometry.w = PackNormal(sampleRef.CreationNormal);
+		data.CreationGeometry = CreationGeometry;
+
+		uint4 HitGeometry;
+		HitGeometry.xyz = asuint(sampleRef.Position);
+		HitGeometry.w = PackNormal(sampleRef.Normal);
+		data.HitGeometry = HitGeometry;
+
+		uint4 LightInfo;
+		// LightInfo.xy = PackIrradiance(sampleRef.Irradiance, M);
+		// LightInfo.z = asuint(weightSum);
+		LightInfo.xyz = asuint(sampleRef.Irradiance);
+		LightInfo.w = M;
+
+		// LightInfo.w = asuint(targetPdf);
+		// LightInfo.w = f32tof16(sourcePdf) | (f32tof16(targetPdf) << 16);
+		float4 PdfInfo;
+
+		PdfInfo.x = (weightSum);
+		PdfInfo.y = (targetPdf);
+		PdfInfo.z = (sourcePdf);
+		PdfInfo.w = 0.0;
+		data.LightInfo = LightInfo;
+		data.PdfInfo = PdfInfo;
+
+		return data;
+	}
+
+	void FinalizeResampling(float normalizationNumerator, float normalizationDenominator)
+	{
+		float denominator = targetPdf * normalizationDenominator;
+
+		weightSum = (denominator == 0.0) ? 0.0 : (weightSum * normalizationNumerator) / denominator;
+		weightSum = min(weightSum, RESTIR_RESERVOIR_W_CLAMP);
+	}
+
+	bool StreamSample(SampleRef newSampleRef, float random, float newTargetPdf, float invSourcePdf)
+	{
+		// What's the current weight
+		float risWeight = newTargetPdf * invSourcePdf;
+
+		// Add one sample to the counter
+		M += 1;
+
+		// Update the weight sum
+		weightSum += risWeight;
+
+		// Decide if we will randomly pick this sample
+		bool selectSample = (random * weightSum <= risWeight);
+
+		// If we did select this sample, update the relevant data.
+		// New samples don't have visibility or age information, we can skip that.
+		if (selectSample)
+		{
+			sampleRef = newSampleRef;
+			targetPdf = newTargetPdf;
+			sourcePdf = 1.0 / invSourcePdf;
+		}
+
+		return selectSample;
+	}
+
+	bool CombineReservoirs(Reservoir newReservoir, float random, float newTargetPdf, float newSourcePdf)
+	{
+		// What's the current weight (times any prior-step RIS normalization factor)
+		float risWeight = newTargetPdf * newReservoir.weightSum * newReservoir.M;
+
+		// Our *effective* candidate pool is the sum of our candidates plus those of our neighbors
+		M += newReservoir.M;
+
+		// Update the weight sum
+		weightSum += risWeight;
+
+		// Decide if we will randomly pick this sample
+		bool selectSample = (random * weightSum <= risWeight);
+
+		// If we did select this sample, update the relevant data
+		if (selectSample)
+		{
+			sampleRef = newReservoir.sampleRef;
+			targetPdf = newTargetPdf;
+			sourcePdf = newSourcePdf;
+		}
+
+		return selectSample;
+	}
+
+};

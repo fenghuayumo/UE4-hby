@@ -13,7 +13,8 @@ struct FRayTracingReflectionOptions
 	{
 		BruteForce,
 		Sorted,
-		SortedDeferred
+		SortedDeferred,
+		Restir,
 	};
 
 	bool bEnabled = true;
